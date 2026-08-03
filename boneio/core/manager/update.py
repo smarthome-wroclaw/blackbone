@@ -635,7 +635,7 @@ class UpdateManager(AsyncUpdater):
     ) -> tuple[list[str], str, bool]:
         """Build a shell-free pip command for standard or one-off updates."""
         pip_package = install_target or (
-            f"boneio=={target_version}" if target_version else "boneio"
+            f"blackbone=={target_version}" if target_version else "blackbone"
         )
         needs_pre = install_target is None and (
             bool(target_version and cls._is_prerelease_version(target_version))

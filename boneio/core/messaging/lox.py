@@ -1,7 +1,7 @@
 """Lox UDP Client for BoneIO.
 
-Implements the Loxone UDP protocol for bidirectional communication
-between BoneIO and a Loxone Miniserver:
+Implements the Lox UDP protocol for bidirectional communication
+between BoneIO and a Lox Miniserver:
 
 - Receiving commands from Miniserver (e.g. "OUT_04=ON")
 - Sending state feedback to Miniserver (e.g. "OUT_04=ON", "cover1=50")
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Entity types whose state changes should be forwarded to Loxone
+# Entity types whose state changes should be forwarded to Lox
 _LOX_ENTITY_TYPES = frozenset(("output", "cover", "sensor", "event", "binary_sensor", "input"))
 
 
@@ -95,7 +95,7 @@ class LoxUDPClient(MessageBus):
 
     This message bus translates between BoneIO's internal MQTT-style
     topic/payload model and the simple "key=value" UDP protocol
-    expected by Loxone Miniserver.
+    expected by Lox Miniserver.
 
     Outgoing (BoneIO → Miniserver):
         topic "boneio/{serial}/output/relay1" + payload {"state": "ON"}
@@ -117,7 +117,7 @@ class LoxUDPClient(MessageBus):
 
         Args:
             config_helper: BoneIO configuration helper.
-            host: Loxone Miniserver IP address.
+            host: Lox Miniserver IP address.
             send_port: Port on Miniserver to send state feedback to.
             listen_port: Port BoneIO listens on for commands from Miniserver.
         """
@@ -137,7 +137,7 @@ class LoxUDPClient(MessageBus):
         retain: bool = False,
         qos: int = 0,
     ) -> None:
-        """Send a state update to Loxone Miniserver via UDP.
+        """Send a state update to Lox Miniserver via UDP.
 
         Converts BoneIO's MQTT-style topic/payload into a simple UDP
         datagram in the format "device_id=state_value".
@@ -196,7 +196,7 @@ class LoxUDPClient(MessageBus):
         if not state_value:
             return
 
-        self._send_udp(device_id, state_value)
+        self.send_udp(device_id, state_value)
 
     @staticmethod
     def _extract_state_value(
@@ -223,8 +223,8 @@ class LoxUDPClient(MessageBus):
             return payload.decode("utf-8")
         return str(payload)
 
-    def _send_udp(self, device_id: str, state_value: str) -> None:
-        """Send a UDP datagram to Loxone Miniserver.
+    def send_udp(self, device_id: str, state_value: str) -> None:
+        """Send a UDP datagram to Lox Miniserver.
 
         Args:
             device_id: Entity identifier (e.g. "relay1", "cover1").
@@ -321,7 +321,7 @@ class LoxUDPClient(MessageBus):
         executes the command (ON/OFF/TOGGLE) directly on the entity.
 
         Falls back to case-insensitive lookup if exact match fails, since
-        Loxone may alter the casing of device identifiers.
+        Lox may alter the casing of device identifiers.
 
         Args:
             device: Device identifier from UDP message (e.g. "OUT_10").

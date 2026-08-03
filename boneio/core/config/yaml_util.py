@@ -797,6 +797,13 @@ class CustomValidator(Validator):
             if len(all_ids) != len(set(all_ids)):
                 self._error(field, "Output IDs are not unique.")  # type: ignore[attr-defined]
 
+    def _check_with_mqtt_bridge_device_id_uniqueness(self, field, value):
+        """Check that Lox MQTT bridge device IDs are unique."""
+        if value is not None:
+            all_ids = [mapping.get("device_id") for mapping in value if mapping.get("device_id")]
+            if len(all_ids) != len(set(all_ids)):
+                self._error(field, "MQTT bridge device IDs are not unique.")  # type: ignore[attr-defined]
+
     def _check_with_output_id_exists(self, field, value):
         """Check if output id exists or boneio_output is provided."""
         if value:

@@ -64,3 +64,6 @@ class MessageBus(ABC):
         """Unsubscribe from a topic and stop listening."""
         pass
 
+    async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
+        """Temporarily observe topics matching a filter, if supported."""
+        return []

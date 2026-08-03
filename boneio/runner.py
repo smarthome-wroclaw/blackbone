@@ -211,6 +211,12 @@ async def async_run(
             listen_port=lox_config.get("listen_port", 4445),
         )
         message_bus.add_bus(lox_bus)
+        mappings = lox_config.get("mqtt_bridge")
+        if mappings:
+            from boneio.core.messaging.lox_mqtt_bridge import LoxMqttBridge
+
+            lox_mqtt_bridge = LoxMqttBridge(message_bus, lox_bus, mappings)
+            await lox_mqtt_bridge.start()
 
     # Lox UDP doesn't provide internal loopback routing like MQTT broker does.
     # Therefore, if MQTT is not enabled, we MUST use LocalMessageBus to route

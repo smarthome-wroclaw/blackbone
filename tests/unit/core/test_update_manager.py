@@ -212,9 +212,9 @@ class TestPipInstallCommand:
             "install",
             "--upgrade",
             "--pre",
-            "boneio==1.7.0.dev1",
+            "blackbone==1.7.0.dev1",
         ]
-        assert package == "boneio==1.7.0.dev1"
+        assert package == "blackbone==1.7.0.dev1"
         assert needs_pre is True
 
     def test_uses_custom_target_as_one_argument(self):

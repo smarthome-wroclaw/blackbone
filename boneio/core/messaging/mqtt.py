@@ -57,6 +57,7 @@ class MQTTClient(MessageBus):
         self._connection_established = False
         self.publish_queue: UniqueQueue = UniqueQueue()
         self._mqtt_energy_listeners: dict[str, Callable[[str, str], Awaitable[None]]] = {}
+        self._topic_discovery_sessions: dict[str, list[set[str]]] = {}
         self._discovery_topics = (
             [
                 f"{self._config_helper.ha_discovery_prefix}/{ha_type}/{self._config_helper.serial_number}/#"
@@ -152,6 +153,43 @@ class MQTTClient(MessageBus):
     async def unsubscribe_and_stop_listen(self, topic: str) -> None:
         await self.unsubscribe([topic])
         del self._mqtt_energy_listeners[topic]
+
+    async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
+        """Temporarily collect concrete topics matching an MQTT filter."""
+        discovered: set[str] = set()
+        sessions = self._topic_discovery_sessions.setdefault(topic_filter, [])
+        first_session = not sessions
+        sessions.append(discovered)
+
+        try:
+            persistent_subscription = (
+                topic_filter in self._topics
+                or topic_filter in self._mqtt_energy_listeners
+                or topic_filter in self._discovery_topics
+            )
+            if self._connection_established and first_session and not persistent_subscription:
+                await self.subscribe(topics=[topic_filter])
+            await asyncio.sleep(timeout)
+        finally:
+            sessions.remove(discovered)
+            if not sessions:
+                self._topic_discovery_sessions.pop(topic_filter, None)
+                has_persistent_subscription = (
+                    topic_filter in self._topics
+                    or topic_filter in self._mqtt_energy_listeners
+                    or topic_filter in self._discovery_topics
+                )
+                if self._connection_established and not has_persistent_subscription:
+                    try:
+                        await self.unsubscribe([topic_filter])
+                    except MqttError as exc:
+                        _LOGGER.warning(
+                            "Failed to unsubscribe MQTT topic discovery filter %s: %s",
+                            topic_filter,
+                            exc,
+                        )
+
+        return sorted(discovered)
 
     async def unsubscribe(
         self,
@@ -303,7 +341,12 @@ class MQTTClient(MessageBus):
             cancel_task = asyncio.create_task(wait_for_cancel())
             tasks.add(cancel_task)
 
-            topics = self._topics + list(self._mqtt_energy_listeners.keys()) + self._discovery_topics
+            topics = (
+                self._topics
+                + list(self._mqtt_energy_listeners.keys())
+                + list(self._topic_discovery_sessions.keys())
+                + self._discovery_topics
+            )
             await self.subscribe(topics=topics)
 
             # Wait for everything to complete (or fail due to, e.g., network errors).
@@ -322,10 +365,20 @@ class MQTTClient(MessageBus):
         async for message in messages:
             payload = message.payload.decode()
             callback_start = True
+            concrete_topic = str(message.topic)
+            matches_persistent_topic = any(
+                message.topic.matches(topic_filter) for topic_filter in self._topics
+            )
+            for topic_filter, sessions in list(self._topic_discovery_sessions.items()):
+                if message.topic.matches(topic_filter):
+                    if not matches_persistent_topic:
+                        callback_start = False
+                    for discovered in sessions:
+                        discovered.add(concrete_topic)
             for discovery_topic in self._discovery_topics:
                 if message.topic.matches(discovery_topic):
                     callback_start = False
-                    topic = str(message.topic)
+                    topic = concrete_topic
                     if (
                         message.payload
                         and not self._config_helper.is_topic_in_autodiscovery(
@@ -343,7 +396,7 @@ class MQTTClient(MessageBus):
                 if message.topic.matches(topic):
                     callback_start = False
                     try:
-                        await listener_callback(str(message.topic), payload)
+                        await listener_callback(concrete_topic, payload)
                     except Exception as exc:
                         _LOGGER.error(
                             "Error in MQTT listener callback for topic %s: %s",
@@ -356,4 +409,4 @@ class MQTTClient(MessageBus):
                     message.topic,
                     payload,
                 )
-                await callback(str(message.topic), payload)
+                await callback(concrete_topic, payload)

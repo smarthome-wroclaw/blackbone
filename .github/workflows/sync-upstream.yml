@@ -1,0 +1,265 @@
+name: Sync upstream repository
+
+on:
+  schedule:
+    # Run daily at 08:00 UTC.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: ${{ vars.UPSTREAM_REPOSITORY || 'boneIO-eu/app_black' }}
+  SOURCE_BRANCH: ${{ vars.UPSTREAM_BRANCH || 'dev-debian13' }}
+  TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+
+jobs:
+  create-sync-pr:
+    name: Create upstream sync PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out target repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid UPSTREAM_REPOSITORY: $SOURCE_REPOSITORY" >&2
+            exit 1
+          fi
+          if [[ ! "$SOURCE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$SOURCE_BRANCH" == -* ]]; then
+            echo "Invalid UPSTREAM_BRANCH: $SOURCE_BRANCH" >&2
+            exit 1
+          fi
+
+      - name: Stop if another sync PR is open
+        id: existing-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          open_pr=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$TARGET_BRANCH" \
+            --state open \
+            --json number,url,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("automation/upstream-sync/"))][0] // empty')
+
+          if [[ -n "$open_pr" ]]; then
+            pr_number=$(jq -r '.number' <<<"$open_pr")
+            pr_url=$(jq -r '.url' <<<"$open_pr")
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "An upstream sync PR is already open: #${pr_number} (${pr_url})"
+            echo "### Upstream sync skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "An earlier sync batch is still open: [#${pr_number}](${pr_url})." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch upstream and select batch
+        if: steps.existing-pr.outputs.skip != 'true'
+        id: batch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_url="${GITHUB_SERVER_URL}/${SOURCE_REPOSITORY}.git"
+          git remote add source "$source_url"
+          git fetch --no-tags source "+refs/heads/${SOURCE_BRANCH}:refs/remotes/source/${SOURCE_BRANCH}"
+
+          source_sha=$(git rev-parse "refs/remotes/source/${SOURCE_BRANCH}")
+          state_file=.github/upstream-sync-state.json
+
+          if [[ -f "$state_file" ]]; then
+            state_repository=$(jq -er '.repository' "$state_file")
+            state_branch=$(jq -er '.branch' "$state_file")
+            base_sha=$(jq -er '.commit' "$state_file")
+
+            if [[ "$state_repository" != "$SOURCE_REPOSITORY" ]] || [[ "$state_branch" != "$SOURCE_BRANCH" ]]; then
+              echo "The sync state belongs to ${state_repository}:${state_branch}, not ${SOURCE_REPOSITORY}:${SOURCE_BRANCH}." >&2
+              echo "Update or remove ${state_file} explicitly when changing the upstream source." >&2
+              exit 1
+            fi
+            if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid commit in ${state_file}: ${base_sha}." >&2
+              exit 1
+            fi
+            if ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+              echo "The recorded upstream commit does not exist: ${base_sha}." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$base_sha" "$source_sha"; then
+              echo "Recorded commit ${base_sha} is not an ancestor of ${SOURCE_REPOSITORY}:${SOURCE_BRANCH}." >&2
+              echo "The upstream branch may have been rewritten; review the sync state manually." >&2
+              exit 1
+            fi
+          else
+            # Bootstrap repositories that already share history with upstream.
+            base_sha=$(git merge-base HEAD "$source_sha")
+          fi
+
+          # Every run takes all changes currently available in upstream. A merge
+          # made upstream remains atomic, and all of its commits are enumerated
+          # in the generated PR body below.
+          pending_count=$(git rev-list --first-parent --count "${base_sha}..${source_sha}")
+
+          if (( pending_count == 0 )); then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "Target is already up to date with ${SOURCE_REPOSITORY}:${SOURCE_BRANCH}."
+            echo "### Upstream sync" >> "$GITHUB_STEP_SUMMARY"
+            echo "No new commits in \`${SOURCE_REPOSITORY}:${SOURCE_BRANCH}\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          batch_end=$source_sha
+          first_parent_count=$pending_count
+          included_count=$(git rev-list --count "${base_sha}..${batch_end}")
+          base_short=$(git rev-parse --short=12 "$base_sha")
+          end_short=$(git rev-parse --short=12 "$batch_end")
+          sync_branch="automation/upstream-sync/${base_short}-${end_short}"
+
+          {
+            echo "has_changes=true"
+            echo "source_sha=$source_sha"
+            echo "base_sha=$base_sha"
+            echo "batch_end=$batch_end"
+            echo "base_short=$base_short"
+            echo "end_short=$end_short"
+            echo "sync_branch=$sync_branch"
+            echo "first_parent_count=$first_parent_count"
+            echo "included_count=$included_count"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apply selected upstream batch
+        if: steps.batch.outputs.has_changes == 'true'
+        env:
+          BASE_SHA: ${{ steps.batch.outputs.base_sha }}
+          BATCH_END: ${{ steps.batch.outputs.batch_end }}
+          SYNC_BRANCH: ${{ steps.batch.outputs.sync_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$SYNC_BRANCH"
+
+          # Apply the net change for the exact source range instead of depending
+          # on a particular GitHub merge strategy. The state file makes squash,
+          # rebase and merge-commit PRs advance to the same next batch.
+          patch_file="${RUNNER_TEMP}/upstream-sync.patch"
+          git diff --binary --full-index "$BASE_SHA" "$BATCH_END" > "$patch_file"
+          if [[ -s "$patch_file" ]] && ! git apply --3way --index "$patch_file"; then
+            echo "The selected range ${BASE_SHA}..${BATCH_END} conflicts with ${TARGET_BRANCH}." >&2
+            echo "Resolve the conflict manually, then rerun the workflow." >&2
+            exit 1
+          fi
+
+          mkdir -p .github
+          jq -n \
+            --arg repository "$SOURCE_REPOSITORY" \
+            --arg branch "$SOURCE_BRANCH" \
+            --arg commit "$BATCH_END" \
+            '{repository: $repository, branch: $branch, commit: $commit}' \
+            > .github/upstream-sync-state.json
+          git add .github/upstream-sync-state.json
+          git commit \
+            -m "chore(sync): upstream ${BASE_SHA:0:12}..${BATCH_END:0:12}" \
+            -m "Source: ${SOURCE_REPOSITORY}:${SOURCE_BRANCH}" \
+            -m "Range: ${BASE_SHA}..${BATCH_END} (from exclusive, to inclusive)"
+
+      - name: Build exact PR description
+        if: steps.batch.outputs.has_changes == 'true'
+        env:
+          BASE_SHA: ${{ steps.batch.outputs.base_sha }}
+          BATCH_END: ${{ steps.batch.outputs.batch_end }}
+          SOURCE_SHA: ${{ steps.batch.outputs.source_sha }}
+          INCLUDED_COUNT: ${{ steps.batch.outputs.included_count }}
+          FIRST_PARENT_COUNT: ${{ steps.batch.outputs.first_parent_count }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_web_url="${GITHUB_SERVER_URL}/${SOURCE_REPOSITORY}"
+          compare_url="${source_web_url}/compare/${BASE_SHA}...${BATCH_END}"
+
+          {
+            echo '<!-- upstream-sync-metadata'
+            echo "source_repository=${SOURCE_REPOSITORY}"
+            echo "source_branch=${SOURCE_BRANCH}"
+            echo "from_exclusive=${BASE_SHA}"
+            echo "to_inclusive=${BATCH_END}"
+            echo "source_tip_when_created=${SOURCE_SHA}"
+            echo '-->'
+            echo
+            echo '## Upstream sync batch'
+            echo
+            echo '| Field | Exact value |'
+            echo '| --- | --- |'
+            echo "| Source | [\`${SOURCE_REPOSITORY}:${SOURCE_BRANCH}\`](${source_web_url}/tree/${SOURCE_BRANCH}) |"
+            echo "| Range | \`${BASE_SHA}..${BATCH_END}\` (from exclusive, to inclusive) |"
+            echo "| Compare | [View the exact source diff](${compare_url}) |"
+            echo "| Source tip at creation | \`${SOURCE_SHA}\` |"
+            echo "| Included source commits | ${INCLUDED_COUNT} (${FIRST_PARENT_COUNT} on the first-parent chain) |"
+            echo '| Tracking | `.github/upstream-sync-state.json` advances to the inclusive end SHA |'
+            echo
+            echo '### Included source commits'
+            echo
+          } > upstream-sync-pr.md
+
+          while IFS=$'\t' read -r commit_sha subject; do
+            escaped_subject=${subject//|/\\|}
+            echo "- [\`${commit_sha}\`](${source_web_url}/commit/${commit_sha}) ${escaped_subject}" >> upstream-sync-pr.md
+          done < <(git log --reverse --format='%H%x09%s' "${BASE_SHA}..${BATCH_END}")
+
+          {
+            echo
+            echo '---'
+            echo 'This PR was generated automatically. Merge it before the next batch is opened.'
+          } >> upstream-sync-pr.md
+
+      - name: Push branch and create pull request
+        if: steps.batch.outputs.has_changes == 'true'
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.batch.outputs.sync_branch }}
+          BASE_SHORT: ${{ steps.batch.outputs.base_short }}
+          END_SHORT: ${{ steps.batch.outputs.end_short }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --heads origin "$SYNC_BRANCH" >/dev/null 2>&1; then
+            echo "Branch ${SYNC_BRANCH} already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+
+          git push origin "HEAD:refs/heads/${SYNC_BRANCH}"
+          pr_url=$(gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$TARGET_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "chore(sync): upstream ${BASE_SHORT}..${END_SHORT}" \
+            --body-file upstream-sync-pr.md)
+
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "### Upstream sync PR created" >> "$GITHUB_STEP_SUMMARY"
+          echo "${pr_url}" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Exact source range: \`${{ steps.batch.outputs.base_sha }}..${{ steps.batch.outputs.batch_end }}\`." >> "$GITHUB_STEP_SUMMARY"

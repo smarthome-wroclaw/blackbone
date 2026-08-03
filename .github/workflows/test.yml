@@ -2,10 +2,10 @@ name: Tests
 
 on:
   push:
-    branches: [dev-debian13]
+    branches: [main, dev-debian13]
     tags: ['v*']
   pull_request:
-    branches: [dev-debian13]
+    branches: [main, dev-debian13]
   workflow_call:
 
 jobs:
@@ -16,10 +16,10 @@ jobs:
         python-version: ["3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -28,6 +28,7 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov
           pip install -e . --no-deps || true
           pip install aiomqtt pydantic PyYAML colorlog Cerberus psutil aiohttp smbus2 pymodbus
+          pip install fastapi==0.118.0 "python-jose[cryptography]==3.5.0" python-multipart httpx
 
       - name: Run unit tests
         run: pytest tests/unit -v --tb=short -m "not hardware"
@@ -45,7 +46,7 @@ jobs:
   test-frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -67,7 +68,7 @@ jobs:
   # lint:
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v7
   #
   #     - name: Set up Python
   #       uses: actions/setup-python@v5

@@ -1,9 +1,8 @@
-"""Home Assistant Discovery, Loxone and Interlock helper routes for BoneIO Web UI."""
+"""Home Assistant Discovery, Lox and Interlock helper routes for BoneIO Web UI."""
 
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 
 from fastapi import HTTPException
@@ -125,19 +124,24 @@ async def get_interlock_groups():
 
 @router.get("/config/lox-template")
 async def get_lox_template():
-    """Generate and download Lox Config XML template."""
-    from boneio.integration.lox_template import generate_lox_template
+    """Generate and download standalone Lox Config templates in one ZIP."""
+    from boneio.integration.lox_template import (
+        build_lox_template_archive,
+        generate_lox_templates,
+        lox_template_archive_name,
+    )
 
     manager: Manager = _get_app_state().manager
 
     try:
-        xml_content = generate_lox_template(manager)
+        templates = generate_lox_templates(manager)
         serial = manager.config_helper.serial_number or "boneio"
-        filename = f"boneio_{serial}_lox_template.xml"
+        filename = lox_template_archive_name(serial)
+        archive = build_lox_template_archive(templates)
 
         return StreamingResponse(
-            io.BytesIO(xml_content.encode("utf-8")),
-            media_type="application/xml",
+            iter([archive]),
+            media_type="application/zip",
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
     except Exception as e:

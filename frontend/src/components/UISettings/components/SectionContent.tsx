@@ -5,7 +5,8 @@
 import { useTranslation } from '@/hooks/useTranslation';
 import ArrayTableWidget from '../ArrayTableWidget';
 import BoneIOForm from '../BoneIOForm';
-import MessagingProtocolsForm from '../MessagingProtocolsForm';
+import MqttProtocolForm from '../MqttProtocolForm';
+import LoxProtocolForm from '../LoxProtocolForm';
 import WebServerForm from '../WebServerForm';
 import ModbusForm from '../ModbusForm';
 import CANForm from '../CANForm';
@@ -129,12 +130,17 @@ function CustomFormContent({
       );
     case 'mqtt':
       return (
-        <MessagingProtocolsForm
-          mqttData={formData['mqtt']}
-          loxData={formData['lox_udp']}
-          onMqttChange={(data) => onSectionChange('mqtt', data)}
-          onLoxChange={(data) => onSectionChange('lox_udp', data)}
-          onLoxValidationChange={onLoxValidationChange}
+        <MqttProtocolForm
+          data={formData.mqtt}
+          onChange={(data) => onSectionChange('mqtt', data)}
+        />
+      );
+    case 'lox_udp':
+      return (
+        <LoxProtocolForm
+          data={formData.lox_udp}
+          onChange={(data) => onSectionChange('lox_udp', data)}
+          onValidationChange={onLoxValidationChange}
         />
       );
     case 'web':
