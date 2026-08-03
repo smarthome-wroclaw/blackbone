@@ -28,6 +28,7 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov
           pip install -e . --no-deps || true
           pip install aiomqtt pydantic PyYAML colorlog Cerberus psutil aiohttp smbus2 pymodbus
+          pip install fastapi==0.118.0 "python-jose[cryptography]==3.5.0" python-multipart httpx
 
       - name: Run unit tests
         run: pytest tests/unit -v --tb=short -m "not hardware"
