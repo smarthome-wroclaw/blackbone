@@ -83,3 +83,10 @@ class CompositeMessageBus(MessageBus):
         """Unsubscribe from a topic and stop listening on all buses."""
         for bus in self._buses:
             await bus.unsubscribe_and_stop_listen(topic)
+
+    async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
+        """Collect matching topics from buses that support discovery."""
+        results = await asyncio.gather(
+            *(bus.discover_topics(topic_filter, timeout) for bus in self._buses)
+        )
+        return sorted({topic for bus_topics in results for topic in bus_topics})
