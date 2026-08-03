@@ -22,3 +22,9 @@
 - Prefer `Record<string, T>` over `{ [key: string]: any }`.
 - Use utility types (`Partial<T>`, `Pick<T, K>`, `Omit<T, K>`) to derive types from existing interfaces rather than duplicating or loosening types.
 - When migrating existing `any` usage, prioritize files being actively modified.
+
+## Bilingual documentation
+
+- The bilingual convention above for pull request descriptions also applies to user-facing
+  documentation such as the README: write the full English version first, followed by a
+  complete Polish translation below it (not interleaved section-by-section).
