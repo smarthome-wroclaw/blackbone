@@ -65,6 +65,19 @@ lox_udp:
       default: 4445
       meta:
         label: Port to listen for incoming UDP messages
+    mqtt_bridge:
+      required: False
+      type: list
+      check_with: mqtt_bridge_device_id_uniqueness
+      schema:
+        type: dict
+        schema:
+          topic:
+            required: True
+            type: string
+          device_id:
+            required: True
+            type: string
 
 mqtt:
   type: dict
@@ -2285,4 +2298,3 @@ boneio:
           Use this when restoring config from a different device (e.g., RMA replacement).
           Format: blk followed by 6 hex characters (e.g., blk8c7df0).
           WARNING: Two devices with the same serial on the same MQTT broker will conflict!
-
