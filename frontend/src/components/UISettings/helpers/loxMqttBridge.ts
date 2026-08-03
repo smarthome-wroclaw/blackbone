@@ -20,6 +20,75 @@ function normalizeIdPart(value: string): string {
     .toLowerCase();
 }
 
+export interface MqttBridgeMappingLike {
+  topic: string;
+  device_id: string;
+}
+
+export interface MqttDeviceGroup<T extends MqttBridgeMappingLike = MqttBridgeMappingLike> {
+  devicePrefix: string;
+  mappings: Array<{ index: number; mapping: T }>;
+}
+
+/** Return the parent topic path that identifies an MQTT device. */
+export function getMqttDevicePrefix(topic: string): string {
+  const value = topic.trim().replace(/\/+$/, '');
+  if (!value) return '';
+  const lastSlash = value.lastIndexOf('/');
+  return lastSlash >= 0 ? value.slice(0, lastSlash) : value;
+}
+
+/** Return the part of a topic below its device prefix. */
+export function getMqttTopicLeaf(topic: string): string {
+  const value = topic.trim().replace(/\/+$/, '');
+  const lastSlash = value.lastIndexOf('/');
+  return lastSlash >= 0 ? value.slice(lastSlash + 1) : value;
+}
+
+/** Group concrete MQTT topics by their parent device prefix. */
+export function groupDiscoveredTopicsByDevice(topics: string[]): Array<{
+  devicePrefix: string;
+  topics: string[];
+}> {
+  const groups = new Map<string, string[]>();
+  for (const topic of [...new Set(topics)].sort()) {
+    const devicePrefix = getMqttDevicePrefix(topic);
+    if (!devicePrefix) continue;
+    const group = groups.get(devicePrefix) ?? [];
+    group.push(topic);
+    groups.set(devicePrefix, group);
+  }
+  return [...groups.entries()].map(([devicePrefix, groupedTopics]) => ({
+    devicePrefix,
+    topics: groupedTopics,
+  }));
+}
+
+/** Group configured flat mappings without changing the persisted YAML shape. */
+export function groupMqttBridgeMappings<T extends MqttBridgeMappingLike>(
+  mappings: T[],
+): MqttDeviceGroup<T>[] {
+  const groups = new Map<string, MqttDeviceGroup<T>>();
+  mappings.forEach((mapping, index) => {
+    const prefix = getMqttDevicePrefix(mapping.topic);
+    const key = prefix || `__manual_${index}`;
+    const group = groups.get(key) ?? { devicePrefix: prefix, mappings: [] };
+    group.mappings.push({ index, mapping });
+    groups.set(key, group);
+  });
+  return [...groups.values()];
+}
+
+/** Build a globally unique Loxone input ID from every topic segment. */
+export function suggestGroupedLoxDeviceId(topic: string): string {
+  const segments = topic.split('/').map(segment => segment.trim()).filter(Boolean);
+  if (segments.length === 0) return '';
+  return segments
+    .map((segment, index) => normalizeIdPart(index === 0 ? segment.replace(/^go[-_]?/i, '') : segment))
+    .filter(Boolean)
+    .join('_');
+}
+
 /** Build a readable default Loxone input ID from the root and leaf topic segments. */
 export function suggestLoxDeviceId(topic: string): string {
   const segments = topic.split('/').map(segment => segment.trim()).filter(Boolean);

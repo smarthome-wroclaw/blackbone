@@ -1411,19 +1411,9 @@ export default function UISettings() {
         isSidebarOpen={isSidebarOpen}
         onSidebarToggle={setIsSidebarOpen}
         onNavigate={navigateToSection}
-        onRestore={() => {
-          restoreSection(activeSection);
-          if (activeSection === 'mqtt') restoreSection('lox_udp');
-        }}
-        onSave={async () => {
-          if (activeSection === 'mqtt') {
-            if (unsavedChanges['mqtt']) await saveSection('mqtt');
-            if (unsavedChanges['lox_udp']) await saveSection('lox_udp');
-          } else {
-            await saveSection(activeSection);
-          }
-        }}
-        saveDisabled={activeSection === 'mqtt' && unsavedChanges['lox_udp'] && !loxFormValid}
+        onRestore={() => restoreSection(activeSection)}
+        onSave={() => saveSection(activeSection)}
+        saveDisabled={activeSection === 'lox_udp' && !loxFormValid}
       />
 
       {/* Main content area */}
@@ -1450,29 +1440,12 @@ export default function UISettings() {
               sectionName={activeSection}
               sectionTitle={t(`sections.${activeSection}`) || activeSection_data.name}
               showYamlPreview={showYamlPreview}
-              hasUnsavedChanges={
-                activeSection === 'mqtt'
-                  ? (unsavedChanges['mqtt'] || unsavedChanges['lox_udp'] || false)
-                  : (unsavedChanges[activeSection] || false)
-              }
-              saveDisabled={
-                activeSection === 'mqtt' && unsavedChanges['lox_udp'] && !loxFormValid
-              }
+              hasUnsavedChanges={unsavedChanges[activeSection] || false}
+              saveDisabled={activeSection === 'lox_udp' && !loxFormValid}
               saveStatus={saveStatus[activeSection] || 'idle'}
               onToggleYamlPreview={() => setShowYamlPreview(!showYamlPreview)}
-              onRestore={() => {
-                restoreSection(activeSection);
-                if (activeSection === 'mqtt') restoreSection('lox_udp');
-              }}
-              onSave={async () => {
-                if (activeSection === 'mqtt') {
-                  // Save both mqtt and lox_udp when in messaging protocols view
-                  if (unsavedChanges['mqtt']) await saveSection('mqtt');
-                  if (unsavedChanges['lox_udp']) await saveSection('lox_udp');
-                } else {
-                  await saveSection(activeSection);
-                }
-              }}
+              onRestore={() => restoreSection(activeSection)}
+              onSave={() => saveSection(activeSection)}
               hideYamlPreview={!!COMPOSITE_SECTIONS[activeSection]}
             />
 
@@ -1503,15 +1476,7 @@ export default function UISettings() {
                     </div>
                     <div className="p-4 h-full overflow-y-auto">
                       <pre className="text-sm font-mono text-base-content bg-base-100 p-4 rounded-lg overflow-x-auto">
-                        {activeSection === 'mqtt'
-                          ? [
-                            `mqtt:\n${convertToYaml(formData['mqtt'], 'mqtt').split('\n').map(l => l ? `  ${l}` : '').join('\n')}`,
-                            formData['lox_udp'] && Object.keys(formData['lox_udp']).length > 0
-                              ? `lox_udp:\n${convertToYaml(formData['lox_udp'], 'lox_udp').split('\n').map(l => l ? `  ${l}` : '').join('\n')}`
-                              : null,
-                          ].filter(Boolean).join('\n')
-                          : convertToYaml(formData[activeSection], activeSection)
-                        }
+                        {convertToYaml(formData[activeSection], activeSection)}
                       </pre>
                     </div>
                   </div>
