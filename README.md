@@ -1,13 +1,15 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/blackbone-white.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/blackbone-black.svg">
-  <img alt="BlackBone" src="docs/assets/blackbone-black.svg" width="320">
-</picture>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/blackbone-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/blackbone-black.svg">
+    <img alt="BlackBone" src="docs/assets/blackbone-black.svg" width="320">
+  </picture>
+</p>
 
 # BlackBone
 
 **BlackBone** is a fork of [boneIO](https://boneio.eu) ([boneIO-eu/app_bbb](https://github.com/boneIO-eu/app_bbb)),
-maintained by [smarthome-wroclaw](https://github.com/smarthome-wroclaw). It adds features that
+maintained by [smarthome-wroclaw](https://smarthome.wroclaw.pl). It adds features that
 were missing in the original project, developed for and proven in real client installations.
 
 > **smarthome-wroclaw is not affiliated with, endorsed by, or officially connected to the
@@ -45,8 +47,8 @@ sed -i 's/^- id:/- name:/' *.yaml
 
 ## Upgrading an existing controller to BlackBone
 
-Already have a controller running the original boneIO app? SSH into it and run the BlackBone
-installer:
+Already have a controller running the original boneIO app? [SSH into it](https://boneio.eu/docs/black/advanced/ssh-connection)
+and run the BlackBone installer:
 
 ```bash
 ssh <user>@<controller-ip>
@@ -67,7 +69,7 @@ Found a bug or have a feature you'd like to see? Issues and pull requests are we
 ## Polski
 
 **BlackBone** to fork [boneIO](https://boneio.eu) ([boneIO-eu/app_bbb](https://github.com/boneIO-eu/app_bbb)),
-utrzymywany przez [smarthome-wroclaw](https://github.com/smarthome-wroclaw). Dodaje funkcje,
+utrzymywany przez [smarthome-wroclaw](https://smarthome.wroclaw.pl). Dodaje funkcje,
 których brakowało w oryginalnym projekcie, wypracowane i sprawdzone w realnych instalacjach u
 klientów.
 
@@ -106,8 +108,8 @@ sed -i 's/^- id:/- name:/' *.yaml
 
 ### Aktualizacja istniejącego sterownika do BlackBone
 
-Masz już sterownik z zainstalowaną oryginalną aplikacją boneIO? Połącz się z nim przez SSH i
-uruchom instalator BlackBone:
+Masz już sterownik z zainstalowaną oryginalną aplikacją boneIO? [Połącz się z nim przez SSH](https://boneio.eu/pl/docs/black/advanced/ssh-connection)
+i uruchom instalator BlackBone:
 
 ```bash
 ssh <user>@<adres-sterownika>
