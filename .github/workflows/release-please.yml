@@ -22,7 +22,7 @@ jobs:
       release-version: ${{ steps.release.outputs.version }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Run Release Please
         id: release
@@ -70,7 +70,7 @@ jobs:
       contents: read
     steps:
       - name: Check out released commit
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.release-sha }}
 
