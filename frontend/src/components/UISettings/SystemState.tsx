@@ -12,8 +12,11 @@ import {
 } from 'react-icons/fa';
 import SelfTest from './SelfTest';
 import FixAppPermissions from './FixAppPermissions';
-import HardwareErrors from './HardwareErrors';
+import HardwareErrors, { type HardwareError } from './HardwareErrors';
 import MigrationsSection from './MigrationsSection';
+import AlternativeUpdateSource, {
+  type AlternativeUpdateRequest,
+} from './SystemStateComponents/AlternativeUpdateSource';
 
 import {
   DeviceControlSection,
@@ -99,7 +102,7 @@ const SystemState: React.FC = () => {
   const [isRestarting, setIsRestarting] = useState(false);
 
   // Hardware errors state
-  const [hardwareErrors, setHardwareErrors] = useState<any[]>([]);
+  const [hardwareErrors, setHardwareErrors] = useState<HardwareError[]>([]);
 
   // Fetch hardware errors
   const fetchHardwareErrors = useCallback(async () => {
@@ -132,7 +135,7 @@ const SystemState: React.FC = () => {
     } finally {
       setIsChecking(false);
     }
-  }, []);
+  }, [t]);
 
   // Fetch available versions for rollback
   const fetchAvailableVersions = useCallback(async () => {
@@ -155,7 +158,7 @@ const SystemState: React.FC = () => {
     try {
       await axios.post('/api/restart');
       // The server will restart, so we won't get a response
-    } catch (error) {
+    } catch {
       // Expected - server is restarting
       console.log('Server is restarting...');
     }
@@ -167,19 +170,23 @@ const SystemState: React.FC = () => {
       const { data } = await axios.get('/api/update/status');
       setUpdateStatus(data);
       return data;
-    } catch (err) {
+    } catch {
       // Server might be restarting
       return null;
     }
   }, []);
 
-  // Start update with specific version
-  const startUpdate = async (version?: string) => {
+  const startUpdateRequest = async (request: {
+    version?: string;
+    source_type?: AlternativeUpdateRequest['source_type'];
+    source?: string;
+    source_version?: string;
+  }) => {
     setIsUpdating(true);
     setError(null);
 
     try {
-      const { data } = await axios.post('/api/update', { version: version || selectedVersion });
+      const { data } = await axios.post('/api/update', request);
 
       if (data.status === 'error') {
         setError(data.message);
@@ -212,10 +219,20 @@ const SystemState: React.FC = () => {
           setError(status.error || t('software_update.update_failed'));
         }
       }, 1000);
-    } catch (err) {
+    } catch {
       setError(t('software_update.failed_to_start_update'));
       setIsUpdating(false);
     }
+  };
+
+  // Start update with a release version from the default channel.
+  const startUpdate = async (version?: string) => {
+    await startUpdateRequest({ version: version || selectedVersion || undefined });
+  };
+
+  // Install once from a validated alternative package or Git repository.
+  const startAlternativeUpdate = async (request: AlternativeUpdateRequest) => {
+    await startUpdateRequest(request);
   };
 
   // Rollback to specific version
@@ -258,7 +275,7 @@ const SystemState: React.FC = () => {
         setError(data.message);
         setIsUpdating(false);
       }
-    } catch (err) {
+    } catch {
       setError(t('software_update.rollback_failed'));
       setIsUpdating(false);
     }
@@ -311,9 +328,12 @@ const SystemState: React.FC = () => {
 
   // Initial load
   useEffect(() => {
-    checkForUpdates();
-    fetchAvailableVersions();
-    fetchHardwareErrors();
+    const initialLoad = window.setTimeout(() => {
+      void checkForUpdates();
+      void fetchAvailableVersions();
+      void fetchHardwareErrors();
+    }, 0);
+    return () => window.clearTimeout(initialLoad);
   }, [checkForUpdates, fetchAvailableVersions, fetchHardwareErrors]);
 
   // Format date
@@ -608,6 +628,12 @@ const SystemState: React.FC = () => {
                 </div>
               </div>
             )}
+
+            <div className="divider"></div>
+            <AlternativeUpdateSource
+              isUpdating={isUpdating}
+              onInstall={startAlternativeUpdate}
+            />
 
             {/* Available Versions Section */}
             <div className="divider"></div>

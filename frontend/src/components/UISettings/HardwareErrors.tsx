@@ -2,7 +2,7 @@ import React from 'react';
 import { FaExclamationTriangle } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
 
-interface HardwareError {
+export interface HardwareError {
   type: string;
   expander_type?: string;
   sensor_type?: string;

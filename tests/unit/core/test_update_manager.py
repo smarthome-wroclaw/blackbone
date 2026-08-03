@@ -196,6 +196,42 @@ def _make_update_manager(
     return um
 
 
+class TestPipInstallCommand:
+    """Build pip arguments without invoking a shell."""
+
+    def test_builds_standard_prerelease_update(self):
+        command, package, needs_pre = UpdateManager._build_pip_install_command(
+            pip_path="/venv/bin/pip",
+            current_version="1.6.0",
+            target_version="1.7.0.dev1",
+            install_target=None,
+        )
+
+        assert command == [
+            "/venv/bin/pip",
+            "install",
+            "--upgrade",
+            "--pre",
+            "boneio==1.7.0.dev1",
+        ]
+        assert package == "boneio==1.7.0.dev1"
+        assert needs_pre is True
+
+    def test_uses_custom_target_as_one_argument(self):
+        repository = "git+https://example.com/team/boneio.git@main"
+
+        command, package, needs_pre = UpdateManager._build_pip_install_command(
+            pip_path="/venv/bin/pip",
+            current_version="1.6.0.dev1",
+            target_version=None,
+            install_target=repository,
+        )
+
+        assert command == ["/venv/bin/pip", "install", "--upgrade", repository]
+        assert package == repository
+        assert needs_pre is False
+
+
 # ---------------------------------------------------------------------------
 # _get_migration_summary
 # ---------------------------------------------------------------------------
@@ -551,5 +587,4 @@ class TestPublishUpdateProgressStatusText:
         assert payload["update_percentage"] is None
         assert "❌ Update failed" in payload["release_summary"]
         assert "Changelog details" in payload["release_summary"]
-
 
