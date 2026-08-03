@@ -56,8 +56,9 @@ from boneio.webui.routes import (
     irrigation_router,
     migrations_router,
     modbus_router,
-    nodered_router,
     mqtt_reference_router,
+    mqtt_topics_router,
+    nodered_router,
     outputs_router,
     remote_devices_router,
     sensors_router,
@@ -161,6 +162,7 @@ app.include_router(templates_router)
 app.include_router(tools_router)
 app.include_router(migrations_router)
 app.include_router(mqtt_reference_router)
+app.include_router(mqtt_topics_router)
 
 if os.environ.get("BONEIO_DEV"):
     app.include_router(dev_fake_device_router)
@@ -173,6 +175,7 @@ from boneio.webui.routes import irrigation as irrigation_module
 from boneio.webui.routes import migrations as migrations_module
 from boneio.webui.routes import modbus as modbus_module
 from boneio.webui.routes import mqtt_reference as mqtt_reference_module
+from boneio.webui.routes import mqtt_topics as mqtt_topics_module
 from boneio.webui.routes import outputs as outputs_module
 from boneio.webui.routes import remote_devices as remote_devices_module
 from boneio.webui.routes import sensors as sensors_module
@@ -193,6 +196,7 @@ app.dependency_overrides[migrations_module._get_manager] = get_manager
 app.dependency_overrides[templates_module.get_manager] = get_manager
 app.dependency_overrides[tools_module.get_manager] = get_manager
 app.dependency_overrides[mqtt_reference_module.get_manager] = get_manager
+app.dependency_overrides[mqtt_topics_module.get_manager] = get_manager
 
 if os.environ.get("BONEIO_DEV"):
     from boneio.webui.routes import dev_fake_device as dev_fake_device_module

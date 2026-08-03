@@ -52,6 +52,33 @@
           "default": 4445,
           "description": "Port to listen for incoming UDP messages",
           "title": "Listen port"
+        },
+        "mqtt_bridge": {
+          "type": "array",
+          "description": "Forward arbitrary MQTT topic payloads to virtual Lox UDP inputs",
+          "title": "MQTT to Lox bridge",
+          "items": {
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string",
+                "minLength": 1,
+                "description": "MQTT topic to subscribe to",
+                "title": "Topic"
+              },
+              "device_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Virtual Lox UDP input identifier",
+                "title": "Device ID"
+              }
+            },
+            "required": [
+              "topic",
+              "device_id"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

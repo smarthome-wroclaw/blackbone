@@ -289,9 +289,7 @@ export default function SettingsSidebar({
 }: SettingsSidebarProps) {
   const { t } = useTranslation();
   const activeSectionConfig = configSections.find(s => s.name === activeSection);
-  const hasActiveUnsaved = activeSection === 'mqtt'
-    ? (unsavedChanges['mqtt'] || unsavedChanges['lox_udp'] || false)
-    : (unsavedChanges[activeSection] || false);
+  const hasActiveUnsaved = unsavedChanges[activeSection] || false;
   const isSaving = saveStatus[activeSection] === 'saving';
 
   /** Navigate to section and close mobile bottom sheet. */

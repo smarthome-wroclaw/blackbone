@@ -9,15 +9,18 @@ Two separate templates are generated:
 - VirtualInUdp: BoneIO → Miniserver (receiving state feedback)
 
 The output XML files are compatible with Lox Config's import mechanism
-and use the correct element names, attributes, and structure required
-by Loxone.
+and use the correct element names, attributes, and structure required by Lox Config.
 """
 
 from __future__ import annotations
 
+import io
 import logging
+import re
 import uuid
 import xml.etree.ElementTree as ET
+import zipfile
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -25,23 +28,24 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Loxone template type constants
+# Lox template type constants
 _TEMPLATE_TYPE_INPUT = "1"   # VirtualInUdp
 _TEMPLATE_TYPE_OUTPUT = "3"  # VirtualOut (UDP)
 _MIN_VERSION = "17000331"    # Minimum Lox Config version
 
 
 def _uuid() -> str:
-    """Generate a Loxone-style UUID (lowercase with dashes)."""
+    """Generate a Lox-style UUID (lowercase with dashes)."""
     return str(uuid.uuid4())
 
 
-def generate_lox_template(manager: Manager) -> str:
-    """Generate Lox Config XML template from current BoneIO configuration.
+def generate_lox_templates(manager: Manager) -> dict[str, str]:
+    """Generate one valid Lox Config XML document per virtual device.
 
-    Creates two XML documents concatenated together:
+    Creates independent XML documents for:
     - VirtualOut: Commands Miniserver sends to BoneIO (ON/OFF, OPEN/CLOSE)
     - VirtualInUdp: State feedback BoneIO sends to Miniserver
+    - Each MQTT device: One input for every mapped topic below its parent path
 
     The generated XML can be imported into Lox Config to quickly set up
     communication between a Lox Miniserver and this BoneIO device.
@@ -50,7 +54,7 @@ def generate_lox_template(manager: Manager) -> str:
         manager: Active Manager instance with initialized outputs/covers.
 
     Returns:
-        XML string ready to be saved as a .xml template file.
+        Mapping of safe filenames to standalone XML template documents.
     """
     serial = manager.config_helper.serial_number or "boneio"
     device_name = manager.config_helper.name or serial
@@ -187,7 +191,7 @@ def generate_lox_template(manager: Manager) -> str:
         vi_cmd.set("Title", f"{output.name}")
         vi_cmd.set("Comment", "")
         vi_cmd.set("Address", boneio_ip)
-        # Check pattern: backslash before device_id tells Loxone it's literal
+        # A backslash before device_id marks the identifier as literal.
         vi_cmd.set("Check", f"\\{output_id}=\\v")
         vi_cmd.set("Signed", "true")
         vi_cmd.set("Analog", "false")
@@ -241,12 +245,121 @@ def generate_lox_template(manager: Manager) -> str:
             vi_cmd.set("Unit", "")
             vi_cmd.set("HintText", "")
 
-    # Generate XML with declaration — two separate documents
-    vout_str = _element_to_xml(vout)
-    vin_str = _element_to_xml(vin)
+    # --- MQTT bridge devices ---
+    # Each parent topic is represented as one VirtualInUdp device in Lox,
+    # while its concrete topics become virtual inputs on that device.
+    mqtt_devices = _build_mqtt_virtual_inputs(
+        lox_config.get("mqtt_bridge", []),
+        boneio_ip=boneio_ip,
+        send_port=send_port,
+    )
 
-    # Combine both as separate XML documents
-    return vout_str + "\n\n" + vin_str
+    serial_slug = _safe_filename_part(serial)
+    templates = {
+        f"boneio_{serial_slug}_outputs.xml": _element_to_xml(vout),
+        f"boneio_{serial_slug}_status.xml": _element_to_xml(vin),
+    }
+    for device in mqtt_devices:
+        device_slug = _safe_filename_part(device.get("Title", "mqtt_device"))
+        base_name = f"mqtt_{device_slug}"
+        filename = f"{base_name}.xml"
+        suffix = 2
+        while filename in templates:
+            filename = f"{base_name}_{suffix}.xml"
+            suffix += 1
+        templates[filename] = _element_to_xml(device)
+    return templates
+
+
+def build_lox_template_archive(templates: dict[str, str]) -> bytes:
+    """Package standalone Lox XML templates into one downloadable ZIP."""
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for filename, xml_content in templates.items():
+            zip_file.writestr(filename, xml_content)
+    return archive.getvalue()
+
+
+def lox_template_archive_name(serial: str) -> str:
+    """Return a safe ZIP filename for a BoneIO device."""
+    return f"boneio_{_safe_filename_part(serial or 'boneio')}_lox_templates.zip"
+
+
+def generate_lox_template(manager: Manager) -> str:
+    """Return the legacy concatenated representation for internal callers.
+
+    Download routes should use :func:`generate_lox_templates`, because a valid
+    XML file can contain only one top-level virtual device.
+    """
+    return "\n\n".join(generate_lox_templates(manager).values())
+
+
+def _safe_filename_part(value: str) -> str:
+    """Convert a device label into a portable, readable filename segment."""
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip())
+    return normalized.strip("._-").lower() or "device"
+
+
+def _mqtt_device_prefix(topic: str) -> str:
+    """Return the parent path that identifies a concrete MQTT device."""
+    normalized = topic.strip().rstrip("/")
+    if not normalized:
+        return ""
+    parent, separator, _leaf = normalized.rpartition("/")
+    return parent if separator else normalized
+
+
+def _build_mqtt_virtual_inputs(
+    mappings: list[dict[str, Any]],
+    *,
+    boneio_ip: str,
+    send_port: int,
+) -> list[ET.Element]:
+    """Build one Lox VirtualInUdp device per MQTT parent topic."""
+    grouped: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for mapping in mappings:
+        topic = str(mapping.get("topic", "")).strip()
+        device_id = str(mapping.get("device_id", "")).strip()
+        prefix = _mqtt_device_prefix(topic)
+        if topic and device_id and prefix:
+            grouped[prefix].append({"topic": topic, "device_id": device_id})
+
+    devices: list[ET.Element] = []
+    for prefix in sorted(grouped):
+        device = ET.Element("VirtualInUdp")
+        device.set("Title", prefix)
+        device.set("Comment", f"MQTT device {prefix} via boneIO")
+        device.set("Address", "")
+        device.set("Port", str(send_port))
+        device.set("HintText", "")
+
+        info = ET.SubElement(device, "Info")
+        info.set("templateType", _TEMPLATE_TYPE_INPUT)
+        info.set("minVersion", _MIN_VERSION)
+
+        for mapping in sorted(grouped[prefix], key=lambda item: item["topic"]):
+            topic = mapping["topic"]
+            leaf = topic.removeprefix(f"{prefix}/") or topic
+            virtual_input = ET.SubElement(device, "VirtualInUdpCmd")
+            virtual_input.set("Title", leaf)
+            virtual_input.set("Comment", topic)
+            virtual_input.set("Address", boneio_ip)
+            virtual_input.set("Check", f"\\{mapping['device_id']}=\\v")
+            virtual_input.set("Signed", "true")
+            virtual_input.set("Analog", "true")
+            virtual_input.set("SourceValLow", "0")
+            virtual_input.set("DestValLow", "0")
+            virtual_input.set("SourceValHigh", "100")
+            virtual_input.set("DestValHigh", "100")
+            virtual_input.set("DefVal", "0")
+            virtual_input.set("MinVal", "-2147483648")
+            virtual_input.set("MaxVal", "2147483647")
+            virtual_input.set("Unit", "")
+            virtual_input.set("HintText", "")
+
+        devices.append(device)
+
+    return devices
 
 
 def _element_to_xml(element: ET.Element) -> str:
@@ -330,6 +443,24 @@ def generate_lox_summary(manager: Manager) -> dict[str, Any]:
             "format": f"{cover_id}=0..100",
         })
 
+    lox_config = _get_lox_config(manager)
+    mqtt_devices: defaultdict[str, list[dict[str, str]]] = defaultdict(list)
+    for mapping in lox_config.get("mqtt_bridge", []):
+        topic = str(mapping.get("topic", "")).strip()
+        device_id = str(mapping.get("device_id", "")).strip()
+        prefix = _mqtt_device_prefix(topic)
+        if not topic or not device_id or not prefix:
+            continue
+        mqtt_input = {
+            "entity": device_id,
+            "name": topic.removeprefix(f"{prefix}/") or topic,
+            "type": "mqtt",
+            "format": f"{device_id}=<value>",
+            "topic": topic,
+        }
+        mqtt_devices[prefix].append(mqtt_input)
+        status_messages.append(mqtt_input)
+
     return {
         "device_name": device_name,
         "serial": serial,
@@ -338,6 +469,10 @@ def generate_lox_summary(manager: Manager) -> dict[str, Any]:
         "group_count": len(output_groups),
         "commands": commands,
         "status_messages": status_messages,
+        "mqtt_devices": [
+            {"name": prefix, "inputs": inputs}
+            for prefix, inputs in sorted(mqtt_devices.items())
+        ],
     }
 
 
@@ -357,6 +492,7 @@ def _get_lox_config(manager: Manager) -> dict[str, Any]:
             "boneio_ip": lox.get("host", "0.0.0.0"),
             "send_port": lox.get("send_port", 4444),
             "listen_port": lox.get("listen_port", 4445),
+            "mqtt_bridge": lox.get("mqtt_bridge", []),
         }
     except Exception as e:
         _LOGGER.warning("Could not read lox_udp config: %s", e)
@@ -364,4 +500,5 @@ def _get_lox_config(manager: Manager) -> dict[str, Any]:
             "boneio_ip": "0.0.0.0",
             "send_port": 4444,
             "listen_port": 4445,
+            "mqtt_bridge": [],
         }
