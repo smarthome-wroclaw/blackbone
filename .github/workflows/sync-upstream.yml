@@ -5,11 +5,6 @@ on:
     # Run daily at 08:00 UTC.
     - cron: "0 8 * * *"
   workflow_dispatch:
-    inputs:
-      batch_size:
-        description: Maximum number of upstream first-parent commits in this PR
-        required: false
-        default: "20"
 
 permissions:
   contents: write
@@ -20,10 +15,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_REPOSITORY: ${{ vars.UPSTREAM_REPOSITORY || 'boneIO-eu/app_bbb' }}
+  SOURCE_REPOSITORY: ${{ vars.UPSTREAM_REPOSITORY || 'boneIO-eu/app_black' }}
   SOURCE_BRANCH: ${{ vars.UPSTREAM_BRANCH || 'dev-debian13' }}
   TARGET_BRANCH: ${{ github.event.repository.default_branch }}
-  BATCH_SIZE: ${{ inputs.batch_size || vars.UPSTREAM_SYNC_BATCH_SIZE || '20' }}
 
 jobs:
   create-sync-pr:
@@ -48,10 +42,6 @@ jobs:
           fi
           if [[ ! "$SOURCE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$SOURCE_BRANCH" == -* ]]; then
             echo "Invalid UPSTREAM_BRANCH: $SOURCE_BRANCH" >&2
-            exit 1
-          fi
-          if [[ ! "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || (( BATCH_SIZE > 500 )); then
-            echo "Batch size must be an integer between 1 and 500 (got: $BATCH_SIZE)." >&2
             exit 1
           fi
 
@@ -123,14 +113,12 @@ jobs:
             base_sha=$(git merge-base HEAD "$source_sha")
           fi
 
-          # A batch ends on the source branch's first-parent chain. This keeps a
-          # merged upstream PR atomic; all commits brought in by such a merge are
-          # still enumerated in the generated PR body below.
-          mapfile -t pending_commits < <(
-            git rev-list --first-parent --reverse "${base_sha}..${source_sha}"
-          )
+          # Every run takes all changes currently available in upstream. A merge
+          # made upstream remains atomic, and all of its commits are enumerated
+          # in the generated PR body below.
+          pending_count=$(git rev-list --first-parent --count "${base_sha}..${source_sha}")
 
-          if (( ${#pending_commits[@]} == 0 )); then
+          if (( pending_count == 0 )); then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "Target is already up to date with ${SOURCE_REPOSITORY}:${SOURCE_BRANCH}."
             echo "### Upstream sync" >> "$GITHUB_STEP_SUMMARY"
@@ -138,14 +126,9 @@ jobs:
             exit 0
           fi
 
-          batch_index=$(( BATCH_SIZE - 1 ))
-          if (( batch_index >= ${#pending_commits[@]} )); then
-            batch_index=$(( ${#pending_commits[@]} - 1 ))
-          fi
-          batch_end=${pending_commits[$batch_index]}
-          first_parent_count=$(( batch_index + 1 ))
+          batch_end=$source_sha
+          first_parent_count=$pending_count
           included_count=$(git rev-list --count "${base_sha}..${batch_end}")
-          remaining_count=$(git rev-list --first-parent --count "${batch_end}..${source_sha}")
           base_short=$(git rev-parse --short=12 "$base_sha")
           end_short=$(git rev-parse --short=12 "$batch_end")
           sync_branch="automation/upstream-sync/${base_short}-${end_short}"
@@ -160,7 +143,6 @@ jobs:
             echo "sync_branch=$sync_branch"
             echo "first_parent_count=$first_parent_count"
             echo "included_count=$included_count"
-            echo "remaining_count=$remaining_count"
           } >> "$GITHUB_OUTPUT"
 
       - name: Apply selected upstream batch
@@ -209,7 +191,6 @@ jobs:
           SOURCE_SHA: ${{ steps.batch.outputs.source_sha }}
           INCLUDED_COUNT: ${{ steps.batch.outputs.included_count }}
           FIRST_PARENT_COUNT: ${{ steps.batch.outputs.first_parent_count }}
-          REMAINING_COUNT: ${{ steps.batch.outputs.remaining_count }}
         shell: bash
         run: |
           set -euo pipefail
@@ -235,7 +216,6 @@ jobs:
             echo "| Compare | [View the exact source diff](${compare_url}) |"
             echo "| Source tip at creation | \`${SOURCE_SHA}\` |"
             echo "| Included source commits | ${INCLUDED_COUNT} (${FIRST_PARENT_COUNT} on the first-parent chain) |"
-            echo "| First-parent commits left for later batches | ${REMAINING_COUNT} |"
             echo '| Tracking | `.github/upstream-sync-state.json` advances to the inclusive end SHA |'
             echo
             echo '### Included source commits'
