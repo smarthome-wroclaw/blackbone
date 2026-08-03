@@ -14,6 +14,10 @@ were missing in the original project, developed for and proven in real client in
 
 > **smarthome-wroclaw is not affiliated with, endorsed by, or officially connected to the
 > original boneIO authors.** BlackBone is released under the same GNU GPLv3 license as upstream.
+>
+> **Use at your own risk.** BlackBone is provided "as is", without warranty of any kind.
+> smarthome-wroclaw accepts no liability for any damage or loss resulting from the use of this
+> software.
 
 ## Example usage
 
@@ -75,6 +79,10 @@ klientów.
 
 > **smarthome-wroclaw nie jest powiązane z autorami oryginalnej aplikacji boneIO ani przez nich
 > wspierane.** BlackBone jest wydawane na tej samej licencji GNU GPLv3 co projekt źródłowy.
+>
+> **Używasz na własną odpowiedzialność.** BlackBone jest dostarczane w stanie „tak jak jest",
+> bez żadnych gwarancji. smarthome-wroclaw nie ponosi odpowiedzialności za jakiekolwiek szkody
+> lub straty wynikające z użytkowania tego oprogramowania.
 
 ### Przykład użycia
 
