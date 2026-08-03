@@ -21,6 +21,9 @@ jobs:
       release-sha: ${{ steps.release.outputs.sha }}
       release-version: ${{ steps.release.outputs.version }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
       - name: Run Release Please
         id: release
         uses: googleapis/release-please-action@v5
@@ -28,6 +31,27 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Generate bilingual release PR description with OpenRouter
+        if: steps.release.outputs.prs_created == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite' }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: python scripts/generate_bilingual_release_notes.py pr
+
+      - name: Generate bilingual GitHub Release notes with OpenRouter
+        if: steps.release.outputs.release_created == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite' }}
+          RELEASE_NOTES: ${{ steps.release.outputs.body }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: python scripts/generate_bilingual_release_notes.py release
 
   test:
     name: Test release

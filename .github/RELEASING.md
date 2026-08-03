@@ -11,6 +11,26 @@ release, builds the Python distributions, and publishes them to PyPI as
 
 Version tracking starts at `0.0.0`; the first feature release will be `0.1.0`.
 
+## Bilingual release notes
+
+Release Please owns the canonical English `CHANGELOG.md`. After it creates or
+updates a release pull request, OpenRouter generates semantically equivalent
+English and Polish descriptions and commits the versioned Polish entry to
+`CHANGELOG.pl.md` on the release branch. The same process updates the GitHub
+Release notes after a release is created.
+
+Configure these GitHub settings:
+
+- Repository secret `OPENROUTER_API_KEY`: an OpenRouter API key with an
+  appropriate spending limit.
+- Optional repository variable `OPENROUTER_MODEL`: the OpenRouter model slug.
+  It defaults to `google/gemini-3.1-flash-lite`.
+
+The generated text is validated before GitHub is updated. OpenRouter failures
+do not block versioning, tests, or PyPI publication; the original English notes
+remain in place. Release note text derived from commit messages is sent to
+OpenRouter for processing.
+
 ## One-time PyPI setup
 
 Create a pending Trusted Publisher for the `blackbone` project on PyPI with:
