@@ -515,9 +515,9 @@ class UpdateManager(AsyncUpdater):
                 await _report(42, "Using --pre flag", "Pre-release version detected")
 
             if target_version:
-                pip_package = f"boneio=={target_version}"
+                pip_package = f"blackbone=={target_version}"
             else:
-                pip_package = "boneio"
+                pip_package = "blackbone"
 
             pip_cmd.append(pip_package)
 
@@ -562,7 +562,7 @@ class UpdateManager(AsyncUpdater):
             await _report(85, "Verifying installation...")
 
             # Verify installed version (async)
-            _, show_stdout, _ = await _run_subprocess([pip_path, "show", "boneio"], timeout=30)
+            _, show_stdout, _ = await _run_subprocess([pip_path, "show", "blackbone"], timeout=30)
             old_version = current_version
             new_version = current_version
             for line in show_stdout.split("\n"):
@@ -850,4 +850,3 @@ class UpdateManager(AsyncUpdater):
 
         self._manager.send_message(topic=state_topic, payload=state_payload, retain=True)
         self._manager.send_message(topic=attr_topic, payload=attr_payload, retain=True)
-
