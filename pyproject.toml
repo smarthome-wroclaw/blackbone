@@ -20,7 +20,7 @@ dependencies = [
     "psutil==7.2.2",
     "w1thermsensor[async]==2.3.0",
     "fastapi==0.118.0",
-    "pydantic==2.11.9",
+    "pydantic==2.13.4",
     "hypercorn==0.18.0",
     "websockets==15.0.1",
     "python-jose[cryptography]==3.5.0",
