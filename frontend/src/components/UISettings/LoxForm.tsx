@@ -1,8 +1,13 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { FaPlus, FaTrash } from 'react-icons/fa';
+import { FaPlus, FaSearch, FaSpinner, FaTrash } from 'react-icons/fa';
+import axios from '@/api/axios';
 import { useTranslation } from '@/hooks/useTranslation';
 import HelpLabel from './components/HelpLabel';
 import { NumericInput } from '@/components/ui/NumericInput';
+import {
+  getMqttDiscoveryPrefix,
+  suggestLoxDeviceId,
+} from './helpers/loxMqttBridge';
 
 interface LoxMqttBridgeMapping {
   topic: string;
@@ -15,6 +20,11 @@ interface LoxConfigData {
   send_port?: number;
   listen_port?: number;
   mqtt_bridge?: LoxMqttBridgeMapping[];
+}
+
+interface TopicDiscoveryResponse {
+  prefix: string;
+  topics: string[];
 }
 
 interface LoxFormProps {
@@ -59,6 +69,9 @@ function isValidHost(host: string): boolean {
 const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange }) => {
   const { t } = useTranslation();
   const [hostTouched, setHostTouched] = useState(false);
+  const [discoveringIndex, setDiscoveringIndex] = useState<number | null>(null);
+  const [topicSuggestions, setTopicSuggestions] = useState<Record<number, string[]>>({});
+  const [discoveryErrors, setDiscoveryErrors] = useState<Record<number, string>>({});
 
   const host = data?.host || '';
   const mappings = data?.mqtt_bridge ?? [];
@@ -93,12 +106,63 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
     handleChange('mqtt_bridge', updatedMappings);
   };
 
+  const selectTopic = (index: number, topic: string) => {
+    const updatedMappings = mappings.map((mapping, mappingIndex) => {
+      if (mappingIndex !== index) return mapping;
+      return {
+        ...mapping,
+        topic,
+        device_id: mapping.device_id.trim() || suggestLoxDeviceId(topic),
+      };
+    });
+    handleChange('mqtt_bridge', updatedMappings);
+    setDiscoveryErrors(previous => ({ ...previous, [index]: '' }));
+  };
+
+  const discoverTopics = async (index: number) => {
+    const prefix = getMqttDiscoveryPrefix(mappings[index].topic);
+    if (!prefix) {
+      setDiscoveryErrors(previous => ({
+        ...previous,
+        [index]: t('lox_config.mqtt_bridge_prefix_required'),
+      }));
+      return;
+    }
+
+    setDiscoveringIndex(index);
+    setDiscoveryErrors(previous => ({ ...previous, [index]: '' }));
+    try {
+      const response = await axios.post<TopicDiscoveryResponse>(
+        '/api/mqtt/topics/discover',
+        { prefix },
+      );
+      const topics = response.data.topics;
+      setTopicSuggestions(previous => ({ ...previous, [index]: topics }));
+      if (topics.length === 0) {
+        setDiscoveryErrors(previous => ({
+          ...previous,
+          [index]: t('lox_config.mqtt_bridge_no_topics'),
+        }));
+      }
+    } catch {
+      setTopicSuggestions(previous => ({ ...previous, [index]: [] }));
+      setDiscoveryErrors(previous => ({
+        ...previous,
+        [index]: t('lox_config.mqtt_bridge_discovery_error'),
+      }));
+    } finally {
+      setDiscoveringIndex(null);
+    }
+  };
+
   const addMapping = () => {
     handleChange('mqtt_bridge', [...mappings, { topic: '', device_id: '' }]);
   };
 
   const removeMapping = (index: number) => {
     handleChange('mqtt_bridge', mappings.filter((_, mappingIndex) => mappingIndex !== index));
+    setTopicSuggestions({});
+    setDiscoveryErrors({});
   };
 
   const handleDownloadTemplate = () => {
@@ -178,6 +242,10 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
           const topicEmpty = mapping.topic.trim() === '';
           const deviceIdEmpty = mapping.device_id.trim() === '';
           const deviceIdDuplicate = !deviceIdEmpty && deviceIdCounts[mapping.device_id.trim()] > 1;
+          const suggestions = topicSuggestions[index] ?? [];
+          const deviceIdSuggestion = mapping.topic.trim().endsWith('/')
+            ? ''
+            : suggestLoxDeviceId(mapping.topic);
 
           return (
             <div key={index} className="rounded-box border border-base-300 bg-base-100 p-3">
@@ -186,18 +254,60 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
                   <label className="label py-1">
                     <span className="label-text font-medium">{t('lox_config.mqtt_bridge_topic')}</span>
                   </label>
-                  <input
-                    type="text"
-                    className={`input input-bordered w-full ${topicEmpty ? 'input-error' : ''}`}
-                    value={mapping.topic}
-                    onChange={(event) => updateMapping(index, 'topic', event.target.value)}
-                    placeholder="go-eCharger/408783/wh"
-                    required
-                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      list={`mqtt-topic-suggestions-${index}`}
+                      className={`input input-bordered min-w-0 flex-1 ${topicEmpty ? 'input-error' : ''}`}
+                      value={mapping.topic}
+                      onChange={(event) => {
+                        const topic = event.target.value;
+                        if (suggestions.includes(topic)) selectTopic(index, topic);
+                        else updateMapping(index, 'topic', topic);
+                      }}
+                      placeholder="go-eCharger/408783/"
+                      required
+                    />
+                    <datalist id={`mqtt-topic-suggestions-${index}`}>
+                      {suggestions.map(topic => <option key={topic} value={topic} />)}
+                    </datalist>
+                    <button
+                      type="button"
+                      className="btn btn-outline px-3"
+                      onClick={() => discoverTopics(index)}
+                      disabled={discoveringIndex !== null}
+                      title={t('lox_config.mqtt_bridge_discover')}
+                      aria-label={t('lox_config.mqtt_bridge_discover')}
+                    >
+                      {discoveringIndex === index
+                        ? <FaSpinner className="animate-spin" />
+                        : <FaSearch />}
+                    </button>
+                  </div>
                   {topicEmpty && (
                     <HelpLabel className="[&>span]:text-error">
                       {t('lox_config.mqtt_bridge_required')}
                     </HelpLabel>
+                  )}
+                  {discoveryErrors[index] && (
+                    <HelpLabel className="[&>span]:text-warning">
+                      {discoveryErrors[index]}
+                    </HelpLabel>
+                  )}
+                  {suggestions.length > 0 && (
+                    <div className="mt-1 max-h-36 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-1">
+                      {suggestions.map(topic => (
+                        <button
+                          key={topic}
+                          type="button"
+                          className="btn btn-ghost btn-xs block h-auto w-full justify-start overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono"
+                          onClick={() => selectTopic(index, topic)}
+                          title={topic}
+                        >
+                          {topic}
+                        </button>
+                      ))}
+                    </div>
                   )}
                 </div>
 
@@ -207,12 +317,16 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
                   </label>
                   <input
                     type="text"
+                    list={`lox-device-id-suggestions-${index}`}
                     className={`input input-bordered w-full ${deviceIdEmpty || deviceIdDuplicate ? 'input-error' : ''}`}
                     value={mapping.device_id}
                     onChange={(event) => updateMapping(index, 'device_id', event.target.value)}
                     placeholder="echarger_wh"
                     required
                   />
+                  <datalist id={`lox-device-id-suggestions-${index}`}>
+                    {deviceIdSuggestion && <option value={deviceIdSuggestion} />}
+                  </datalist>
                   {deviceIdEmpty && (
                     <HelpLabel className="[&>span]:text-error">
                       {t('lox_config.mqtt_bridge_required')}
@@ -222,6 +336,15 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
                     <HelpLabel className="[&>span]:text-error">
                       {t('lox_config.mqtt_bridge_duplicate_device_id')}
                     </HelpLabel>
+                  )}
+                  {deviceIdSuggestion && mapping.device_id !== deviceIdSuggestion && (
+                    <button
+                      type="button"
+                      className="mt-1 w-fit text-left text-xs text-primary hover:underline"
+                      onClick={() => updateMapping(index, 'device_id', deviceIdSuggestion)}
+                    >
+                      {t('lox_config.mqtt_bridge_use_suggestion', { device_id: deviceIdSuggestion })}
+                    </button>
                   )}
                 </div>
 
