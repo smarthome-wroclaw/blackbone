@@ -9,7 +9,7 @@
 # BlackBone
 
 **BlackBone** is a fork of [boneIO](https://boneio.eu) ([boneIO-eu/app_bbb](https://github.com/boneIO-eu/app_bbb)),
-maintained by [smarthome-wroclaw](https://smarthome.wroclaw.pl). It adds features that
+maintained by [SmartHome Wrocław](https://smarthome.wroclaw.pl). It adds features that
 were missing in the original project, developed for and proven in real client installations.
 
 > **smarthome-wroclaw is not affiliated with, endorsed by, or officially connected to the
@@ -73,7 +73,7 @@ Found a bug or have a feature you'd like to see? Issues and pull requests are we
 ## Polski
 
 **BlackBone** to fork [boneIO](https://boneio.eu) ([boneIO-eu/app_bbb](https://github.com/boneIO-eu/app_bbb)),
-utrzymywany przez [smarthome-wroclaw](https://smarthome.wroclaw.pl). Dodaje funkcje,
+utrzymywany przez [SmartHome Wrocław](https://smarthome.wroclaw.pl). Dodaje funkcje,
 których brakowało w oryginalnym projekcie, wypracowane i sprawdzone w realnych instalacjach u
 klientów.
 
