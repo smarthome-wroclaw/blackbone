@@ -137,3 +137,6 @@ frontend/dev-dist/
 
 .vscode
 .windsurf
+
+# Local design/planning docs, not for the repo
+docs/superpowers/
