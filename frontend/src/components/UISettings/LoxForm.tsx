@@ -1,11 +1,25 @@
 import React, { useState, useCallback, useEffect } from 'react';
+import { FaPlus, FaTrash } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
 import HelpLabel from './components/HelpLabel';
 import { NumericInput } from '@/components/ui/NumericInput';
 
+interface LoxMqttBridgeMapping {
+  topic: string;
+  device_id: string;
+}
+
+interface LoxConfigData {
+  enabled?: boolean;
+  host?: string;
+  send_port?: number;
+  listen_port?: number;
+  mqtt_bridge?: LoxMqttBridgeMapping[];
+}
+
 interface LoxFormProps {
-  data: any;
-  onChange: (data: any) => void;
+  data?: LoxConfigData;
+  onChange: (data: LoxConfigData) => void;
   onValidationChange?: (isValid: boolean) => void;
 }
 
@@ -40,26 +54,52 @@ function isValidHost(host: string): boolean {
 
 /**
  * Custom form for Lox UDP section configuration.
- * Fields: host (required, validated as IPv4 or hostname), send_port, listen_port + download template button.
+ * Fields: host, send/listen ports, MQTT bridge mappings, and Lox template actions.
  */
 const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange }) => {
   const { t } = useTranslation();
   const [hostTouched, setHostTouched] = useState(false);
 
   const host = data?.host || '';
+  const mappings = data?.mqtt_bridge ?? [];
   const hostEmpty = !host.trim();
   const hostInvalid = !hostEmpty && !isValidHost(host.trim());
   const hostError = hostTouched && (hostEmpty || hostInvalid);
-  const isValid = !hostEmpty && !hostInvalid;
+  const deviceIdCounts = mappings.reduce<Record<string, number>>((counts, mapping) => {
+    const deviceId = mapping.device_id.trim();
+    if (deviceId) counts[deviceId] = (counts[deviceId] ?? 0) + 1;
+    return counts;
+  }, {});
+  const mappingsValid = mappings.every(mapping => (
+    mapping.topic.trim() !== ''
+    && mapping.device_id.trim() !== ''
+    && deviceIdCounts[mapping.device_id.trim()] === 1
+  ));
+  const isValid = !hostEmpty && !hostInvalid && mappingsValid;
 
   // Notify parent about validation state
   useEffect(() => {
     onValidationChange?.(isValid);
   }, [isValid, onValidationChange]);
 
-  const handleChange = useCallback((field: string, value: any) => {
-    onChange({ ...data, [field]: value });
+  const handleChange = useCallback(<K extends keyof LoxConfigData>(field: K, value: LoxConfigData[K]) => {
+    onChange({ ...(data ?? {}), [field]: value });
   }, [data, onChange]);
+
+  const updateMapping = (index: number, field: keyof LoxMqttBridgeMapping, value: string) => {
+    const updatedMappings = mappings.map((mapping, mappingIndex) => (
+      mappingIndex === index ? { ...mapping, [field]: value } : mapping
+    ));
+    handleChange('mqtt_bridge', updatedMappings);
+  };
+
+  const addMapping = () => {
+    handleChange('mqtt_bridge', [...mappings, { topic: '', device_id: '' }]);
+  };
+
+  const removeMapping = (index: number) => {
+    handleChange('mqtt_bridge', mappings.filter((_, mappingIndex) => mappingIndex !== index));
+  };
 
   const handleDownloadTemplate = () => {
     window.open('/api/config/lox-template', '_blank');
@@ -128,6 +168,86 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
           placeholder="4445"
         />
         <HelpLabel>{t('lox_config.listen_port_help')}</HelpLabel>
+      </div>
+
+      {/* MQTT to Loxone Bridge */}
+      <div className="divider">{t('lox_config.mqtt_bridge_section')}</div>
+
+      <div className="space-y-3">
+        {mappings.map((mapping, index) => {
+          const topicEmpty = mapping.topic.trim() === '';
+          const deviceIdEmpty = mapping.device_id.trim() === '';
+          const deviceIdDuplicate = !deviceIdEmpty && deviceIdCounts[mapping.device_id.trim()] > 1;
+
+          return (
+            <div key={index} className="rounded-box border border-base-300 bg-base-100 p-3">
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-start">
+                <div className="form-control">
+                  <label className="label py-1">
+                    <span className="label-text font-medium">{t('lox_config.mqtt_bridge_topic')}</span>
+                  </label>
+                  <input
+                    type="text"
+                    className={`input input-bordered w-full ${topicEmpty ? 'input-error' : ''}`}
+                    value={mapping.topic}
+                    onChange={(event) => updateMapping(index, 'topic', event.target.value)}
+                    placeholder="go-eCharger/408783/wh"
+                    required
+                  />
+                  {topicEmpty && (
+                    <HelpLabel className="[&>span]:text-error">
+                      {t('lox_config.mqtt_bridge_required')}
+                    </HelpLabel>
+                  )}
+                </div>
+
+                <div className="form-control">
+                  <label className="label py-1">
+                    <span className="label-text font-medium">{t('lox_config.mqtt_bridge_device_id')}</span>
+                  </label>
+                  <input
+                    type="text"
+                    className={`input input-bordered w-full ${deviceIdEmpty || deviceIdDuplicate ? 'input-error' : ''}`}
+                    value={mapping.device_id}
+                    onChange={(event) => updateMapping(index, 'device_id', event.target.value)}
+                    placeholder="echarger_wh"
+                    required
+                  />
+                  {deviceIdEmpty && (
+                    <HelpLabel className="[&>span]:text-error">
+                      {t('lox_config.mqtt_bridge_required')}
+                    </HelpLabel>
+                  )}
+                  {deviceIdDuplicate && (
+                    <HelpLabel className="[&>span]:text-error">
+                      {t('lox_config.mqtt_bridge_duplicate_device_id')}
+                    </HelpLabel>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm mt-7 text-error"
+                  onClick={() => removeMapping(index)}
+                  aria-label={t('lox_config.mqtt_bridge_remove')}
+                  title={t('lox_config.mqtt_bridge_remove')}
+                >
+                  <FaTrash />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        <button
+          type="button"
+          className="btn btn-outline btn-sm"
+          onClick={addMapping}
+        >
+          <FaPlus /> {t('lox_config.mqtt_bridge_add')}
+        </button>
+
+        <HelpLabel>{t('lox_config.mqtt_bridge_help')}</HelpLabel>
       </div>
 
       {/* Lox Config Template Actions */}
