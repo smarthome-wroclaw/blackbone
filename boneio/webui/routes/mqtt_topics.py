@@ -28,6 +28,11 @@ def topic_filter_from_prefix(prefix: str) -> str:
         raise ValueError("MQTT topic prefix cannot be empty")
     if "#" in normalized or "+" in normalized:
         raise ValueError("MQTT topic prefix cannot contain wildcard characters")
+    if "/" not in normalized:
+        # A root-level value may be only a fragment (for example "go" for
+        # "go-eCharger"). MQTT cannot wildcard part of a topic level, so scan
+        # root topics and filter the concrete results below.
+        return "#"
     return f"{normalized}#" if normalized.endswith("/") else f"{normalized}/#"
 
 
@@ -43,7 +48,8 @@ async def discover_mqtt_topics(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     topics = await manager.message_bus.discover_topics(topic_filter, timeout=2.0)
-    normalized_prefix = topic_filter.removesuffix("#")
+    normalized_prefix = request.prefix.strip()
+    topics = [topic for topic in topics if topic.startswith(normalized_prefix)]
     return {
         "prefix": normalized_prefix,
         "topics": topics[:200],

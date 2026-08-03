@@ -366,9 +366,13 @@ class MQTTClient(MessageBus):
             payload = message.payload.decode()
             callback_start = True
             concrete_topic = str(message.topic)
+            matches_persistent_topic = any(
+                message.topic.matches(topic_filter) for topic_filter in self._topics
+            )
             for topic_filter, sessions in list(self._topic_discovery_sessions.items()):
                 if message.topic.matches(topic_filter):
-                    callback_start = False
+                    if not matches_persistent_topic:
+                        callback_start = False
                     for discovered in sessions:
                         discovered.add(concrete_topic)
             for discovery_topic in self._discovery_topics:

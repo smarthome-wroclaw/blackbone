@@ -5,7 +5,10 @@ export function getMqttDiscoveryPrefix(topicOrPrefix: string): string {
   if (value.endsWith('/')) return value;
 
   const lastSlash = value.lastIndexOf('/');
-  return lastSlash >= 0 ? value.slice(0, lastSlash + 1) : `${value}/`;
+  // A root-level fragment (for example "go") is not yet a complete MQTT
+  // topic level. Keep it literal so the backend can scan root topics and
+  // filter the results by that fragment.
+  return lastSlash >= 0 ? value.slice(0, lastSlash + 1) : value;
 }
 
 function normalizeIdPart(value: string): string {

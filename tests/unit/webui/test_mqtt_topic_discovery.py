@@ -20,6 +20,7 @@ from boneio.webui.routes.mqtt_topics import (
     [
         ("go-eCharger/408783/", "go-eCharger/408783/#"),
         (" go-eCharger/408783 ", "go-eCharger/408783/#"),
+        ("go", "#"),
     ],
 )
 def test_topic_filter_from_prefix(prefix, expected):
@@ -42,6 +43,7 @@ async def test_discover_mqtt_topics_uses_manager_message_bus():
         return_value=[
             "go-eCharger/408783/car",
             "go-eCharger/408783/wh",
+            "homeassistant/sensor/example/config",
         ]
     )
     request = MqttTopicDiscoveryRequest(prefix="go-eCharger/408783/")
@@ -58,4 +60,24 @@ async def test_discover_mqtt_topics_uses_manager_message_bus():
             "go-eCharger/408783/car",
             "go-eCharger/408783/wh",
         ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_discover_mqtt_topics_filters_partial_root_prefix():
+    """A partial root fragment should scan root topics and filter the response."""
+    manager = MagicMock()
+    manager.message_bus.discover_topics = AsyncMock(
+        return_value=[
+            "go-eCharger/408783/eto",
+            "homeassistant/status",
+        ]
+    )
+
+    result = await discover_mqtt_topics(MqttTopicDiscoveryRequest(prefix="go"), manager)
+
+    manager.message_bus.discover_topics.assert_awaited_once_with("#", timeout=2.0)
+    assert result == {
+        "prefix": "go",
+        "topics": ["go-eCharger/408783/eto"],
     }

@@ -1,6 +1,7 @@
 """Tests for temporary MQTT topic discovery sessions."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -70,3 +71,46 @@ async def test_discover_topics_while_disconnected_only_collects_locally():
     assert topics == []
     client.subscribe.assert_not_awaited()
     client.unsubscribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discovery_does_not_suppress_normal_message_handling():
+    """Observing topics must not interrupt the application's MQTT callback."""
+    client = _make_client()
+    client._topics = ["go-eCharger/408783/#"]
+    discovered: set[str] = set()
+    client._topic_discovery_sessions = {"#": [discovered]}
+    callback = AsyncMock()
+
+    class Topic(str):
+        def matches(self, topic_filter: str) -> bool:
+            return topic_filter == "#" or self.startswith(topic_filter.removesuffix("#"))
+
+    async def messages():
+        yield SimpleNamespace(topic=Topic("go-eCharger/408783/eto"), payload=b"636054")
+
+    await client.handle_messages(messages(), callback)
+
+    assert discovered == {"go-eCharger/408783/eto"}
+    callback.assert_awaited_once_with("go-eCharger/408783/eto", "636054")
+
+
+@pytest.mark.asyncio
+async def test_discovery_suppresses_messages_only_received_for_scan():
+    """A broad scan must not send unrelated topics to the main parser."""
+    client = _make_client()
+    discovered: set[str] = set()
+    client._topic_discovery_sessions = {"#": [discovered]}
+    callback = AsyncMock()
+
+    class Topic(str):
+        def matches(self, topic_filter: str) -> bool:
+            return topic_filter == "#"
+
+    async def messages():
+        yield SimpleNamespace(topic=Topic("unrelated/device/state"), payload=b"on")
+
+    await client.handle_messages(messages(), callback)
+
+    assert discovered == {"unrelated/device/state"}
+    callback.assert_not_awaited()

@@ -13,6 +13,10 @@ describe('getMqttDiscoveryPrefix', () => {
     expect(getMqttDiscoveryPrefix('go-eCharger/408783/wh')).toBe('go-eCharger/408783/');
   });
 
+  it('keeps a partial root-level topic fragment', () => {
+    expect(getMqttDiscoveryPrefix('go')).toBe('go');
+  });
+
   it('returns an empty prefix for blank input', () => {
     expect(getMqttDiscoveryPrefix('   ')).toBe('');
   });
