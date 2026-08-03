@@ -196,7 +196,7 @@ class LoxUDPClient(MessageBus):
         if not state_value:
             return
 
-        self._send_udp(device_id, state_value)
+        self.send_udp(device_id, state_value)
 
     @staticmethod
     def _extract_state_value(
@@ -223,7 +223,7 @@ class LoxUDPClient(MessageBus):
             return payload.decode("utf-8")
         return str(payload)
 
-    def _send_udp(self, device_id: str, state_value: str) -> None:
+    def send_udp(self, device_id: str, state_value: str) -> None:
         """Send a UDP datagram to Loxone Miniserver.
 
         Args:
