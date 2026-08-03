@@ -6,7 +6,7 @@ The actual implementation is split into:
 - config_backups.py (backups management)
 - config_files.py (file editor)
 - config_actions.py (quick actions and validation)
-- config_discovery.py (HA discovery, interlock groups, Loxone)
+- config_discovery.py (HA discovery, interlock groups, Lox)
 """
 
 from __future__ import annotations

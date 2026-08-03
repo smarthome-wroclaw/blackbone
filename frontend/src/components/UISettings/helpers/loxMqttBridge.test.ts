@@ -74,7 +74,7 @@ describe('MQTT device grouping', () => {
     expect(groups[0].mappings.map(item => item.index)).toEqual([0, 2]);
   });
 
-  it('includes the device serial in grouped Loxone input IDs', () => {
+  it('includes the device serial in grouped Lox input IDs', () => {
     expect(suggestGroupedLoxDeviceId('go-eCharger/408783/eto')).toBe('echarger_408783_eto');
   });
 });

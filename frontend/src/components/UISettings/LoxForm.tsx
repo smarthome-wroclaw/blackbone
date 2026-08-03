@@ -32,7 +32,7 @@ function isValidIPv4(ip: string): boolean {
 
 /**
  * Validate a hostname string (RFC 1123).
- * Accepts formats like: miniserver.local, loxone.home, my-server
+ * Accepts formats like: miniserver.local, lox.home, my-server
  */
 function isValidHostname(host: string): boolean {
   if (host.length > 253) return false;
@@ -150,7 +150,7 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
         <HelpLabel>{t('lox_config.listen_port_help')}</HelpLabel>
       </div>
 
-      {/* MQTT to Loxone Bridge */}
+      {/* MQTT to Lox Bridge */}
       <div className="divider">{t('lox_config.mqtt_bridge_section')}</div>
 
       <MqttDeviceGroups
@@ -180,7 +180,9 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
         </button>
       </div>
 
-      <HelpLabel>{t('lox_config.template_help')}</HelpLabel>
+      <HelpLabel className="overflow-x-auto [&>span]:max-w-none [&>span]:whitespace-nowrap">
+        {t('lox_config.template_help')}
+      </HelpLabel>
     </div>
   );
 };

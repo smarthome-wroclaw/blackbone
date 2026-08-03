@@ -79,7 +79,7 @@ export function groupMqttBridgeMappings<T extends MqttBridgeMappingLike>(
   return [...groups.values()];
 }
 
-/** Build a globally unique Loxone input ID from every topic segment. */
+/** Build a globally unique Lox input ID from every topic segment. */
 export function suggestGroupedLoxDeviceId(topic: string): string {
   const segments = topic.split('/').map(segment => segment.trim()).filter(Boolean);
   if (segments.length === 0) return '';
@@ -89,7 +89,7 @@ export function suggestGroupedLoxDeviceId(topic: string): string {
     .join('_');
 }
 
-/** Build a readable default Loxone input ID from the root and leaf topic segments. */
+/** Build a readable default Lox input ID from the root and leaf topic segments. */
 export function suggestLoxDeviceId(topic: string): string {
   const segments = topic.split('/').map(segment => segment.trim()).filter(Boolean);
   if (segments.length === 0) return '';

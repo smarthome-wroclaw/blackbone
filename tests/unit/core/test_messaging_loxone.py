@@ -67,7 +67,7 @@ def test_lox_send_message_cover_position(config_helper_mock):
 
 
 def test_lox_send_message_event_entity(config_helper_mock):
-    """Test send_message with event entity type — should be sent to Loxone."""
+    """Test send_message with event entity type — should be sent to Lox."""
     client = LoxUDPClient(config_helper_mock, "127.0.0.1", 4444, 4445)
     client._transport = MagicMock()
 
@@ -94,7 +94,7 @@ def test_lox_send_message_input_entity(config_helper_mock):
 
 
 def test_lox_send_message_skips_cmd_topics(config_helper_mock):
-    """Test that command topics are not sent to Loxone."""
+    """Test that command topics are not sent to Lox."""
     client = LoxUDPClient(config_helper_mock, "127.0.0.1", 4444, 4445)
     client._transport = MagicMock()
 
@@ -103,7 +103,7 @@ def test_lox_send_message_skips_cmd_topics(config_helper_mock):
 
 
 def test_lox_send_message_skips_discovery(config_helper_mock):
-    """Test that HA Discovery messages are not sent to Loxone."""
+    """Test that HA Discovery messages are not sent to Lox."""
     client = LoxUDPClient(config_helper_mock, "127.0.0.1", 4444, 4445)
     client._transport = MagicMock()
 

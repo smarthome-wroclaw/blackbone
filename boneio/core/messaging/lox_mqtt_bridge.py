@@ -1,4 +1,4 @@
-"""Forward configured MQTT topic payloads to virtual Loxone UDP inputs."""
+"""Forward configured MQTT topic payloads to virtual Lox UDP inputs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class LoxMqttBridge:
-    """Bridge arbitrary MQTT topic payloads to named Loxone UDP inputs."""
+    """Bridge arbitrary MQTT topic payloads to named Lox UDP inputs."""
 
     def __init__(
         self,

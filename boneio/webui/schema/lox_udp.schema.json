@@ -55,8 +55,8 @@
         },
         "mqtt_bridge": {
           "type": "array",
-          "description": "Forward arbitrary MQTT topic payloads to virtual Loxone UDP inputs",
-          "title": "MQTT to Loxone bridge",
+          "description": "Forward arbitrary MQTT topic payloads to virtual Lox UDP inputs",
+          "title": "MQTT to Lox bridge",
           "items": {
             "type": "object",
             "properties": {
@@ -69,7 +69,7 @@
               "device_id": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Virtual Loxone UDP input identifier",
+                "description": "Virtual Lox UDP input identifier",
                 "title": "Device ID"
               }
             },

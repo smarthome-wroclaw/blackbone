@@ -301,7 +301,9 @@ export default function MqttDeviceGroups({ mappings, deviceIdCounts, onChange }:
       >
         <FaPlus /> {t('lox_config.mqtt_bridge_add')}
       </button>
-      <HelpLabel>{t('lox_config.mqtt_bridge_help')}</HelpLabel>
+      <HelpLabel className="overflow-x-auto [&>span]:max-w-none [&>span]:whitespace-nowrap">
+        {t('lox_config.mqtt_bridge_help')}
+      </HelpLabel>
     </div>
   );
 }
