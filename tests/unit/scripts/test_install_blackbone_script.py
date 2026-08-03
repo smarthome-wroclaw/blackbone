@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-INSTALLER = PROJECT_ROOT / "scripts" / "install-blackbone.sh"
+INSTALLER = PROJECT_ROOT / "install.sh"
 
 
 def test_installer_has_valid_bash_syntax():

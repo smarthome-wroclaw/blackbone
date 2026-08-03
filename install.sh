@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interactive migration from the stock Black app package to blackbone.
 # Designed to work both as a local script and through:
-#   curl -fsSL https://your-server.example/install-blackbone.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/install.sh | bash
 
 set -Eeuo pipefail
 
