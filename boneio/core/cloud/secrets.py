@@ -4,7 +4,7 @@ Cloud API secrets for boneIO Black.
 The MASTER_SECRET is resolved in this order:
 1. Environment variable BONEIO_MASTER_SECRET (already set in shell/systemd)
 2. BONEIO_MASTER_SECRET from .env file in working directory or /home/boneio/
-3. Build-time injected value (replaced by GitHub Actions during PyPI build)
+3. Unconfigured placeholder (release builds never embed secrets)
 
 For local development, set BONEIO_MASTER_SECRET in your .env file or shell.
 DO NOT commit real secrets to this file.
@@ -13,8 +13,7 @@ DO NOT commit real secrets to this file.
 import os
 from pathlib import Path
 
-# This placeholder is replaced by GitHub Actions during build.
-# See .github/workflows/publish-to-pypi.yaml
+# Public PyPI artifacts must never contain the shared master secret.
 _BUILD_SECRET = "__BONEIO_MASTER_SECRET_PLACEHOLDER__"
 
 

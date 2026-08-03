@@ -449,7 +449,7 @@ async def rollback_update(request: RollbackRequest, background_tasks: Background
             ver_lower = target_version.lower()
             if any(x in ver_lower for x in ['dev', 'alpha', 'beta', 'rc']):
                 pip_cmd.append("--pre")
-            pip_cmd.append(f"boneio=={target_version}")
+            pip_cmd.append(f"blackbone=={target_version}")
             
             result = subprocess.run(
                 pip_cmd,
@@ -492,7 +492,7 @@ async def list_available_versions():
     """
     List available BoneIO versions from GitHub releases.
     
-    These versions can be used for rollback via pip install boneio=={version}.
+    These versions can be used for rollback via pip install blackbone=={version}.
     
     Returns:
         List of available versions.
