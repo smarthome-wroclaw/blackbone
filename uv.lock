@@ -231,7 +231,7 @@ wheels = [
 ]
 
 [[package]]
-name = "boneio"
+name = "blackbone"
 source = { editable = "." }
 dependencies = [
     { name = "aioesphomeapi" },

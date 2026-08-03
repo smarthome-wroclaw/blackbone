@@ -8,7 +8,7 @@ sudo apt install -y libopenjp2-7-dev python3-venv libjpeg-dev docker-compose doc
 mkdir ~/boneio
 python3 -m venv ~/boneio/venv
 source ~/boneio/venv/bin/activate
-pip3 install --upgrade boneio
+pip3 install --upgrade blackbone
 cp ~/venv/lib/python3.13/site-packages/boneio/example_config/*.yaml ~/boneio/
 ```
 
