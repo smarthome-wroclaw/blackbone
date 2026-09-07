@@ -63,6 +63,63 @@ The installer is interactive: it auto-detects your existing virtual environment,
 up your current configuration and installed app before touching anything, installs BlackBone,
 and restarts the `boneio` service. Your existing config files are left in place.
 
+## Returning to the original boneIO app
+
+The migration is reversible. The safest option is to restore the application backup created by
+the BlackBone installer. This returns the app to the exact version installed before migration.
+
+SSH into the controller and set the paths below. The examples use the default locations. If the
+installer reported different paths, use those instead. Replace the timestamp in `BACKUP_DIR` with
+the directory created during migration.
+
+```bash
+VENV_DIR="$HOME/boneio/venv"
+BACKUP_DIR="$HOME/boneio/backups/blackbone_migration_YYYYMMDD_HHMMSS"
+APP_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'stock_black_app_*.tar.gz' -print -quit)"
+test -n "$APP_BACKUP" || { echo "Application backup not found"; exit 1; }
+
+sudo systemctl stop boneio
+"$VENV_DIR/bin/pip" uninstall --yes blackbone
+tar -C "$VENV_DIR" -xzf "$APP_BACKUP"
+```
+
+The installer does not change your YAML configuration. If you changed it after migration and also
+want to restore the old configuration, inspect and extract its backup before starting the service.
+Extraction overwrites YAML files with their backed-up copies.
+
+```bash
+CONFIG_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'configuration_*.tar.gz' -print -quit)"
+test -n "$CONFIG_BACKUP" || { echo "Configuration backup not found"; exit 1; }
+tar -tzf "$CONFIG_BACKUP"
+tar -C "$(dirname "$VENV_DIR")" -xzf "$CONFIG_BACKUP"
+```
+
+Verify the restored package, then start the service:
+
+```bash
+"$VENV_DIR/bin/python" -c 'from importlib.metadata import version; print(version("boneio"))'
+"$VENV_DIR/bin/pip" check
+sudo systemctl start boneio
+sudo systemctl is-active boneio
+```
+
+If you did not create an application backup, reinstall the latest official boneIO release from
+PyPI instead:
+
+```bash
+VENV_DIR="$HOME/boneio/venv"
+sudo systemctl stop boneio
+"$VENV_DIR/bin/pip" uninstall --yes blackbone
+"$VENV_DIR/bin/pip" install --upgrade --force-reinstall boneio
+sudo systemctl start boneio
+sudo systemctl is-active boneio
+```
+
+To install a specific official release, use `boneio==VERSION` instead of `boneio`. Review the
+[official boneIO releases](https://github.com/boneIO-eu/app_black/releases) and
+[update instructions](https://boneio.eu/en/docs/black/products/black_32x10a/software_setup/update-controller)
+before choosing a version.
+
 ## Contributing
 
 Found a bug or have a feature you'd like to see? Issues and pull requests are welcome at
@@ -127,6 +184,62 @@ curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/in
 Instalator działa interaktywnie: sam wykrywa istniejące środowisko wirtualne, proponuje kopię
 zapasową aktualnej konfiguracji i zainstalowanej aplikacji zanim cokolwiek zmieni, instaluje
 BlackBone i restartuje usługę `boneio`. Istniejące pliki konfiguracyjne pozostają nietknięte.
+
+### Powrót do oryginalnej aplikacji boneIO
+
+Migrację można cofnąć. Najbezpieczniej przywrócić kopię aplikacji utworzoną przez instalator
+BlackBone. Pozwala to wrócić dokładnie do wersji zainstalowanej przed migracją.
+
+Połącz się ze sterownikiem przez SSH i ustaw poniższe ścieżki. Przykład używa domyślnych
+lokalizacji. Jeżeli instalator wyświetlił inne ścieżki, użyj ich. W `BACKUP_DIR` zastąp znacznik
+czasu nazwą katalogu utworzonego podczas migracji.
+
+```bash
+VENV_DIR="$HOME/boneio/venv"
+BACKUP_DIR="$HOME/boneio/backups/blackbone_migration_YYYYMMDD_HHMMSS"
+APP_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'stock_black_app_*.tar.gz' -print -quit)"
+test -n "$APP_BACKUP" || { echo "Nie znaleziono kopii aplikacji"; exit 1; }
+
+sudo systemctl stop boneio
+"$VENV_DIR/bin/pip" uninstall --yes blackbone
+tar -C "$VENV_DIR" -xzf "$APP_BACKUP"
+```
+
+Instalator nie zmienia konfiguracji YAML. Jeśli konfiguracja została zmieniona po migracji i
+chcesz również przywrócić jej starszą wersję, sprawdź i rozpakuj kopię przed uruchomieniem usługi.
+Rozpakowanie nadpisze pliki YAML ich kopiami zapasowymi.
+
+```bash
+CONFIG_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'configuration_*.tar.gz' -print -quit)"
+test -n "$CONFIG_BACKUP" || { echo "Nie znaleziono kopii konfiguracji"; exit 1; }
+tar -tzf "$CONFIG_BACKUP"
+tar -C "$(dirname "$VENV_DIR")" -xzf "$CONFIG_BACKUP"
+```
+
+Sprawdź przywrócony pakiet, a następnie uruchom usługę:
+
+```bash
+"$VENV_DIR/bin/python" -c 'from importlib.metadata import version; print(version("boneio"))'
+"$VENV_DIR/bin/pip" check
+sudo systemctl start boneio
+sudo systemctl is-active boneio
+```
+
+Jeżeli kopia aplikacji nie została utworzona, zainstaluj najnowsze oficjalne wydanie boneIO z
+PyPI:
+
+```bash
+VENV_DIR="$HOME/boneio/venv"
+sudo systemctl stop boneio
+"$VENV_DIR/bin/pip" uninstall --yes blackbone
+"$VENV_DIR/bin/pip" install --upgrade --force-reinstall boneio
+sudo systemctl start boneio
+sudo systemctl is-active boneio
+```
+
+Aby zainstalować wybrane oficjalne wydanie, użyj `boneio==WERSJA` zamiast `boneio`. Przed wyborem
+wersji sprawdź [oficjalne wydania boneIO](https://github.com/boneIO-eu/app_black/releases) oraz
+[instrukcję aktualizacji](https://boneio.eu/pl/docs/black/products/black_32x10a/software_setup/update-controller).
 
 ### Kontrybuowanie
 
