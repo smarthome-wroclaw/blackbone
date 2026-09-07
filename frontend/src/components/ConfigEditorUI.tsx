@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from '@/api/axios';
 import * as yaml from 'js-yaml';
+import { YAML_DUMP_SCHEMA } from '@/utils/yamlSchema';
 import { FaCheck, FaTimes, FaSave, FaPlus, FaChevronDown, FaChevronRight } from 'react-icons/fa';
 import { TabsBox } from '@/components/ui/tabs-box';
 import { NumericInput } from '@/components/ui/NumericInput';
@@ -266,13 +267,11 @@ export default function ConfigEditorUI() {
         indent: 2,
         lineWidth: -1, // No line wrapping
         noRefs: true,
-        quotingType: '"',
+        schema: YAML_DUMP_SCHEMA,
+        quoteStyle: 'double',
         forceQuotes: false,
         sortKeys: false,
         flowLevel: -1, // Use block style (lists with -) instead of flow style
-        styles: {
-          '!!null': 'empty', // Represent null as empty
-        },
       });
       setYamlView(yamlString);
       console.log("YAML", yamlString);

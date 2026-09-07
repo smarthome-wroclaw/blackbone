@@ -3,6 +3,7 @@ import axios from '@/api/axios';
 import { fetchConfig } from '@/api/configCache';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import * as yaml from 'js-yaml';
+import { YAML_DUMP_SCHEMA } from '@/utils/yamlSchema';
 import {
   convertFormDataToOriginalTypes,
   convertTimeperiodToMilliseconds,
@@ -618,13 +619,11 @@ export default function UISettings() {
           indent: 2,
           lineWidth: -1, // No line wrapping
           noRefs: true,
-          quotingType: '"',
+          schema: YAML_DUMP_SCHEMA,
+          quoteStyle: 'double',
           forceQuotes: false,
           sortKeys: false,
           flowLevel: -1, // Use block style (lists with -) instead of flow style
-          styles: {
-            '!!null': 'empty', // Represent null as empty
-          },
         });
 
         return yamlString;
