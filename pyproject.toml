@@ -4,7 +4,7 @@ description = "Python application for boneIO Black"
 readme = "README.md"
 dynamic = ["version"]
 authors = [
-    { name = "Paweł Szafer", email = "pszafer@gmail.com" },
+    { name = "SmartHome Wrocław", email = "kontakt@smarthome.wroclaw.pl" },
 ]
 dependencies = [
     "smbus2==0.6.1",
