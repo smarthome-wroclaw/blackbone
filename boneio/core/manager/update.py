@@ -391,6 +391,8 @@ class UpdateManager(AsyncUpdater):
         self,
         target_version: str | None = None,
         on_progress: Callable[[int, str, str | None], None] | None = None,
+        install_target: str | None = None,
+        target_label: str | None = None,
     ) -> None:
         """Perform the actual update: pip install + restart.
 
@@ -405,6 +407,8 @@ class UpdateManager(AsyncUpdater):
             on_progress: Optional callback(progress_pct, step, log_msg).
                          Called at each stage so the caller can track progress.
                          If None, only MQTT progress is published.
+            install_target: Validated one-off package or repository argument for pip.
+            target_label: Safe display label used in progress messages.
         """
         if self._update_running:
             _LOGGER.warning("Update already in progress")
@@ -412,13 +416,14 @@ class UpdateManager(AsyncUpdater):
 
         self._update_running = True
         current_version = __version__
-        _LOGGER.info("Starting update from %s to %s", current_version, target_version or "latest")
+        progress_target = target_label or target_version
+        _LOGGER.info("Starting update from %s to %s", current_version, progress_target or "latest")
 
         async def _report(progress: int, step: str, log_msg: str | None = None) -> None:
             """Report progress to both MQTT and optional callback."""
             await self._publish_update_progress(
                 current_version=current_version,
-                target_version=target_version,
+                target_version=progress_target,
                 progress=progress,
                 status_text=step,
             )
@@ -497,31 +502,17 @@ class UpdateManager(AsyncUpdater):
             else:
                 await _report(40, "Pip upgrade skipped", "pip upgrade failed, continuing...")
 
-            # Build pip install command
-            pip_cmd = [pip_path, "install", "--upgrade"]
-
-            # Add --pre flag for pre-release versions (dev, alpha, beta, rc)
-            needs_pre = False
-            if (
-                target_version
-                and self._is_prerelease_version(target_version)
-                or not target_version
-                and self._is_prerelease_version(current_version)
-            ):
-                needs_pre = True
-
+            pip_cmd, pip_package, needs_pre = self._build_pip_install_command(
+                pip_path=pip_path,
+                current_version=current_version,
+                target_version=target_version,
+                install_target=install_target,
+            )
             if needs_pre:
-                pip_cmd.append("--pre")
                 await _report(42, "Using --pre flag", "Pre-release version detected")
 
-            if target_version:
-                pip_package = f"blackbone=={target_version}"
-            else:
-                pip_package = "blackbone"
-
-            pip_cmd.append(pip_package)
-
-            await _report(45, f"Downloading and installing {pip_package}...")
+            display_target = target_label or pip_package
+            await _report(45, f"Downloading and installing {display_target}...")
 
             # Retry logic: PyPI may not have the version available immediately
             max_retries = 3
@@ -533,7 +524,7 @@ class UpdateManager(AsyncUpdater):
                 await _report(
                     45 + (attempt - 1) * 10,
                     f"Installing (attempt {attempt}/{max_retries})...",
-                    f"Running: {' '.join(pip_cmd)}",
+                    f"Installing: {display_target}",
                 )
 
                 # Async subprocess — event loop stays responsive for MQTT
@@ -548,7 +539,7 @@ class UpdateManager(AsyncUpdater):
                     await _report(
                         45 + attempt * 10,
                         f"Retrying in {retry_delay}s...",
-                        f"Attempt {attempt} failed, PyPI index may not be ready",
+                        f"Attempt {attempt} failed; the source may be temporarily unavailable",
                     )
                     await asyncio.sleep(retry_delay)
 
@@ -561,14 +552,21 @@ class UpdateManager(AsyncUpdater):
             await _report(80, "BoneIO updated", "Package installed successfully")
             await _report(85, "Verifying installation...")
 
-            # Verify installed version (async)
-            _, show_stdout, _ = await _run_subprocess([pip_path, "show", "blackbone"], timeout=30)
+            # Verify the runtime package rather than a distribution name. Forks may
+            # publish under a different Python package name while still providing
+            # the ``boneio`` application module.
+            python_path = os.path.join(venv_path, "bin", "python")
+            verify_cmd = [
+                python_path,
+                "-c",
+                "from boneio.version import __version__; print(__version__)",
+            ]
+            verify_returncode, show_stdout, verify_stderr = await _run_subprocess(verify_cmd, timeout=30)
+            if verify_returncode != 0:
+                await _report(0, "Verification failed", verify_stderr.strip() or "Could not import boneio")
+                return
             old_version = current_version
-            new_version = current_version
-            for line in show_stdout.split("\n"):
-                if line.startswith("Version:"):
-                    new_version = line.split(":")[1].strip()
-                    break
+            new_version = show_stdout.strip() or current_version
 
             _LOGGER.info("Update successful: %s -> %s. Restarting service...", old_version, new_version)
 
@@ -625,6 +623,29 @@ class UpdateManager(AsyncUpdater):
         """
         ver_lower = version_str.lower()
         return any(x in ver_lower for x in ["dev", "alpha", "beta", "rc"])
+
+    @classmethod
+    def _build_pip_install_command(
+        cls,
+        *,
+        pip_path: str,
+        current_version: str,
+        target_version: str | None,
+        install_target: str | None,
+    ) -> tuple[list[str], str, bool]:
+        """Build a shell-free pip command for standard or one-off updates."""
+        pip_package = install_target or (
+            f"blackbone=={target_version}" if target_version else "blackbone"
+        )
+        needs_pre = install_target is None and (
+            bool(target_version and cls._is_prerelease_version(target_version))
+            or bool(not target_version and cls._is_prerelease_version(current_version))
+        )
+        command = [pip_path, "install", "--upgrade"]
+        if needs_pre:
+            command.append("--pre")
+        command.append(pip_package)
+        return command, pip_package, needs_pre
 
     async def _publish_update_progress(
         self,
