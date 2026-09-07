@@ -2,3 +2,41 @@
 
 Wszystkie istotne zmiany w `blackbone` będą dokumentowane w tym pliku przy
 użyciu Release Please i OpenRouter.
+
+<!-- blackbone-release:0.1.0:start -->
+## 0.1.0 (2026-09-07)
+
+### Funkcje
+
+* dodano interaktywny instalator migracji blackbone ([845c9ea](https://github.com/smarthome-wroclaw/blackbone/commit/845c9ea22effe75a42fbbf4d0e202499e27b7230))
+* dodano urządzenia MQTT do integracji Lox Config ([2e1f99e](https://github.com/smarthome-wroclaw/blackbone/commit/2e1f99eaba0bb766c1a6bc904af7cba84a03248e))
+* zautomatyzowano wydania blackbone do PyPI ([70369e3](https://github.com/smarthome-wroclaw/blackbone/commit/70369e3591aa170cc8c3a0e1144dde86741b298c))
+* **config:** walidacja mapowań mostka Lox MQTT ([8a92ac3](https://github.com/smarthome-wroclaw/blackbone/commit/8a92ac372ee50762ffc3aa03d28528cdb905567a))
+* generowanie dwujęzycznych informacji o wydaniu za pomocą OpenRouter ([3d6bcdd](https://github.com/smarthome-wroclaw/blackbone/commit/3d6bcdd7f90fc0d905861b70e485300ecb78e53a))
+* instalacja aktualizacji z alternatywnych źródeł pakietów ([5be151e](https://github.com/smarthome-wroclaw/blackbone/commit/5be151e3334b23c0ea21c516159fffa4fb8c6bef))
+* **installer:** dodano interaktywny skrypt migracji blackbone ([99037ed](https://github.com/smarthome-wroclaw/blackbone/commit/99037ed13a9ba575faf97f24ffb2e3c6c79a7491))
+* **lox:** eksport szablonów dla poszczególnych urządzeń jako zip ([a4fe2be](https://github.com/smarthome-wroclaw/blackbone/commit/a4fe2bed45160ec0152fe6c63b19fbb673a6c063))
+* **messaging:** mostkowanie ładunków MQTT do Lox UDP ([3d427b2](https://github.com/smarthome-wroclaw/blackbone/commit/3d427b2be6774d22db2813b92154606efdb4ea22))
+* **mqtt:** wykrywanie tematów według zakresu prefiksu ([e3f5a9a](https://github.com/smarthome-wroclaw/blackbone/commit/e3f5a9aa3e79d0dfb9a96644a2ba4fb4c1cdfebc))
+* zdalne wyjście rolet, odświeżanie pamięci podręcznej WLED, automatyczne wykrywanie typu urządzenia, filtrowanie skanowania, bezpieczeństwo typów ([938a1d6](https://github.com/smarthome-wroclaw/blackbone/commit/938a1d6b79f56e808e70a6b42449d865fcd1e836))
+* **update:** instalacja z alternatywnych źródeł pakietów ([c755ba6](https://github.com/smarthome-wroclaw/blackbone/commit/c755ba663a49eeee5e8327da8a8e1bfdea5b1855))
+* **webui:** autouzupełnianie mapowań Lox MQTT ([e58b720](https://github.com/smarthome-wroclaw/blackbone/commit/e58b7202e5cb4be3c1164f2630f3b1aa1f109b17))
+* **webui:** edycja mapowań mostka Lox MQTT ([7d1158d](https://github.com/smarthome-wroclaw/blackbone/commit/7d1158d7179873156f8a49f28162abfe2efb8ab1))
+* **webui:** grupowanie tematów MQTT według urządzenia ([c941c91](https://github.com/smarthome-wroclaw/blackbone/commit/c941c9156df65a8c990bcf8b75c952943e02205e))
+
+### Poprawki błędów
+
+* **mqtt:** wykrywanie tematów z częściowego prefiksu głównego ([c3c0116](https://github.com/smarthome-wroclaw/blackbone/commit/c3c011694fa458b7ce4a7e8fabae807e27e126ef))
+
+### Dokumentacja
+
+* dodano specyfikację projektową dla ujawnienia forka, instalacji i sekcji README dotyczących współtworzenia ([6bb34df](https://github.com/smarthome-wroclaw/blackbone/commit/6bb34dfbf621be16d0be0595c7a02972a84c0de9))
+* dodano polski przewodnik wydania ([c517090](https://github.com/smarthome-wroclaw/blackbone/commit/c517090ca8a18fa6bbcd3545077bcede0804b93f))
+* dodano zastrzeżenie o używaniu na własne ryzyko / brak odpowiedzialności ([5891bee](https://github.com/smarthome-wroclaw/blackbone/commit/5891beec38925069f8059489c6727b15af373ca5))
+* **agents:** wymaganie dwujęzycznych opisów pull requestów ([a96f648](https://github.com/smarthome-wroclaw/blackbone/commit/a96f6480c400a56c35b72821ea516ad3d3e7ad04))
+* wyśrodkowano logo, dodano linki do dokumentacji SSH i strony firmy w README ([6f02d4c](https://github.com/smarthome-wroclaw/blackbone/commit/6f02d4c290666453bf94e713a749992c52006e49))
+* ujawniono status forka, udokumentowano ścieżkę aktualizacji kontrolera, dodano sekcję współtworzenia ([546d0b7](https://github.com/smarthome-wroclaw/blackbone/commit/546d0b7d8e36407dba425d81dd5ab422dd2c0845))
+* ujawniono status forka, udokumentowano aktualizację kontrolera, dodano sekcję współtworzenia ([20266a8](https://github.com/smarthome-wroclaw/blackbone/commit/20266a8a273653b39994c00ee6c6f424d74867fe))
+* wymaganie dwujęzycznych opisów pull requestów ([480c90b](https://github.com/smarthome-wroclaw/blackbone/commit/480c90b17d71f716750b8b9fcc2e32e31cf1ae93))
+* użyto nazwy marki SmartHome Wrocław we wstępie README ([79cf617](https://github.com/smarthome-wroclaw/blackbone/commit/79cf617b2e12843e33733a27aa3f19455179a54b))
+<!-- blackbone-release:0.1.0:end -->
