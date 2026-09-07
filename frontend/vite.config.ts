@@ -73,9 +73,15 @@ export default defineConfig(({ mode }) => {
       }),
     ],
     resolve: {
-      alias: {
-        "@": path.resolve(__dirname, "./src"),
-      },
+      alias: [
+        // monaco-editor 0.56 added an exports map ("./*": "./esm/vs/*.js") that
+        // already injects the "esm/vs/" prefix. Deep imports that spell it out
+        // resolve to "esm/vs/esm/vs/..." and fail. Affects our own worker
+        // imports and monaco-worker-manager (via monaco-yaml), which hardcodes
+        // 'monaco-editor/esm/vs/editor/editor.worker.js' and can't be edited.
+        { find: /^monaco-editor\/esm\/vs\//, replacement: "monaco-editor/" },
+        { find: "@", replacement: path.resolve(__dirname, "./src") },
+      ],
     },
     build: {
       outDir: path.resolve(__dirname, '../boneio/webui/frontend-dist'),
