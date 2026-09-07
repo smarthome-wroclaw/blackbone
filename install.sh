@@ -6,7 +6,9 @@
 set -Eeuo pipefail
 
 readonly PACKAGE_NAME="blackbone"
+readonly LEGACY_PACKAGE_NAME="boneio"
 readonly SERVICE_NAME="boneio"
+readonly VERIFY_CODE='from importlib.metadata import version; from boneio.version import __version__; print(version("blackbone"), f"({__version__})")'
 
 info() {
   printf '\033[1;34m[blackbone]\033[0m %s\n' "$*"
@@ -140,12 +142,16 @@ if [[ $backup_app == true ]]; then
   backup_current_app "${BACKUP_ROOT}/stock_black_app_${current_version}_${TIMESTAMP}.tar.gz"
 fi
 
+if "$PIP_BIN" show "$LEGACY_PACKAGE_NAME" >/dev/null 2>&1; then
+  info "Removing the legacy ${LEGACY_PACKAGE_NAME} distribution..."
+  "$PIP_BIN" uninstall --yes "$LEGACY_PACKAGE_NAME"
+fi
+
 info "Downloading and installing the latest ${PACKAGE_NAME} package from PyPI..."
 "$PIP_BIN" install --upgrade --force-reinstall "$PACKAGE_NAME"
 
-installed_version="$($PYTHON_BIN -c \
-  'from importlib.metadata import version; from boneio.version import __version__; print(f"{version(\"blackbone\")} ({__version__})")' \
-)" || fail "The package was installed, but application verification failed."
+installed_version="$($PYTHON_BIN -c "$VERIFY_CODE")" \
+  || fail "The package was installed, but application verification failed."
 success "Installed ${PACKAGE_NAME} ${installed_version}."
 
 info "Restarting the ${SERVICE_NAME} service..."
