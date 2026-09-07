@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.0...v0.1.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **frontend:** resolve monaco worker imports broken by monaco-editor … ([4ce5245](https://github.com/smarthome-wroclaw/blackbone/commit/4ce5245ae4724f6505f6fead55edaf185b7e0822))
+* **frontend:** resolve monaco worker imports broken by monaco-editor 0.56 ([4467659](https://github.com/smarthome-wroclaw/blackbone/commit/446765951ad22d60d6d79f1182f0f19ea9579549))
+
 ## 0.1.0 (2026-09-07)
 
 
