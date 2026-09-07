@@ -14,7 +14,7 @@
     "check-i18n": "node scripts/check-translations.cjs"
   },
   "dependencies": {
-    "@base-ui/react": "^1.6.0",
+    "@base-ui/react": "^1.8.0",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.3.3",
     "axios": "^1.17.0",
