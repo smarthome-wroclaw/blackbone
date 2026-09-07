@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.1...v0.1.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **installer:** complete legacy package migration ([2cc9456](https://github.com/smarthome-wroclaw/blackbone/commit/2cc94564cd097975ed41412d2ae50b8005a2a0b6))
+* **installer:** complete legacy package migration ([588e87b](https://github.com/smarthome-wroclaw/blackbone/commit/588e87b325eac878aa022a01acb2d3756b4370ba))
+
 ## [0.1.1](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.0...v0.1.1) (2026-09-07)
 
 
