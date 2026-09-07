@@ -4,6 +4,16 @@ Wszystkie istotne zmiany w `blackbone` będą dokumentowane w tym pliku przy
 użyciu Release Please i OpenRouter.
 
 
+
+<!-- blackbone-release:0.1.2:start -->
+## [0.1.2](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.1...v0.1.2) (2026-09-07)
+
+### Poprawki błędów
+
+* **installer:** ukończono migrację starszych pakietów ([2cc9456](https://github.com/smarthome-wroclaw/blackbone/commit/2cc94564cd097975ed41412d2ae50b8005a2a0b6))
+* **installer:** ukończono migrację starszych pakietów ([588e87b](https://github.com/smarthome-wroclaw/blackbone/commit/588e87b325eac878aa022a01acb2d3756b4370ba))
+<!-- blackbone-release:0.1.2:end -->
+
 <!-- blackbone-release:0.1.1:start -->
 ## [0.1.1](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.0...v0.1.1) (2026-09-07)
 
