@@ -1,6 +1,6 @@
 services:
   node-red:
-    image: nodered/node-red:5.0.4-24-minimal
+    image: nodered/node-red:5.0.6-24-minimal
     restart: unless-stopped
     environment:
       TZ: Europe/Warsaw
