@@ -9,7 +9,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import { useNodeRedAvailability } from '../hooks/useNodeRedAvailability';
 import { useTranslation } from '../hooks/useTranslation';
 import { useAppInit } from '../contexts/AppInitContext';
-import Logo from "./Logo"
+import NavigationLogo from './NavigationLogo';
 import { HelpDialog } from './HelpView';
 
 export default function Navigation() {
@@ -53,7 +53,7 @@ export default function Navigation() {
       </div>
       <div className="flex-1 flex items-center">
         <a className="normal-case text-xl xl:mx-2">
-          <Logo />
+          <NavigationLogo />
         </a>
         <div className="hidden xl:flex xl:ml-4 flex-col text-xs">
           {deviceName && (
@@ -273,7 +273,7 @@ export const DrawerSide = () => {
       <div className="bg-base-100 text-base-content min-h-full w-80 p-4 pt-6 shadow-xl flex flex-col">
         {/* Header */}
         <div className="flex items-center gap-3 px-2 pb-4 mb-2 border-b border-base-300">
-          <Logo />
+          <NavigationLogo />
         </div>
         
         {/* Menu */}

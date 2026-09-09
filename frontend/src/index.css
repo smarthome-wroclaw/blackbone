@@ -25,6 +25,33 @@
   }
 }
 
+.blackbone-logo {
+  display: inline-flex;
+  align-items: center;
+}
+
+.blackbone-logo__dark {
+  display: none;
+}
+
+[data-theme="dark"] .blackbone-logo__light {
+  display: none;
+}
+
+[data-theme="dark"] .blackbone-logo__dark {
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .blackbone-logo__light {
+    display: none;
+  }
+
+  :root:not([data-theme]) .blackbone-logo__dark {
+    display: block;
+  }
+}
+
 body {
   margin: 0;
   display: flex;
