@@ -57,11 +57,23 @@ jobs:
         run: npm install -g pnpm@10
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
         working-directory: frontend
 
       - name: Run frontend unit tests
         run: pnpm test
+        working-directory: frontend
+
+      - name: Build frontend
+        run: pnpm build
+        working-directory: frontend
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: frontend
+
+      - name: Run frontend production smoke test
+        run: pnpm test:smoke
         working-directory: frontend
 
   # TODO: Enable lint job after running: black boneio tests && isort boneio tests
