@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.3...v0.1.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* **update:** discover releases from the BlackBone fork ([7461472](https://github.com/smarthome-wroclaw/blackbone/commit/74614722fa9c01f8d01b16492fbb6ef9d6199a04))
+* **update:** discover releases from the BlackBone fork ([dfa9b91](https://github.com/smarthome-wroclaw/blackbone/commit/dfa9b918a52439d04c890a918ddca8712d7b6fad))
+
 ## [0.1.3](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.2...v0.1.3) (2026-09-09)
 
 
