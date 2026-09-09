@@ -23,6 +23,12 @@ from boneio.webui.services.logs import is_running_as_service
 # Flag file created before restart so the new process knows it was an update
 UPDATE_FLAG_PATH = Path("/tmp/boneio_update_in_progress")
 
+# Branding for the Home Assistant update entity
+UPDATE_ENTITY_TITLE = "BlackBone Firmware"
+UPDATE_ENTITY_PICTURE = (
+    "https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/docs/assets/blackbone-white.svg"
+)
+
 if TYPE_CHECKING:
     from boneio.core.manager import Manager
 
@@ -145,10 +151,6 @@ class UpdateManager(AsyncUpdater):
                 tag = release["tag_name"]
                 ver_str = tag[1:] if tag.startswith("v") else tag
 
-                # Skip v0.x versions (Debian 10, incompatible)
-                if tag.startswith("v0."):
-                    continue
-
                 is_prerelease = release.get("prerelease", False)
 
                 if not is_prerelease:
@@ -270,10 +272,10 @@ class UpdateManager(AsyncUpdater):
         state_payload = {
             "installed_version": current_version,
             "latest_version": latest_version,
-            "title": "boneIO Black Firmware",
+            "title": UPDATE_ENTITY_TITLE,
             "release_url": update_info.get("release_url", ""),
             "release_summary": release_summary[:255],  # HA limit
-            "entity_picture": "http://boneio.eu/logo_fb_circle.png",
+            "entity_picture": UPDATE_ENTITY_PICTURE,
             "in_progress": False,
             "update_percentage": None,
         }
@@ -686,10 +688,10 @@ class UpdateManager(AsyncUpdater):
         state_payload = {
             "installed_version": current_version,
             "latest_version": target_version or current_version,
-            "title": "boneIO Black Firmware",
+            "title": UPDATE_ENTITY_TITLE,
             "release_url": self._last_check_result.get("release_url", "") if self._last_check_result else "",
             "release_summary": summary[:255],  # HA limit
-            "entity_picture": "http://boneio.eu/logo_fb_circle.png",
+            "entity_picture": UPDATE_ENTITY_PICTURE,
             "in_progress": is_updating,
             "update_percentage": float(progress) if is_updating else None,
         }
@@ -715,12 +717,12 @@ class UpdateManager(AsyncUpdater):
         state_payload = {
             "installed_version": current_version,
             "latest_version": current_version,
-            "title": "boneIO Black Firmware",
+            "title": UPDATE_ENTITY_TITLE,
             "release_url": "",
             "release_summary": (
                 "System migration bootstrap required. Open the BoneIO WebUI → System → Migrations to complete setup."
             ),
-            "entity_picture": "http://boneio.eu/logo_fb_circle.png",
+            "entity_picture": UPDATE_ENTITY_PICTURE,
             "in_progress": False,
             "update_percentage": None,
         }

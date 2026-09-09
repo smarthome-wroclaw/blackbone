@@ -588,3 +588,108 @@ class TestPublishUpdateProgressStatusText:
         assert "❌ Update failed" in payload["release_summary"]
         assert "Changelog details" in payload["release_summary"]
 
+
+
+# ---------------------------------------------------------------------------
+# Fork release discovery and BlackBone branding
+# ---------------------------------------------------------------------------
+
+
+def _fork_releases() -> list[dict]:
+    """GitHub releases as published by smarthome-wroclaw/blackbone (0.x tags)."""
+    base = "https://github.com/smarthome-wroclaw/blackbone/releases/tag"
+    return [
+        {
+            "tag_name": "v0.1.3",
+            "prerelease": False,
+            "html_url": f"{base}/v0.1.3",
+            "published_at": "2026-09-09T23:30:26Z",
+            "body": "Newest fork release",
+        },
+        {
+            "tag_name": "v0.1.2",
+            "prerelease": False,
+            "html_url": f"{base}/v0.1.2",
+            "published_at": "2026-09-07T23:13:03Z",
+            "body": "Older fork release",
+        },
+    ]
+
+
+class TestForkReleaseDiscovery:
+    """BlackBone releases carry 0.x tags and must not be filtered out."""
+
+    def test_v0_releases_are_offered_as_updates(self, monkeypatch):
+        """A newer v0.x release is recognised instead of being skipped."""
+        um = _make_update_manager(pending=[])
+        monkeypatch.setattr(_update_mod, "__version__", "0.1.2")
+
+        fake_routes = types.ModuleType("boneio.webui.routes.update")
+        fake_routes._fetch_github_releases = MagicMock(return_value=(_fork_releases(), None))
+        monkeypatch.setitem(sys.modules, "boneio.webui.routes.update", fake_routes)
+
+        result = asyncio.run(um._check_update_from_github())
+
+        assert result["status"] == "success"
+        assert result["latest_version"] == "0.1.3"
+        assert result["update_available"] is True
+
+
+class TestBlackBoneBranding:
+    """Update entity must present the fork's identity, not boneIO's."""
+
+    @staticmethod
+    def _published_payload(um: UpdateManager) -> dict:
+        call_kwargs = um._manager.send_message.call_args
+        return json.loads(call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload"))
+
+    def test_state_payload_is_branded(self):
+        """_publish_state_to_mqtt uses BlackBone title and picture."""
+        um = _make_update_manager(pending=[])
+
+        asyncio.run(
+            um._publish_state_to_mqtt(
+                {
+                    "status": "success",
+                    "current_version": "0.1.2",
+                    "latest_version": "0.1.3",
+                    "update_available": True,
+                    "release_url": "https://github.com/smarthome-wroclaw/blackbone",
+                    "release_notes": "Bug fixes",
+                }
+            )
+        )
+
+        payload = self._published_payload(um)
+        assert payload["title"] == "BlackBone Firmware"
+        assert "blackbone" in payload["entity_picture"].lower()
+        assert "boneio.eu" not in payload["entity_picture"]
+
+    def test_progress_payload_is_branded(self):
+        """_publish_update_progress uses BlackBone title and picture."""
+        um = _make_update_manager(pending=[])
+        um._last_check_result = {"release_notes": "Changelog", "release_url": ""}
+
+        asyncio.run(
+            um._publish_update_progress(
+                current_version="0.1.2",
+                target_version="0.1.3",
+                progress=50,
+            )
+        )
+
+        payload = self._published_payload(um)
+        assert payload["title"] == "BlackBone Firmware"
+        assert "blackbone" in payload["entity_picture"].lower()
+        assert "boneio.eu" not in payload["entity_picture"]
+
+    def test_bootstrap_required_payload_is_branded(self):
+        """_publish_bootstrap_required_state uses BlackBone title and picture."""
+        um = _make_update_manager(pending=[])
+
+        asyncio.run(um._publish_bootstrap_required_state())
+
+        payload = self._published_payload(um)
+        assert payload["title"] == "BlackBone Firmware"
+        assert "blackbone" in payload["entity_picture"].lower()
+        assert "boneio.eu" not in payload["entity_picture"]
