@@ -63,6 +63,20 @@ The installer is interactive: it auto-detects your existing virtual environment,
 up your current configuration and installed app before touching anything, installs BlackBone,
 and restarts the `boneio` service. Your existing config files are left in place.
 
+### Controllers running a pre-0.1 BlackBone build
+
+BlackBone restarted its version numbering at `0.1.0`, below the `1.x` line inherited from boneIO.
+A controller still running an early BlackBone build (for example `1.6.0.dev1`) therefore never
+sees newer releases under **System → Software Update**: pip treats `0.1.x` as a downgrade. Upgrade
+such a controller once over SSH:
+
+```bash
+"$HOME/boneio/venv/bin/pip" install --force-reinstall blackbone
+sudo systemctl restart boneio
+```
+
+From then on in-app updates work normally.
+
 ## Returning to the original boneIO app
 
 The migration is reversible. The safest option is to restore the application backup created by
@@ -184,6 +198,20 @@ curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/in
 Instalator działa interaktywnie: sam wykrywa istniejące środowisko wirtualne, proponuje kopię
 zapasową aktualnej konfiguracji i zainstalowanej aplikacji zanim cokolwiek zmieni, instaluje
 BlackBone i restartuje usługę `boneio`. Istniejące pliki konfiguracyjne pozostają nietknięte.
+
+#### Sterowniki z buildem BlackBone sprzed 0.1
+
+BlackBone zaczyna numerację wersji od `0.1.0`, czyli poniżej linii `1.x` odziedziczonej po boneIO.
+Sterownik z wczesnym buildem BlackBone (na przykład `1.6.0.dev1`) nigdy nie zobaczy więc nowszych
+wydań w **System → Aktualizacja oprogramowania** — pip traktuje `0.1.x` jako cofnięcie wersji. Taki
+sterownik podnieś jednorazowo przez SSH:
+
+```bash
+"$HOME/boneio/venv/bin/pip" install --force-reinstall blackbone
+sudo systemctl restart boneio
+```
+
+Od tego momentu aktualizacje z poziomu aplikacji działają normalnie.
 
 ### Powrót do oryginalnej aplikacji boneIO
 

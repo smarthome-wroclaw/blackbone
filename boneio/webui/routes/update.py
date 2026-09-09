@@ -29,6 +29,9 @@ _LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["update"])
 
+# GitHub repository whose releases drive the update checker.
+GITHUB_RELEASES_REPO = "smarthome-wroclaw/blackbone"
+
 # ── GitHub releases cache ────────────────────────────────────────────────
 # Unauthenticated GitHub API allows 60 req/h per IP.
 # With multiple boneIO devices behind the same IP this is easily exceeded.
@@ -50,7 +53,7 @@ def _get_cached_releases() -> list | None:
     return None
 
 
-def _fetch_github_releases(repo: str = "boneIO-eu/app_black") -> tuple[list | None, str | None]:
+def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API with caching.
 
     Returns:
@@ -219,8 +222,6 @@ async def check_update():
                 "release_url": release['html_url'],
                 "published_at": release['published_at'],
             }
-            if tag.startswith("v0."):
-                continue
             available_versions.append(ver_info)
             
             try:
