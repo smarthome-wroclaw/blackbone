@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.3](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.2...v0.1.3) (2026-09-09)
+
+
+### Bug Fixes
+
+* **frontend:** update navigation logo and align React versions ([36794a6](https://github.com/smarthome-wroclaw/blackbone/commit/36794a66d5280cac3ad3cd72c526566d4e0ebd25))
+* **frontend:** update navigation logo and align React versions ([db7812b](https://github.com/smarthome-wroclaw/blackbone/commit/db7812b088834fc7719dae578cf60d105ea13ba0))
+
+
+### Documentation
+
+* explain how to return to original boneIO app ([c12a787](https://github.com/smarthome-wroclaw/blackbone/commit/c12a7873f9babf8ba55b29f5e04437ecab9b73c3))
+
 ## [0.1.2](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.1...v0.1.2) (2026-09-07)
 
 
