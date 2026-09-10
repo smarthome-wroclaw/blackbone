@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.4...v0.2.0) (2026-09-10)
+
+
+### Features
+
+* add declarative Modbus add-ons ([a0044d5](https://github.com/smarthome-wroclaw/blackbone/commit/a0044d577ebb2e90e9eff1b1cc5e4d17ae7007c0))
+* **display:** show BlackBone logo on the OLED instead of boneIO ([000a3c2](https://github.com/smarthome-wroclaw/blackbone/commit/000a3c2cda693ff2c267d92f2fb3bd1ad5686536))
+
+
+### Documentation
+
+* correct the pre-0.1 upgrade procedure ([74a4b4d](https://github.com/smarthome-wroclaw/blackbone/commit/74a4b4dd169b2cac0367a678d36164590abe7077))
+* correct the pre-0.1 upgrade procedure ([f2aa64c](https://github.com/smarthome-wroclaw/blackbone/commit/f2aa64c43c1835bad64e21a294196b8136a9a706))
+
 ## [0.1.4](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.3...v0.1.4) (2026-09-09)
 
 
