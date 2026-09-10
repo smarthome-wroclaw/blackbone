@@ -9,9 +9,9 @@ ConditionPathExists=!/dev/.boneio-oled-done
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/oled_boot_splash.sh "boneIO Black" "OS is starting." "Please wait..."
+ExecStart=/usr/sbin/oled_boot_splash.sh "BlackBone" "OS is starting." "Please wait..."
 RemainAfterExit=yes
-ExecStop=/usr/sbin/oled_boot_splash.sh "boneIO Black" "App is loading..."
+ExecStop=/usr/sbin/oled_boot_splash.sh "BlackBone" "App is loading..."
 
 [Install]
 WantedBy=sysinit.target

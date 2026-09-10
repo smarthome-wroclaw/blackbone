@@ -4,9 +4,9 @@ After=multi-user.target network.target boneio-oled-boot.service
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/sbin/oled_msg.sh "boneIO Black" "is starting..." "Please wait..."
+ExecStartPre=-/usr/sbin/oled_msg.sh "BlackBone" "is starting..." "Please wait..."
 ExecStart=${BONEIO_HOME}/boneio/venv/bin/boneio run -c ${BONEIO_HOME}/boneio/config.yaml
-ExecStopPost=-/bin/sh -c 'if ! systemctl is-system-running --quiet 2>/dev/null; then /usr/sbin/oled_msg.sh "boneIO Black" "Shutting down..."; fi'
+ExecStopPost=-/bin/sh -c 'if ! systemctl is-system-running --quiet 2>/dev/null; then /usr/sbin/oled_msg.sh "BlackBone" "Shutting down..."; fi'
 User=${BONEIO_USER}
 Restart=always
 RestartSec=3
