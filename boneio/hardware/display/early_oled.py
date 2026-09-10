@@ -18,6 +18,8 @@ import logging
 import textwrap
 from typing import Any
 
+from boneio.hardware.display.logo import draw_logo
+
 _LOGGER = logging.getLogger(__name__)
 
 # Module-level singleton: initialized once, reused everywhere
@@ -44,7 +46,6 @@ def _get_fonts() -> dict[str, Any] | None:
             "big": make_font("DejaVuSans.ttf", 12),
             "small": make_font("DejaVuSans.ttf", 9),
             "extraSmall": make_font("DejaVuSans.ttf", 7),
-            "danube": make_font("danube__.ttf", 15, local=True),
         }
     except (OSError, ImportError):
         try:
@@ -55,7 +56,6 @@ def _get_fonts() -> dict[str, Any] | None:
                 "big": ImageFont.load_default(),
                 "small": ImageFont.load_default(),
                 "extraSmall": ImageFont.load_default(),
-                "danube": ImageFont.load_default(),
             }
         except ImportError:
             _LOGGER.debug("PIL not available, OLED text rendering disabled")
@@ -120,7 +120,7 @@ def is_taken_over() -> bool:
 def draw_status(message: str, device: Any | None = None) -> None:
     """Draw a startup/status message on the OLED display.
 
-    Shows the boneIO logo at the top and a status line below.
+    Shows the BlackBone logo at the top and a status line below.
 
     Args:
         message: Status message to display (max ~20 chars for good readability).
@@ -136,8 +136,7 @@ def draw_status(message: str, device: Any | None = None) -> None:
         if fonts is None:
             return
         with canvas(dev) as draw:
-            draw.text((3, 3), "bone", font=fonts["danube"], fill=1)
-            draw.text((53, 3), "iO", font=fonts["danube"], fill=1)
+            draw_logo(draw, fill=1)
             draw.text((3, 30), message, font=fonts["small"], fill=1)
     except Exception as err:
         _LOGGER.debug("Failed to draw status on OLED: %s", err)

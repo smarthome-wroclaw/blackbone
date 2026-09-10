@@ -94,6 +94,17 @@ def _get_modbus_device_models() -> list[str]:
             for fname in files:
                 if fname.endswith(".json"):
                     models.append(fname[:-5])
+    # Controller-local declarative add-ons are deliberately separate from the
+    # package catalog so application updates preserve them.
+    from boneio.core.utils.util import get_custom_modbus_devices_dir
+
+    addon_devices_dir = get_custom_modbus_devices_dir()
+    if addon_devices_dir and os.path.isdir(addon_devices_dir):
+        for root, dirs, files in os.walk(addon_devices_dir):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for fname in files:
+                if fname.endswith(".json"):
+                    models.append(fname[:-5])
     return sorted(models)
 
 
@@ -1226,6 +1237,9 @@ def load_config_from_file(
     import time as _time
 
     _t0 = _time.monotonic()
+    from boneio.core.utils.util import set_custom_modbus_devices_dir
+
+    set_custom_modbus_devices_dir(os.path.dirname(os.path.abspath(config_file)))
 
     # Try loading from cache first (fast path: ~0.5s vs ~20s)
     cached = _try_load_cached_config(config_file)

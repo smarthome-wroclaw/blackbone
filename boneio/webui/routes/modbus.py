@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from boneio.core.manager import Manager
+from boneio.core.utils.util import get_custom_modbus_devices_dir
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,16 @@ _modbus_helper_lock = asyncio.Lock()
 
 # Cancel flag for search operations
 _modbus_search_cancel = False
+
+
+def _modbus_device_directories() -> list[str]:
+    """Return core and enabled controller-local device catalogs."""
+    core = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "modbus", "devices"))
+    directories = [core]
+    addon_dir = get_custom_modbus_devices_dir()
+    if addon_dir and os.path.isdir(addon_dir):
+        directories.append(addon_dir)
+    return directories
 
 
 def get_manager():
@@ -529,57 +540,43 @@ async def get_modbus_models():
     Returns:
         Dictionary mapping model file names to their capabilities.
     """
-    devices_dir = os.path.join(
-        os.path.dirname(__file__), "..", "..", "modbus", "devices"
-    )
-    devices_dir = os.path.normpath(devices_dir)
     models: dict[str, dict[str, Any]] = {}
+    for devices_dir in _modbus_device_directories():
+        if not os.path.isdir(devices_dir):
+            continue
+        for root, _dirs, files in os.walk(devices_dir):
+            for fname in files:
+                if not fname.endswith(".json"):
+                    continue
+                model_key = fname[:-5]  # strip .json
+                try:
+                    with open(os.path.join(root, fname)) as fh:
+                        db = json.load(fh)
+                except Exception as exc:
+                    _LOGGER.debug("Failed to read model file %s: %s", fname, exc)
+                    continue
 
-    if not os.path.isdir(devices_dir):
-        _LOGGER.warning("Modbus devices directory not found: %s", devices_dir)
-        return {"models": models}
+                device_classes: set[str] = set()
+                temperature_sensors: list[dict[str, str]] = []
+                for reg_base in db.get("registers_base", []):
+                    for reg in reg_base.get("registers", []):
+                        dc = reg.get("device_class")
+                        if dc:
+                            device_classes.add(dc)
+                        entity_category = reg.get("entity_category")
+                        if dc == "temperature" and entity_category not in ("config", "diagnostic"):
+                            name = reg.get("name", "Temperature")
+                            suffix = name.replace(" ", "").lower().replace("_", "")
+                            temperature_sensors.append({"name": name, "suffix": suffix})
 
-    for root, _dirs, files in os.walk(devices_dir):
-        for fname in files:
-            if not fname.endswith(".json"):
-                continue
-            model_key = fname[:-5]  # strip .json
-            try:
-                with open(os.path.join(root, fname)) as fh:
-                    db = json.load(fh)
-            except Exception as exc:
-                _LOGGER.debug("Failed to read model file %s: %s", fname, exc)
-                continue
-
-            device_classes: set[str] = set()
-            temperature_sensors: list[dict[str, str]] = []
-            for reg_base in db.get("registers_base", []):
-                for reg in reg_base.get("registers", []):
-                    dc = reg.get("device_class")
-                    if dc:
-                        device_classes.add(dc)
-                    # Only include actual measurement sensors, not
-                    # config/diagnostic registers (e.g. calibration offsets)
-                    entity_category = reg.get("entity_category")
-                    if dc == "temperature" and entity_category not in ("config", "diagnostic"):
-                        name = reg.get("name", "Temperature")
-                        # Match entity ID suffix generation from BaseEntity:
-                        # _decoded_name_low = name.replace(" ", "").lower()
-                        # _id suffix = _decoded_name_low.replace("_", "")
-                        suffix = name.replace(" ", "").lower().replace("_", "")
-                        temperature_sensors.append({
-                            "name": name,
-                            "suffix": suffix,
-                        })
-
-            models[model_key] = {
-                "display_name": db.get("model", model_key),
-                "has_temperature": "temperature" in device_classes,
-                "has_humidity": "humidity" in device_classes,
-                "has_energy": "energy" in device_classes or "power" in device_classes,
-                "device_classes": sorted(device_classes),
-                "temperature_sensors": temperature_sensors,
-            }
+                models[model_key] = {
+                    "display_name": db.get("model", model_key),
+                    "has_temperature": "temperature" in device_classes,
+                    "has_humidity": "humidity" in device_classes,
+                    "has_energy": "energy" in device_classes or "power" in device_classes,
+                    "device_classes": sorted(device_classes),
+                    "temperature_sensors": temperature_sensors,
+                }
 
     return {"models": models}
 
@@ -597,22 +594,20 @@ async def get_model_entities(model_name: str):
     Returns:
         List of entity definitions with name and decoded_name.
     """
-    devices_dir = os.path.join(
-        os.path.dirname(__file__), "..", "..", "modbus", "devices"
-    )
-    devices_dir = os.path.normpath(devices_dir)
-
     # Find model JSON file
     filename = f"{model_name}.json"
     db = None
-    for root, _dirs, files in os.walk(devices_dir):
-        if filename in files:
-            try:
-                with open(os.path.join(root, filename)) as fh:
-                    db = json.load(fh)
-                break
-            except Exception as exc:
-                raise HTTPException(status_code=500, detail=f"Failed to read model file: {exc}") from exc
+    for devices_dir in _modbus_device_directories():
+        for root, _dirs, files in os.walk(devices_dir):
+            if filename in files:
+                try:
+                    with open(os.path.join(root, filename)) as fh:
+                        db = json.load(fh)
+                    break
+                except Exception as exc:
+                    raise HTTPException(status_code=500, detail=f"Failed to read model file: {exc}") from exc
+        if db is not None:
+            break
 
     if db is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")

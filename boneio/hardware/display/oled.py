@@ -21,6 +21,7 @@ from boneio.core.system import HostData
 from boneio.core.utils.font_util import make_font
 from boneio.core.utils.timeperiod import TimePeriod
 from boneio.exceptions import I2CError
+from boneio.hardware.display.logo import draw_logo
 from boneio.models import InputState, OutputState
 
 if TYPE_CHECKING:
@@ -34,7 +35,6 @@ try:
         "big": make_font("DejaVuSans.ttf", 12),
         "small": make_font("DejaVuSans.ttf", 9),
         "extraSmall": make_font("DejaVuSans.ttf", 7),
-        "danube": make_font("danube__.ttf", 15, local=True),
     }
 except OSError:
     # Fallback to default PIL fonts if TTF fonts are not available
@@ -45,7 +45,6 @@ except OSError:
         "big": ImageFont.load_default(),
         "small": ImageFont.load_default(),
         "extraSmall": ImageFont.load_default(),
-        "danube": ImageFont.load_default(),
     }
 
 # Screen layout constants
@@ -588,7 +587,7 @@ class Oled:
             row_no += 15
 
     def _draw_uptime(self, draw: ImageDrawType) -> None:
-        """Draw uptime screen with boneIO logo."""
+        """Draw uptime screen with the BlackBone logo."""
         uptime_data = self._host_data.get(UPTIME)
 
         if not isinstance(uptime_data, dict):
@@ -597,9 +596,8 @@ class Oled:
             draw.text((3, START_ROW), str(uptime_data), font=fonts["small"], fill=WHITE)
             return
 
-        # Draw boneIO logo at the top (split into two parts)
-        draw.text((3, 3), "bone", font=fonts["danube"], fill=WHITE)
-        draw.text((53, 3), "iO", font=fonts["danube"], fill=WHITE)
+        # BlackBone logo bitmap at the top
+        draw_logo(draw, fill=WHITE)
 
         # Check if data follows the format with position info
         if all(isinstance(v, dict) and "data" in v for v in uptime_data.values()):

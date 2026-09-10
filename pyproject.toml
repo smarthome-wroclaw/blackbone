@@ -70,6 +70,7 @@ include = ["boneio*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.yaml", "*.yml", "*.ttf", "*.sh"]
+"boneio.hardware.display" = ["assets/*.png"]
 "boneio.webui" = ["frontend-dist/**/*"]
 "boneio.migrations" = [
     "assets/**/*",
