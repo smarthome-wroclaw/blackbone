@@ -18,6 +18,7 @@ const lazyImports = {
   SystemState: () => import('./components/UISettings/SystemState'),
   NodeRedView: () => import('./components/NodeRedView'),
   TemplatesView: () => import('./components/TemplatesView'),
+  AddonsView: () => import('./components/AddonsView'),
 } as const;
 
 const ConfigEditor = lazy(lazyImports.ConfigEditor);
@@ -32,6 +33,7 @@ const UISettings = lazy(lazyImports.UISettings);
 const SystemState = lazy(lazyImports.SystemState);
 const NodeRedView = lazy(lazyImports.NodeRedView);
 const TemplatesView = lazy(lazyImports.TemplatesView);
+const AddonsView = lazy(lazyImports.AddonsView);
 
 /**
  * Prefetch all lazy route chunks in the background after initial render.
@@ -53,6 +55,7 @@ function prefetchRouteChunks() {
     lazyImports.HelpView,
     lazyImports.SystemState,
     lazyImports.NodeRedView,
+    lazyImports.AddonsView,
   ];
   // Stagger imports so they don't all fire at once
   toPrefetch.forEach((importFn, i) => {
@@ -447,6 +450,13 @@ function AppContent() {
           <ProtectedRoute>
             <Layout>
               <NodeRedView />
+            </Layout>
+          </ProtectedRoute>
+        } />
+        <Route path="/addons" element={
+          <ProtectedRoute>
+            <Layout>
+              <AddonsView />
             </Layout>
           </ProtectedRoute>
         } />

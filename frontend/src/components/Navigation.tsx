@@ -140,6 +140,7 @@ function Menu({ sideMenu = false }: { sideMenu?: boolean }) {
     { path: '/sensors', icon: FaThermometerHalf, label: t('navigation.sensors') },
     { path: '/modbus', icon: FaNetworkWired, label: t('navigation.modbus') },
     { path: '/templates', icon: FaPuzzlePiece, label: t('navigation.templates') },
+    { path: '/addons', icon: FaPuzzlePiece, label: 'Add-ons', right: true },
     { path: '/tools', icon: FaToolbox, label: t('navigation.tools'), right: true },
     // Settings (experimental) - only show if boneio section exists in config
     ...(hasBoneioSection ? [{ path: '/settings', icon: FaCog, label: t('navigation.settings'), right: true }] : []),

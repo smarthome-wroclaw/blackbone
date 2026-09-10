@@ -1,6 +1,7 @@
 """Routes package for BoneIO Web UI."""
 
 from boneio.webui.routes.auth import router as auth_router
+from boneio.webui.routes.addons import router as addons_router
 from boneio.webui.routes.caddy import router as caddy_router
 from boneio.webui.routes.can import router as can_router
 from boneio.webui.routes.config import router as config_router
@@ -23,6 +24,7 @@ from boneio.webui.routes.update import router as update_router
 
 __all__ = [
     "auth_router",
+    "addons_router",
     "caddy_router",
     "can_router",
     "config_router",

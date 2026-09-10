@@ -6,6 +6,18 @@ from typing import Any, TypeVar
 
 CALLABLE_T = TypeVar("CALLABLE_T", bound=Callable[..., Any])
 CALLBACK_TYPE = Callable[[], None]
+_custom_modbus_devices_dir: str | None = None
+
+
+def set_custom_modbus_devices_dir(config_dir: str) -> None:
+    """Set the controller-local read-only directory for declarative add-ons."""
+    global _custom_modbus_devices_dir
+    _custom_modbus_devices_dir = os.path.join(config_dir, "modbus_devices")
+
+
+def get_custom_modbus_devices_dir() -> str | None:
+    """Return the configured add-on Modbus catalog directory, if any."""
+    return _custom_modbus_devices_dir
 
 
 def callback[CALLABLE_T: Callable[..., Any]](func: CALLABLE_T) -> CALLABLE_T:
@@ -73,6 +85,14 @@ def open_json(path: str, model: str) -> dict:
         FileNotFoundError: If JSON file is not found
     """
     filename = f"{model}.json"
+
+    # Add-on packs live outside the installed Python package so upgrades never
+    # overwrite them. Their installer prevents collisions with core models.
+    if _custom_modbus_devices_dir and os.path.isdir(_custom_modbus_devices_dir):
+        for root, _dirs, files in os.walk(_custom_modbus_devices_dir):
+            if filename in files:
+                with open(os.path.join(root, filename)) as db_file:
+                    return json.load(db_file)
     
     # First try direct path (backward compatibility)
     direct_path = os.path.join(path, filename)
