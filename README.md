@@ -66,14 +66,34 @@ and restarts the `boneio` service. Your existing config files are left in place.
 ### Controllers running a pre-0.1 BlackBone build
 
 BlackBone restarted its version numbering at `0.1.0`, below the `1.x` line inherited from boneIO.
-A controller still running an early BlackBone build (for example `1.6.0.dev1`) therefore never
-sees newer releases under **System → Software Update**: pip treats `0.1.x` as a downgrade. Upgrade
-such a controller once over SSH:
+A controller still running an early build (for example `1.6.0.dev1`) therefore never sees newer
+releases under **System → Software Update**: pip treats `0.1.x` as a downgrade.
+
+Such a build is normally still installed under the legacy `boneio` distribution name. Both
+distributions ship the same `boneio` Python package, so installing one on top of the other without
+removing the old one first leaves two distributions owning the same files. Re-run the installer —
+it removes the legacy distribution, offers a backup first, and restarts the service:
 
 ```bash
-"$HOME/boneio/venv/bin/pip" install --force-reinstall blackbone
+ssh <user>@<controller-ip>
+curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/install.sh | bash
+```
+
+To do it by hand, back up first (the installer's backups live under
+`$HOME/boneio/backups/`), then:
+
+```bash
+VENV="$HOME/boneio/venv"
+"$VENV/bin/pip" uninstall --yes boneio          # skip if `pip show boneio` finds nothing
+"$VENV/bin/pip" install --upgrade --force-reinstall blackbone
+"$VENV/bin/python" -c 'from boneio.version import __version__; print(__version__)'
 sudo systemctl restart boneio
 ```
+
+If pip reports `no RECORD file was found for blackbone`, an earlier install was interrupted and
+left a partial `blackbone-*.dist-info` behind. Remove that directory and the leftover `boneio`
+package directory from `site-packages`, then install again — pip cannot clean up a distribution
+whose file list it no longer has.
 
 From then on in-app updates work normally.
 
@@ -202,14 +222,34 @@ BlackBone i restartuje usługę `boneio`. Istniejące pliki konfiguracyjne pozos
 #### Sterowniki z buildem BlackBone sprzed 0.1
 
 BlackBone zaczyna numerację wersji od `0.1.0`, czyli poniżej linii `1.x` odziedziczonej po boneIO.
-Sterownik z wczesnym buildem BlackBone (na przykład `1.6.0.dev1`) nigdy nie zobaczy więc nowszych
-wydań w **System → Aktualizacja oprogramowania** — pip traktuje `0.1.x` jako cofnięcie wersji. Taki
-sterownik podnieś jednorazowo przez SSH:
+Sterownik z wczesnym buildem (na przykład `1.6.0.dev1`) nigdy nie zobaczy więc nowszych wydań
+w **System → Aktualizacja oprogramowania** — pip traktuje `0.1.x` jako cofnięcie wersji.
+
+Taki build jest zwykle nadal zainstalowany pod starą nazwą dystrybucji `boneio`. Obie dystrybucje
+dostarczają ten sam pakiet pythonowy `boneio`, więc instalacja jednej na drugiej bez usunięcia
+starej zostawia dwie dystrybucje walczące o te same pliki. Uruchom ponownie instalator — usuwa
+starą dystrybucję, wcześniej proponuje kopię zapasową i restartuje usługę:
 
 ```bash
-"$HOME/boneio/venv/bin/pip" install --force-reinstall blackbone
+ssh <user>@<adres-sterownika>
+curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/install.sh | bash
+```
+
+Ręcznie: najpierw zrób kopię zapasową (instalator trzyma swoje w `$HOME/boneio/backups/`),
+następnie:
+
+```bash
+VENV="$HOME/boneio/venv"
+"$VENV/bin/pip" uninstall --yes boneio          # pomiń, jeśli `pip show boneio` nic nie znajduje
+"$VENV/bin/pip" install --upgrade --force-reinstall blackbone
+"$VENV/bin/python" -c 'from boneio.version import __version__; print(__version__)'
 sudo systemctl restart boneio
 ```
+
+Jeśli pip zgłosi `no RECORD file was found for blackbone`, wcześniejsza instalacja została
+przerwana i zostawiła niekompletny katalog `blackbone-*.dist-info`. Usuń go razem z pozostałym
+katalogiem pakietu `boneio` z `site-packages` i zainstaluj ponownie — pip nie posprząta po
+dystrybucji, której listy plików już nie ma.
 
 Od tego momentu aktualizacje z poziomu aplikacji działają normalnie.
 
