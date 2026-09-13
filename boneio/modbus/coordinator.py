@@ -29,7 +29,6 @@ from boneio.const import (
 from boneio.core.messaging import BasicMqtt
 from boneio.core.utils import AsyncUpdater, Filter
 from boneio.core.utils.timeperiod import TimePeriod
-from boneio.core.utils.util import open_json
 from boneio.integration.homeassistant import modbus_polling_switch_message
 from boneio.modbus.entities.base import BaseEntity, ModbusBaseEntity, ModbusDerivedEntity, ModbusParentInfo
 from boneio.models.state import ModbusDeviceState
@@ -114,7 +113,10 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
             message_bus=manager._message_bus,
         )
         self._modbus = modbus
-        self._db = open_json(path=os.path.dirname(__file__), model=model)
+        from boneio.modbus import device_registry
+
+        self._model_key = model
+        self._db = device_registry.load_model(model)
         self._model = self._db[MODEL]
         self._address = address
         self._discovery_sent: bool | datetime = False

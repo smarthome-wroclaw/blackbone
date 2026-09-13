@@ -61,6 +61,7 @@ from boneio.webui.routes import (
     nodered_router,
     outputs_router,
     remote_devices_router,
+    schema_router,
     sensors_router,
     system_router,
     templates_router,
@@ -153,6 +154,7 @@ app.include_router(system_router)
 app.include_router(config_router)
 app.include_router(update_router)
 app.include_router(modbus_router)
+app.include_router(schema_router)
 app.include_router(sensors_router)
 app.include_router(caddy_router)
 app.include_router(nodered_router)
@@ -793,7 +795,6 @@ FRONTEND_DIR = APP_DIR / "frontend-dist"
 if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
     _LOGGER.info(f"Frontend found at {FRONTEND_DIR}, mounting static files")
     app.mount("/assets", StaticFiles(directory=f"{FRONTEND_DIR}/assets"), name="assets")
-    app.mount("/schema", StaticFiles(directory=f"{APP_DIR}/schema"), name="schema")
 
     @app.get("/manifest.webmanifest")
     async def serve_manifest():
@@ -887,5 +888,3 @@ else:
         "Please build frontend with 'npm run build' in the frontend directory, "
         "or ensure frontend-dist exists at the expected location."
     )
-    if (APP_DIR / "schema").exists():
-        app.mount("/schema", StaticFiles(directory=f"{APP_DIR}/schema"), name="schema")

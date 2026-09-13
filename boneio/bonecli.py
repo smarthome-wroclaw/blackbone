@@ -76,6 +76,10 @@ def get_arguments() -> argparse.Namespace:
         required=True,
     )
     modbus_parser.add_argument(
+        "-c", "--config", metavar="path_to_config_dir", default="./config.yaml",
+        help="Config file, used to locate user-provided Modbus device definitions",
+    )
+    modbus_parser.add_argument(
         "--address",
         type=lambda x: int(x, 0),
         required=False,
@@ -389,6 +393,10 @@ def main() -> int:
             debug=debug,
         )
     elif args.action == "modbus":
+        from boneio.modbus import device_registry
+        device_registry.configure(
+            os.path.join(os.path.dirname(os.path.abspath(args.config)), "modbus_devices")
+        )
         _LOGGER.info("BoneIO Modbus helper %s .", __version__)
         exit_code = run_modbus_command(
             args=args,

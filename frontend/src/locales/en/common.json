@@ -1238,7 +1238,9 @@
     "discard_draft": "Discard",
     "invalid_json_file": "Invalid JSON file. Please select a valid Modbus device configuration.",
     "test_register": "Test Register",
-    "remove_register": "Remove Register"
+    "remove_register": "Remove Register",
+    "manufacturer": "Manufacturer", "description": "Description", "default_address": "Default address", "default_update_interval": "Default update interval",
+    "save_to_device": "Save on device", "update_on_device": "Update on device", "saving": "Saving...", "save_failed": "Saving failed", "invalid_key": "The file key must use lowercase letters, numbers, dashes or underscores."
   },
   "event_form": {
     "title": "Events",

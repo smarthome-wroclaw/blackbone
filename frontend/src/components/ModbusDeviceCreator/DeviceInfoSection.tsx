@@ -9,6 +9,10 @@ interface DeviceInfoSectionProps {
   setFileName: (value: string) => void;
   category: string;
   setCategory: (value: string) => void;
+  manufacturer: string; setManufacturer: (value: string) => void;
+  description: string; setDescription: (value: string) => void;
+  defaultAddress: number; setDefaultAddress: (value: number) => void;
+  defaultUpdateInterval: string; setDefaultUpdateInterval: (value: string) => void;
   testDeviceAddress: number;
   setTestDeviceAddress: (value: number) => void;
 }
@@ -20,6 +24,7 @@ export default function DeviceInfoSection({
   setFileName,
   category,
   setCategory,
+  manufacturer, setManufacturer, description, setDescription, defaultAddress, setDefaultAddress, defaultUpdateInterval, setDefaultUpdateInterval,
   testDeviceAddress,
   setTestDeviceAddress,
 }: DeviceInfoSectionProps) {
@@ -71,6 +76,12 @@ export default function DeviceInfoSection({
               ))}
             </select>
           </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <label className="form-control"><span className="label-text">{t('modbus_creator.manufacturer')}</span><input className="input input-bordered" value={manufacturer} onChange={e => setManufacturer(e.target.value)} /></label>
+          <label className="form-control"><span className="label-text">{t('modbus_creator.description')}</span><input className="input input-bordered" value={description} onChange={e => setDescription(e.target.value)} /></label>
+          <label className="form-control"><span className="label-text">{t('modbus_creator.default_address')}</span><NumericInput value={defaultAddress} onChange={v => setDefaultAddress(v === '' ? 1 : v)} min={1} max={247} /></label>
+          <label className="form-control"><span className="label-text">{t('modbus_creator.default_update_interval')}</span><input className="input input-bordered" value={defaultUpdateInterval} onChange={e => setDefaultUpdateInterval(e.target.value)} /></label>
         </div>
         
         <div className="form-control mt-2">

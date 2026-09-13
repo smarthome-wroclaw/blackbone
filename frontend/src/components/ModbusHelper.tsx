@@ -3,7 +3,7 @@ import { useTranslation } from '@/hooks/useTranslation';
 import { FaPlay, FaSearch, FaCog, FaPlus, FaPause, FaFlask, FaCode, FaCopy, FaCheck, FaImage } from 'react-icons/fa';
 import ModbusDeviceCreator from './ModbusDeviceCreator';
 import axios from '@/api/axios';
-import { MODBUS_DEVICE_CATALOG } from '../generated/modbusDeviceCatalog';
+import { useModbusCatalog } from '@/hooks/useModbusCatalog';
 import {
   Select,
   SelectContent,
@@ -51,6 +51,7 @@ type WriteMode = 'fc06' | 'fc16';
  */
 export default function ModbusHelper() {
   const { t } = useTranslation();
+  const { catalog } = useModbusCatalog();
   const [activeTab, setActiveTab] = useState<'get' | 'set' | 'search' | 'configure' | 'creator' | 'simulator'>('get');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ModbusResult | null>(null);
@@ -1221,7 +1222,7 @@ export default function ModbusHelper() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {Object.values(MODBUS_DEVICE_CATALOG).map(d => (
+                      {Object.values(catalog).map(d => (
                         <SelectItem key={d.modelKey} value={d.modelKey}>
                           {d.displayName} ({d.manufacturer})
                         </SelectItem>

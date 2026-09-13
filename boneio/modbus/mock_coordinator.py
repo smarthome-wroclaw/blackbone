@@ -35,21 +35,14 @@ def _find_device_json(model_key: str) -> Path:
     Raises:
         FileNotFoundError: If no matching JSON file is found.
     """
-    for root, _dirs, files in os.walk(_DEVICES_DIR):
-        for fname in files:
-            if fname == f"{model_key}.json":
-                return Path(root) / fname
-
-    available = []
-    for root, _dirs, files in os.walk(_DEVICES_DIR):
-        for fname in files:
-            if fname.endswith(".json"):
-                available.append(fname[:-5])
-
-    raise FileNotFoundError(
-        f"Device JSON not found for model '{model_key}'. "
-        f"Available models: {sorted(available)}"
-    )
+    from boneio.modbus import device_registry
+    try:
+        return Path(device_registry.get_model_ref(model_key).path)
+    except device_registry.ModelNotFoundError as err:
+        available = sorted(ref.key for ref in device_registry.list_models())
+        raise FileNotFoundError(
+            f"Device JSON not found for model '{model_key}'. Available models: {available}"
+        ) from err
 
 
 @dataclass
