@@ -1239,7 +1239,9 @@
     "discard_draft": "Odrzuć",
     "invalid_json_file": "Nieprawidłowy plik JSON. Wybierz poprawną konfigurację urządzenia Modbus.",
     "test_register": "Testuj rejestr",
-    "remove_register": "Usuń rejestr"
+    "remove_register": "Usuń rejestr",
+    "manufacturer": "Producent", "description": "Opis", "default_address": "Domyślny adres", "default_update_interval": "Domyślny interwał odczytu",
+    "save_to_device": "Zapisz na urządzeniu", "update_on_device": "Zaktualizuj na urządzeniu", "saving": "Zapisywanie...", "save_failed": "Zapis nie powiódł się", "invalid_key": "Klucz pliku może zawierać tylko małe litery, cyfry, myślniki i podkreślenia."
   },
   "event_form": {
     "title": "Zdarzenia",

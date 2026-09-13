@@ -391,3 +391,36 @@ class ModbusManager:
             len(devices_to_add),
             len(devices_to_recreate)
         )
+
+    async def reload_modbus_model(self, model_key: str) -> list[str]:
+        """Rebuild only coordinators using a definition which just changed."""
+        affected = [
+            device_id for device_id, coordinator in self._modbus_coordinators.items()
+            if getattr(coordinator, "_model_key", None) == model_key
+        ]
+        if not affected:
+            return []
+        config = self._manager._config_helper.get_config() or {}
+        configs_by_id = {
+            self._get_device_id_from_config(item): item
+            for item in config.get("modbus_devices", [])
+        }
+        configs = [configs_by_id[device_id] for device_id in affected if device_id in configs_by_id]
+        if not configs:
+            return []
+        for device_id in affected:
+            self._remove_modbus_ha_discovery_for_id(device_id)
+            self._modbus_coordinators.pop(device_id, None)
+        await asyncio.sleep(1.5)
+        try:
+            coordinators = self._configure_modbus_coordinators(devices=configs)
+        except Exception as err:
+            _LOGGER.error("Failed to rebuild Modbus model %s: %s", model_key, err)
+            return []
+        self._modbus_coordinators.update(coordinators)
+        for coordinator in coordinators.values():
+            try:
+                await coordinator.send_online_status()
+            except Exception as err:
+                _LOGGER.error("Failed to send Modbus online status: %s", err)
+        return sorted(coordinators)

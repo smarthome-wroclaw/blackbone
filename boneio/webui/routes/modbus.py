@@ -81,6 +81,15 @@ class ModbusConfigureDeviceRequest(BaseModel):
     new_baudrate: int | None = None
 
 
+class DeviceDefinitionCreateRequest(BaseModel):
+    key: str
+    definition: dict
+
+
+class DeviceDefinitionUpdateRequest(BaseModel):
+    definition: dict
+
+
 @router.post("/modbus/{coordinator_id}/{entity_id}/set_value")
 async def set_modbus_value(
     coordinator_id: str,
@@ -529,27 +538,16 @@ async def get_modbus_models():
     Returns:
         Dictionary mapping model file names to their capabilities.
     """
-    devices_dir = os.path.join(
-        os.path.dirname(__file__), "..", "..", "modbus", "devices"
-    )
-    devices_dir = os.path.normpath(devices_dir)
     models: dict[str, dict[str, Any]] = {}
+    from boneio.modbus import device_registry
 
-    if not os.path.isdir(devices_dir):
-        _LOGGER.warning("Modbus devices directory not found: %s", devices_dir)
-        return {"models": models}
-
-    for root, _dirs, files in os.walk(devices_dir):
-        for fname in files:
-            if not fname.endswith(".json"):
-                continue
-            model_key = fname[:-5]  # strip .json
-            try:
-                with open(os.path.join(root, fname)) as fh:
-                    db = json.load(fh)
-            except Exception as exc:
-                _LOGGER.debug("Failed to read model file %s: %s", fname, exc)
-                continue
+    for ref in device_registry.list_models():
+        model_key = ref.key
+        try:
+            db = device_registry.load_model(model_key)
+        except Exception as exc:
+            _LOGGER.debug("Failed to read model %s: %s", model_key, exc)
+            continue
 
             device_classes: set[str] = set()
             temperature_sensors: list[dict[str, str]] = []
@@ -597,25 +595,11 @@ async def get_model_entities(model_name: str):
     Returns:
         List of entity definitions with name and decoded_name.
     """
-    devices_dir = os.path.join(
-        os.path.dirname(__file__), "..", "..", "modbus", "devices"
-    )
-    devices_dir = os.path.normpath(devices_dir)
-
-    # Find model JSON file
-    filename = f"{model_name}.json"
-    db = None
-    for root, _dirs, files in os.walk(devices_dir):
-        if filename in files:
-            try:
-                with open(os.path.join(root, filename)) as fh:
-                    db = json.load(fh)
-                break
-            except Exception as exc:
-                raise HTTPException(status_code=500, detail=f"Failed to read model file: {exc}") from exc
-
-    if db is None:
-        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+    from boneio.modbus import device_registry
+    try:
+        db = device_registry.load_model(model_name)
+    except device_registry.ModelNotFoundError as err:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found") from err
 
     entities = []
     seen: set[str] = set()
@@ -933,3 +917,122 @@ async def get_used_addresses(
                 "name": device.get("name", ""),
             })
     return {"used_addresses": used}
+
+
+def _usage_by_model(manager: Manager) -> dict[str, list[str]]:
+    usage: dict[str, list[str]] = {}
+    for config in (manager.config_helper.get_config() or {}).get("modbus_devices", []) or []:
+        key = config.get("model")
+        if key:
+            usage.setdefault(key, []).append(manager.modbus._get_device_id_from_config(config))
+    return usage
+
+
+def _definition_metadata(ref, definition: dict, used_by: list[str]) -> dict:
+    return {
+        "key": ref.key, "source": ref.source, "model": definition.get("model", ref.key),
+        "manufacturer": definition.get("manufacturer", ""),
+        "description": definition.get("description", ""),
+        "category": definition.get("category", ""),
+        "default_address": definition.get("default_address", 1),
+        "default_update_interval": definition.get("default_update_interval", "30s"),
+        "has_set_base": bool(definition.get("set_base")), "used_by": used_by,
+    }
+
+
+async def _write_definition(key: str, definition: dict, manager: Manager) -> dict:
+    from boneio.core.config.yaml_util import clear_config_cache
+    from boneio.modbus import device_registry
+    path = device_registry.custom_path_for(key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(definition, file, indent=2, ensure_ascii=False)
+    device_registry.invalidate()
+    clear_config_cache(clear_static=True)
+    warning, reloaded = None, []
+    try:
+        reloaded = await manager.modbus.reload_modbus_model(key)
+    except Exception as err:
+        _LOGGER.exception("Saved definition %s but reload failed", key)
+        warning = f"Definition saved, but reloading devices failed: {err}"
+    return {"key": key, "source": "custom", "reloaded": reloaded, "warning": warning}
+
+
+@router.get("/modbus/device_definitions")
+async def list_device_definitions(manager: Manager = Depends(get_manager)):
+    from boneio.modbus import device_registry
+    usage = _usage_by_model(manager)
+    definitions = []
+    for ref in device_registry.list_models():
+        try:
+            definitions.append(_definition_metadata(ref, device_registry.load_model(ref.key), usage.get(ref.key, [])))
+        except Exception as err:
+            _LOGGER.warning("Skipping unreadable definition %s: %s", ref.key, err)
+    return {"definitions": definitions}
+
+
+@router.get("/modbus/device_definitions/{key}")
+async def get_device_definition(key: str):
+    from boneio.modbus import device_registry
+    try:
+        ref = device_registry.get_model_ref(key)
+        return {"key": key, "source": ref.source, "definition": device_registry.load_model(key)}
+    except device_registry.ModelNotFoundError as err:
+        raise HTTPException(404, f"Model '{key}' not found") from err
+
+
+@router.post("/modbus/device_definitions")
+async def create_device_definition(request: DeviceDefinitionCreateRequest, manager: Manager = Depends(get_manager)):
+    from pydantic import ValidationError
+    from boneio.modbus import device_registry
+    from boneio.modbus.device_definition import validate_definition
+    if not device_registry.is_valid_key(request.key):
+        raise HTTPException(400, "Model key must match ^[a-z0-9][a-z0-9_-]{1,63}$")
+    try:
+        device_registry.get_model_ref(request.key)
+    except device_registry.ModelNotFoundError:
+        pass
+    else:
+        raise HTTPException(409, f"Model '{request.key}' already exists")
+    try:
+        validate_definition(request.definition)
+    except ValidationError as err:
+        raise HTTPException(422, err.errors()) from err
+    return await _write_definition(request.key, request.definition, manager)
+
+
+@router.put("/modbus/device_definitions/{key}")
+async def update_device_definition(key: str, request: DeviceDefinitionUpdateRequest, manager: Manager = Depends(get_manager)):
+    from pydantic import ValidationError
+    from boneio.modbus import device_registry
+    from boneio.modbus.device_definition import validate_definition
+    try:
+        ref = device_registry.get_model_ref(key)
+    except device_registry.ModelNotFoundError as err:
+        raise HTTPException(404, f"Model '{key}' not found") from err
+    if ref.source == "builtin":
+        raise HTTPException(403, f"'{key}' is a built-in model; save it under another key")
+    try:
+        validate_definition(request.definition)
+    except ValidationError as err:
+        raise HTTPException(422, err.errors()) from err
+    return await _write_definition(key, request.definition, manager)
+
+
+@router.delete("/modbus/device_definitions/{key}")
+async def delete_device_definition(key: str, manager: Manager = Depends(get_manager)):
+    from boneio.core.config.yaml_util import clear_config_cache
+    from boneio.modbus import device_registry
+    try:
+        ref = device_registry.get_model_ref(key)
+    except device_registry.ModelNotFoundError as err:
+        raise HTTPException(404, f"Model '{key}' not found") from err
+    if ref.source == "builtin":
+        raise HTTPException(403, f"'{key}' is a built-in model")
+    used_by = _usage_by_model(manager).get(key, [])
+    if used_by:
+        raise HTTPException(409, f"Model '{key}' is used by: {', '.join(used_by)}")
+    os.remove(ref.path)
+    device_registry.invalidate()
+    clear_config_cache(clear_static=True)
+    return {"key": key, "deleted": True}
