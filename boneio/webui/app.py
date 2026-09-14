@@ -52,6 +52,7 @@ from boneio.webui.routes import (
     config_router,
     covers_router,
     dashboard_router,
+    extensions_router,
     dev_fake_device_router,
     irrigation_router,
     migrations_router,
@@ -149,6 +150,7 @@ app.include_router(auth_router)
 app.include_router(outputs_router)
 app.include_router(covers_router)
 app.include_router(dashboard_router)
+app.include_router(extensions_router)
 app.include_router(irrigation_router)
 app.include_router(system_router)
 app.include_router(config_router)

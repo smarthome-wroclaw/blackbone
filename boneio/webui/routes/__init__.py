@@ -6,6 +6,7 @@ from boneio.webui.routes.can import router as can_router
 from boneio.webui.routes.config import router as config_router
 from boneio.webui.routes.covers import router as covers_router
 from boneio.webui.routes.dashboard import router as dashboard_router
+from boneio.webui.routes.extensions import router as extensions_router
 from boneio.webui.routes.dev_fake_device import router as dev_fake_device_router
 from boneio.webui.routes.irrigation import router as irrigation_router
 from boneio.webui.routes.migrations import router as migrations_router
@@ -29,6 +30,7 @@ __all__ = [
     "config_router",
     "covers_router",
     "dashboard_router",
+    "extensions_router",
     "dev_fake_device_router",
     "irrigation_router",
     "migrations_router",
