@@ -53,6 +53,21 @@
           "description": "Port to listen for incoming UDP messages",
           "title": "Listen port"
         },
+        "resync_interval": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "default": 30,
+          "minimum": 0,
+          "description": "Seconds between full state refresh packets sent to Lox. Set to 0 to disable periodic refresh.",
+          "title": "Lox UDP state refresh interval"
+        },
+        "boneio_host": {
+          "type": "string",
+          "description": "IPv4 address or hostname of this BoneIO device, used when generating Lox Config templates.",
+          "title": "BoneIO host"
+        },
         "mqtt_bridge": {
           "type": "array",
           "description": "Forward arbitrary MQTT topic payloads to virtual Lox UDP inputs",

@@ -1,7 +1,7 @@
 """Tests for LoxUDPClient."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -61,9 +61,16 @@ def test_lox_send_message_cover_position(config_helper_mock):
     client._transport = MagicMock()
 
     client.send_message("boneio/blk123/cover/cover1/pos", '{"position": 50}')
-    client._transport.sendto.assert_called_once_with(
-        b'cover1={"position": 50}', ("127.0.0.1", 4444)
-    )
+    client._transport.sendto.assert_called_once_with(b"cover1=50", ("127.0.0.1", 4444))
+
+
+def test_lox_send_message_cover_position_dict(config_helper_mock):
+    """Test cover position dict payload is sent as the analog value only."""
+    client = LoxUDPClient(config_helper_mock, "127.0.0.1", 4444, 4445)
+    client._transport = MagicMock()
+
+    client.send_message("boneio/blk123/cover/cover1/pos", {"position": 75})
+    client._transport.sendto.assert_called_once_with(b"cover1=75", ("127.0.0.1", 4444))
 
 
 def test_lox_send_message_event_entity(config_helper_mock):
@@ -235,6 +242,37 @@ async def test_lox_handle_incoming_output_group(config_helper_mock, manager_mock
 
     await client._handle_incoming("group1", "ON")
     mock_group.async_turn_on.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lox_periodic_resync_sends_known_states(config_helper_mock, manager_mock):
+    """Periodic resync should refresh Lox with current output, group, and cover states."""
+    client = LoxUDPClient(config_helper_mock, "127.0.0.1", 4444, 4445)
+    client._transport = MagicMock()
+    client.set_manager(manager_mock)
+
+    output_on = MagicMock(id="relay_on", output_type="switch", is_active=True)
+    output_off = MagicMock(id="relay_off", output_type="light", is_active=False)
+    cover_output = MagicMock(id="cover_relay", output_type="cover", is_active=True)
+    group = MagicMock(id="ground_floor", is_active=True)
+    cover = MagicMock(id="blind", json_position={"position": 42})
+
+    manager_mock.outputs.get_all_outputs.return_value = {
+        "relay_on": output_on,
+        "relay_off": output_off,
+        "cover_relay": cover_output,
+    }
+    manager_mock.outputs.get_all_output_groups.return_value = {"ground_floor": group}
+    manager_mock.covers.get_all_covers.return_value = {"blind": cover}
+
+    await client._send_current_states()
+
+    assert client._transport.sendto.call_args_list == [
+        call(b"relay_on=ON", ("127.0.0.1", 4444)),
+        call(b"relay_off=OFF", ("127.0.0.1", 4444)),
+        call(b"ground_floor=ON", ("127.0.0.1", 4444)),
+        call(b"blind=42", ("127.0.0.1", 4444)),
+    ]
 
 
 @pytest.mark.asyncio

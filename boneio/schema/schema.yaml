@@ -65,6 +65,21 @@ lox_udp:
       default: 4445
       meta:
         label: Port to listen for incoming UDP messages
+    resync_interval:
+      required: False
+      type: integer
+      default: 30
+      min: 0
+      meta:
+        label: Lox UDP state refresh interval
+        description: "Seconds between full state refresh packets sent to Lox. Set to 0 to disable periodic refresh."
+    boneio_host:
+      required: False
+      type: string
+      regex: '^(((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)$'
+      meta:
+        label: BoneIO host
+        description: "IPv4 address or hostname of this BoneIO device, used when generating Lox Config templates."
     mqtt_bridge:
       required: False
       type: list

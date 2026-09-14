@@ -209,6 +209,7 @@ async def async_run(
             host=lox_config.get("host", "127.0.0.1"),
             send_port=lox_config.get("send_port", 4444),
             listen_port=lox_config.get("listen_port", 4445),
+            resync_interval=lox_config.get("resync_interval", 30),
         )
         message_bus.add_bus(lox_bus)
         mappings = lox_config.get("mqtt_bridge")
