@@ -488,8 +488,9 @@ def _get_lox_config(manager: Manager) -> dict[str, Any]:
     try:
         config = manager.config_helper.get_config()
         lox = config.get("lox_udp", {})
+        network_info = getattr(manager.config_helper, "network_info", {}) or {}
         return {
-            "boneio_ip": lox.get("host", "0.0.0.0"),
+            "boneio_ip": lox.get("boneio_host") or network_info.get("ip") or "0.0.0.0",
             "send_port": lox.get("send_port", 4444),
             "listen_port": lox.get("listen_port", 4445),
             "mqtt_bridge": lox.get("mqtt_bridge", []),

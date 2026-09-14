@@ -10,13 +10,14 @@ between BoneIO and a Lox Miniserver:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import socket
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
+from boneio.const import COVER, OFF, ON, cover_actions, output_actions
 from boneio.const import NONE as OUTPUT_NONE
-from boneio.const import cover_actions, output_actions
 from boneio.core.messaging.basic import MessageBus
 
 if TYPE_CHECKING:
@@ -112,6 +113,7 @@ class LoxUDPClient(MessageBus):
         host: str,
         send_port: int,
         listen_port: int,
+        resync_interval: int = 30,
     ) -> None:
         """Set up client.
 
@@ -120,15 +122,19 @@ class LoxUDPClient(MessageBus):
             host: Lox Miniserver IP address.
             send_port: Port on Miniserver to send state feedback to.
             listen_port: Port BoneIO listens on for commands from Miniserver.
+            resync_interval: Seconds between full state refresh packets. Set
+                to 0 to disable periodic refresh.
         """
         self._manager: Manager | None = None
         self._config_helper = config_helper
         self.host = host
         self.send_port = send_port
         self.listen_port = listen_port
+        self.resync_interval = max(0, int(resync_interval or 0))
         self._transport: asyncio.DatagramTransport | None = None
         self._listeners: dict[str, Callable[[str, str], Coroutine[Any, Any, None]]] = {}
         self._state = False
+        self._resync_task: asyncio.Task | None = None
 
     def send_message(
         self,
@@ -192,7 +198,7 @@ class LoxUDPClient(MessageBus):
             return
 
         # Extract state value from payload
-        state_value = self._extract_state_value(payload)
+        state_value = self._extract_state_value(payload, suffix=suffix)
         if not state_value:
             return
 
@@ -201,16 +207,20 @@ class LoxUDPClient(MessageBus):
     @staticmethod
     def _extract_state_value(
         payload: str | int | bytes | dict[str, Any] | HomeAssistantDiscoveryMessage,
+        suffix: str = "",
     ) -> str:
         """Extract a simple state string from various payload formats.
 
         Args:
             payload: The message payload in any supported format.
+            suffix: Topic suffix, used to normalize cover position payloads.
 
         Returns:
             State value as string, or empty string if extraction fails.
         """
         if isinstance(payload, dict):
+            if suffix == "pos" and "position" in payload:
+                return str(payload["position"])
             # Try standard keys: {"state": "ON"}, {"value": "50"}
             state_value = payload.get("state", payload.get("value", ""))
             if state_value:
@@ -221,6 +231,13 @@ class LoxUDPClient(MessageBus):
             return ""
         if isinstance(payload, bytes):
             return payload.decode("utf-8")
+        if suffix == "pos" and isinstance(payload, str):
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict) and "position" in parsed:
+                    return str(parsed["position"])
+            except json.JSONDecodeError:
+                pass
         return str(payload)
 
     def send_udp(self, device_id: str, state_value: str) -> None:
@@ -283,6 +300,8 @@ class LoxUDPClient(MessageBus):
 
             # Announce online status so Lox Miniserver knows we are alive
             self._transport.sendto(b"boneio=online", (self.host, self.send_port))
+            if self.resync_interval:
+                self._resync_task = asyncio.create_task(self._resync_loop())
 
             while True:
                 await asyncio.sleep(3600)
@@ -293,6 +312,8 @@ class LoxUDPClient(MessageBus):
             _LOGGER.error("Failed to start Lox UDP client: %s", e, exc_info=True)
             self._state = False
         finally:
+            if self._resync_task:
+                self._resync_task.cancel()
             if self._transport:
                 self._transport.close()
 
@@ -304,6 +325,48 @@ class LoxUDPClient(MessageBus):
         """Announce offline status to Miniserver."""
         if self._transport:
             self._transport.sendto(b"boneio=offline", (self.host, self.send_port))
+
+    async def _resync_loop(self) -> None:
+        """Periodically publish known states to heal dropped UDP packets."""
+        try:
+            await self._send_current_states()
+            while True:
+                await asyncio.sleep(self.resync_interval)
+                await self._send_current_states()
+        except asyncio.CancelledError:
+            return
+
+    async def _send_current_states(self) -> None:
+        """Send current output, group, and cover states directly to Lox."""
+        if not self._manager or not self._transport:
+            return
+
+        try:
+            for output in self._manager.outputs.get_all_outputs().values():
+                if getattr(output, "output_type", None) in (OUTPUT_NONE, COVER):
+                    continue
+                self.send_udp(output.id, ON if output.is_active else OFF)
+
+            for group in self._manager.outputs.get_all_output_groups().values():
+                self.send_udp(group.id, ON if group.is_active else OFF)
+
+            for cover in self._manager.covers.get_all_covers().values():
+                position = self._cover_position(cover)
+                if position is not None:
+                    self.send_udp(cover.id, position)
+        except Exception:
+            _LOGGER.exception("Lox UDP: error sending periodic state refresh")
+
+    @staticmethod
+    def _cover_position(cover: Any) -> str | None:
+        """Return a cover position string suitable for a Lox analog input."""
+        json_position = getattr(cover, "json_position", None)
+        if isinstance(json_position, dict) and "position" in json_position:
+            return str(json_position["position"])
+        position = getattr(cover, "position", None)
+        if position is not None:
+            return str(position)
+        return None
 
     async def subscribe_and_listen(self, topic: str, callback: Callable[[str, str], Coroutine[Any, Any, None]]) -> None:
         """Register a listener for a topic pattern."""

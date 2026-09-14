@@ -66,9 +66,11 @@ def test_generates_one_valid_xml_file_per_virtual_device():
     manager = MagicMock()
     manager.config_helper.serial_number = "BLK/test 01"
     manager.config_helper.name = "Test controller"
+    manager.config_helper.network_info = {"ip": "192.168.1.44"}
     manager.config_helper.get_config.return_value = {
         "lox_udp": {
             "host": "192.168.1.22",
+            "boneio_host": "192.168.1.44",
             "send_port": 4444,
             "listen_port": 4445,
             "mqtt_bridge": [
@@ -95,6 +97,7 @@ def test_generates_one_valid_xml_file_per_virtual_device():
     assert roots["mqtt_go-echarger_408783.xml"].tag == "VirtualInUdp"
     assert len(roots["mqtt_go-echarger_408783.xml"].findall("VirtualInUdpCmd")) == 2
     assert len(roots["mqtt_shelly_kitchen.xml"].findall("VirtualInUdpCmd")) == 1
+    assert roots["boneio_blk_test_01_outputs.xml"].attrib["Address"] == "/dev/udp/192.168.1.44/4445"
 
 
 def test_packages_templates_in_one_zip_without_changing_xml():
