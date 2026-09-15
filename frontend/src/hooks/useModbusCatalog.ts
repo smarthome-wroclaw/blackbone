@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { MODBUS_DEVICE_CATALOG, type ModbusDeviceInfo } from '@/generated/modbusDeviceCatalog';
 import { listDefinitions, type DefinitionSummary } from './useDeviceDefinitions';
-export type CatalogEntry=ModbusDeviceInfo & {source:'builtin'|'custom'};
+export type CatalogEntry=ModbusDeviceInfo & {source:'builtin'|'custom'|`addon:${string}`};
 const staticCatalog=():Record<string,CatalogEntry>=>Object.fromEntries(Object.entries(MODBUS_DEVICE_CATALOG).map(([key,value])=>[key,{...value,source:'builtin' as const}]));
 export const mergeCatalog=(definitions:DefinitionSummary[]):Record<string,CatalogEntry>=>{const catalog=staticCatalog();definitions.forEach(d=>catalog[d.key]={modelKey:d.key,displayName:d.model||d.key,manufacturer:d.manufacturer||'',description:d.description||'',category:d.category||'other',defaultAddress:d.default_address??1,defaultUpdateInterval:d.default_update_interval||'30s',hasSetBase:d.has_set_base,source:d.source});return catalog};
 export const useModbusCatalog=()=>{const [catalog,setCatalog]=useState<Record<string,CatalogEntry>>(staticCatalog);const [loading,setLoading]=useState(true);const [error,setError]=useState<string|null>(null);useEffect(()=>{let cancelled=false;listDefinitions().then(defs=>!cancelled&&setCatalog(mergeCatalog(defs))).catch(()=>!cancelled&&setError('catalog_fetch_failed')).finally(()=>!cancelled&&setLoading(false));return()=>{cancelled=true}},[]);return {catalog,loading,error}};

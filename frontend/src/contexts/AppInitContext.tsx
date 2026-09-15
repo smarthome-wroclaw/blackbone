@@ -32,6 +32,9 @@ interface AppInitData {
   has_boneio: boolean;
   board_version: string | null;
   has_irrigation: boolean;
+  features?: {
+    addons?: boolean;
+  };
 }
 
 interface AppInitContextType {
