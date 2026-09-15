@@ -549,35 +549,28 @@ async def get_modbus_models():
             _LOGGER.debug("Failed to read model %s: %s", model_key, exc)
             continue
 
-            device_classes: set[str] = set()
-            temperature_sensors: list[dict[str, str]] = []
-            for reg_base in db.get("registers_base", []):
-                for reg in reg_base.get("registers", []):
-                    dc = reg.get("device_class")
-                    if dc:
-                        device_classes.add(dc)
-                    # Only include actual measurement sensors, not
-                    # config/diagnostic registers (e.g. calibration offsets)
-                    entity_category = reg.get("entity_category")
-                    if dc == "temperature" and entity_category not in ("config", "diagnostic"):
-                        name = reg.get("name", "Temperature")
-                        # Match entity ID suffix generation from BaseEntity:
-                        # _decoded_name_low = name.replace(" ", "").lower()
-                        # _id suffix = _decoded_name_low.replace("_", "")
-                        suffix = name.replace(" ", "").lower().replace("_", "")
-                        temperature_sensors.append({
-                            "name": name,
-                            "suffix": suffix,
-                        })
+        device_classes: set[str] = set()
+        temperature_sensors: list[dict[str, str]] = []
+        for reg_base in db.get("registers_base", []):
+            for reg in reg_base.get("registers", []):
+                dc = reg.get("device_class")
+                if dc:
+                    device_classes.add(dc)
+                entity_category = reg.get("entity_category")
+                if dc == "temperature" and entity_category not in ("config", "diagnostic"):
+                    name = reg.get("name", "Temperature")
+                    suffix = name.replace(" ", "").lower().replace("_", "")
+                    temperature_sensors.append({"name": name, "suffix": suffix})
 
-            models[model_key] = {
-                "display_name": db.get("model", model_key),
-                "has_temperature": "temperature" in device_classes,
-                "has_humidity": "humidity" in device_classes,
-                "has_energy": "energy" in device_classes or "power" in device_classes,
-                "device_classes": sorted(device_classes),
-                "temperature_sensors": temperature_sensors,
-            }
+        models[model_key] = {
+            "display_name": db.get("model", model_key),
+            "source": ref.source,
+            "has_temperature": "temperature" in device_classes,
+            "has_humidity": "humidity" in device_classes,
+            "has_energy": "energy" in device_classes or "power" in device_classes,
+            "device_classes": sorted(device_classes),
+            "temperature_sensors": temperature_sensors,
+        }
 
     return {"models": models}
 
@@ -984,6 +977,7 @@ async def get_device_definition(key: str):
 @router.post("/modbus/device_definitions")
 async def create_device_definition(request: DeviceDefinitionCreateRequest, manager: Manager = Depends(get_manager)):
     from pydantic import ValidationError
+
     from boneio.modbus import device_registry
     from boneio.modbus.device_definition import validate_definition
     if not device_registry.is_valid_key(request.key):
@@ -1004,14 +998,15 @@ async def create_device_definition(request: DeviceDefinitionCreateRequest, manag
 @router.put("/modbus/device_definitions/{key}")
 async def update_device_definition(key: str, request: DeviceDefinitionUpdateRequest, manager: Manager = Depends(get_manager)):
     from pydantic import ValidationError
+
     from boneio.modbus import device_registry
     from boneio.modbus.device_definition import validate_definition
     try:
         ref = device_registry.get_model_ref(key)
     except device_registry.ModelNotFoundError as err:
         raise HTTPException(404, f"Model '{key}' not found") from err
-    if ref.source == "builtin":
-        raise HTTPException(403, f"'{key}' is a built-in model; save it under another key")
+    if ref.source != "custom":
+        raise HTTPException(403, f"'{key}' is managed by {ref.source}; save it under another key")
     try:
         validate_definition(request.definition)
     except ValidationError as err:
@@ -1027,8 +1022,8 @@ async def delete_device_definition(key: str, manager: Manager = Depends(get_mana
         ref = device_registry.get_model_ref(key)
     except device_registry.ModelNotFoundError as err:
         raise HTTPException(404, f"Model '{key}' not found") from err
-    if ref.source == "builtin":
-        raise HTTPException(403, f"'{key}' is a built-in model")
+    if ref.source != "custom":
+        raise HTTPException(403, f"'{key}' is managed by {ref.source}")
     used_by = _usage_by_model(manager).get(key, [])
     if used_by:
         raise HTTPException(409, f"Model '{key}' is used by: {', '.join(used_by)}")

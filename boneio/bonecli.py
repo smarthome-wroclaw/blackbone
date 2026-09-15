@@ -394,9 +394,7 @@ def main() -> int:
         )
     elif args.action == "modbus":
         from boneio.modbus import device_registry
-        device_registry.configure(
-            os.path.join(os.path.dirname(os.path.abspath(args.config)), "modbus_devices")
-        )
+        device_registry.configure_from_config(args.config)
         _LOGGER.info("BoneIO Modbus helper %s .", __version__)
         exit_code = run_modbus_command(
             args=args,

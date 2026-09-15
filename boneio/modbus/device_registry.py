@@ -27,8 +27,10 @@ class ModelRef:
 
 _lock = threading.RLock()
 _custom_dir: str | None = None
+_addon_roots: dict[str, str] = {}
 _builtin_index: dict[str, str] | None = None
 _custom_index: dict[str, str] | None = None
+_addon_index: dict[str, ModelRef] | None = None
 _custom_stamp: tuple[int, int] | None = None
 
 
@@ -36,12 +38,39 @@ def is_valid_key(key: str) -> bool:
     return bool(MODEL_KEY_RE.fullmatch(key or ""))
 
 
-def configure(custom_dir: str | None) -> None:
-    global _custom_dir, _custom_index, _custom_stamp
+def configure(custom_dir: str | None, addon_roots: dict[str, str] | None = None) -> None:
+    """Configure user definitions and enabled, read-only add-on roots."""
+    global _custom_dir, _addon_roots, _custom_index, _addon_index, _custom_stamp
     with _lock:
         _custom_dir = os.path.normpath(custom_dir) if custom_dir else None
+        _addon_roots = {addon_id: os.path.normpath(root) for addon_id, root in (addon_roots or {}).items()}
         _custom_index = None
+        _addon_index = None
         _custom_stamp = None
+
+
+def configure_from_config(config_file: str) -> None:
+    """Configure all definition sources from the active config directory."""
+    config_dir = os.path.dirname(os.path.abspath(config_file))
+    roots: dict[str, str] = {}
+    state_path = os.path.join(config_dir, "addons", "state.json")
+    try:
+        with open(state_path, encoding="utf-8") as handle:
+            installed = json.load(handle).get("installed", {})
+        for addon_id, item in installed.items():
+            if item.get("enabled") is True and isinstance(item.get("version"), str):
+                roots[addon_id] = os.path.join(
+                    config_dir,
+                    "addons",
+                    "installed",
+                    addon_id,
+                    item["version"],
+                    "files",
+                    "modbus_devices",
+                )
+    except (OSError, AttributeError, json.JSONDecodeError):
+        roots = {}
+    configure(os.path.join(config_dir, "modbus_devices"), roots)
 
 
 def get_custom_dir() -> str | None:
@@ -49,9 +78,10 @@ def get_custom_dir() -> str | None:
 
 
 def invalidate() -> None:
-    global _custom_index, _custom_stamp
+    global _custom_index, _addon_index, _custom_stamp
     with _lock:
         _custom_index = _custom_stamp = None
+        _addon_index = None
 
 
 def custom_path_for(key: str) -> str:
@@ -100,14 +130,33 @@ def _customs() -> dict[str, str]:
         return _custom_index
 
 
+def _addons() -> dict[str, ModelRef]:
+    global _addon_index
+    with _lock:
+        if _addon_index is None:
+            result: dict[str, ModelRef] = {}
+            for addon_id, root in sorted(_addon_roots.items()):
+                for key, path in _scan(root, recursive=False).items():
+                    result.setdefault(key, ModelRef(key, path, f"addon:{addon_id}"))
+            _addon_index = result
+        return _addon_index
+
+
 def list_models() -> list[ModelRef]:
-    builtins, customs = _builtins(), _customs()
+    builtins, customs, addons = _builtins(), _customs(), _addons()
     refs = [ModelRef(key, path, "builtin") for key, path in builtins.items()]
     for key, path in customs.items():
         if key in builtins:
             _LOGGER.warning("Custom Modbus definition %s shadows a built-in model and is ignored", key)
         else:
             refs.append(ModelRef(key, path, "custom"))
+    occupied = set(builtins) | set(customs)
+    for key, ref in addons.items():
+        if key in occupied:
+            _LOGGER.warning("Add-on Modbus definition %s conflicts with another source and is ignored", key)
+        else:
+            refs.append(ref)
+            occupied.add(key)
     return sorted(refs, key=lambda ref: ref.key)
 
 

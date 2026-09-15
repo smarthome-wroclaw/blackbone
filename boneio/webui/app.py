@@ -46,6 +46,7 @@ from boneio.webui.middleware.auth import AuthMiddleware, set_auth_config, set_jw
 
 # Import routes
 from boneio.webui.routes import (
+    addons_router,
     auth_router,
     caddy_router,
     can_router,
@@ -146,6 +147,7 @@ def get_config_helper():
 
 # Include routers
 app.include_router(auth_router)
+app.include_router(addons_router)
 app.include_router(outputs_router)
 app.include_router(covers_router)
 app.include_router(dashboard_router)
@@ -717,6 +719,7 @@ def init_app(
     app.state.web_server = web_server
     app.state.config_helper = config_helper
     app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=bool(auth_config))
+    app.state.addon_token_secret = jwt_secret.encode("utf-8")
 
     # Configure route modules with app state
     config_module.set_app_state(app.state)

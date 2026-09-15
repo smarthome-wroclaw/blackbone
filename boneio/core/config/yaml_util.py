@@ -1219,9 +1219,7 @@ def load_config_from_file(
     _t0 = _time.monotonic()
 
     from boneio.modbus import device_registry
-    device_registry.configure(
-        os.path.join(os.path.dirname(os.path.abspath(config_file)), "modbus_devices")
-    )
+    device_registry.configure_from_config(config_file)
 
     # Try loading from cache first (fast path: ~0.5s vs ~20s)
     cached = _try_load_cached_config(config_file)
