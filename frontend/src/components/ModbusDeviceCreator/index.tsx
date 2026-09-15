@@ -1,20 +1,28 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from '@/api/axios';
 import { copyToClipboard } from '@/utils/clipboard';
-import { Register, DeviceConfig, CreatorState, generateId, groupRegistersIntoBlocks, parseDeviceConfig, STORAGE_KEY } from './types';
+import { Register, DeviceConfig, CreatorState, generateId, buildDeviceConfig, emptyCreatorState, parseDeviceConfig, STORAGE_KEY } from './types';
 import { useTranslation } from '@/hooks/useTranslation';
 import { FaUpload, FaTrash, FaUndo } from 'react-icons/fa';
 import DeviceInfoSection from './DeviceInfoSection';
 import SetBaseSection from './SetBaseSection';
 import RegistersSection from './RegistersSection';
 import ActionsSection from './ActionsSection';
+import { createDefinition, isValidModelKey, updateDefinition } from '@/hooks/useDeviceDefinitions';
 
-export default function ModbusDeviceCreator() {
+interface ModbusDeviceCreatorProps { loadRequest?: {key:string;mode:'edit'|'fork'}|null; onSaved?:()=>void }
+export default function ModbusDeviceCreator({ onSaved }: ModbusDeviceCreatorProps) {
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelName, setModelName] = useState('');
   const [fileName, setFileName] = useState('');
   const [category, setCategory] = useState('sensors');
+  const [manufacturer, setManufacturer] = useState('');
+  const [description, setDescription] = useState('');
+  const [defaultAddress, setDefaultAddress] = useState(1);
+  const [defaultUpdateInterval, setDefaultUpdateInterval] = useState('30s');
+  const [passthrough, setPassthrough] = useState<Record<string, unknown>>({});
+  const [importedBlocks, setImportedBlocks] = useState<CreatorState['importedBlocks']>(null);
   const [testDeviceAddress, setTestDeviceAddress] = useState(1);
   
   const [enableSetAddress, setEnableSetAddress] = useState(false);
@@ -31,6 +39,10 @@ export default function ModbusDeviceCreator() {
   const [copied, setCopied] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [hasDraft, setHasDraft] = useState(false);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
 
   // Load draft from localStorage on mount
   useEffect(() => {
@@ -59,6 +71,7 @@ export default function ModbusDeviceCreator() {
       modelName,
       fileName,
       category,
+      manufacturer, description, defaultAddress, defaultUpdateInterval, passthrough, importedBlocks,
       enableSetAddress,
       setAddressAddress,
       enableSetBaudrate,
@@ -67,18 +80,18 @@ export default function ModbusDeviceCreator() {
       registers,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [modelName, fileName, category, enableSetAddress, setAddressAddress, enableSetBaudrate, baudrateAddress, baudrateMappings, registers]);
+  }, [modelName, fileName, category, manufacturer, description, defaultAddress, defaultUpdateInterval, passthrough, importedBlocks, enableSetAddress, setAddressAddress, enableSetBaudrate, baudrateAddress, baudrateMappings, registers]);
 
-  const loadFromState = (state: Partial<CreatorState>) => {
+  const loadFromState = (state: CreatorState) => {
     if (state.modelName !== undefined) setModelName(state.modelName);
     if (state.fileName !== undefined) setFileName(state.fileName);
-    if (state.category !== undefined) setCategory(state.category);
+    setCategory(state.category); setManufacturer(state.manufacturer); setDescription(state.description); setDefaultAddress(state.defaultAddress); setDefaultUpdateInterval(state.defaultUpdateInterval); setPassthrough(state.passthrough); setImportedBlocks(state.importedBlocks);
     if (state.enableSetAddress !== undefined) setEnableSetAddress(state.enableSetAddress);
     if (state.setAddressAddress !== undefined) setSetAddressAddress(state.setAddressAddress);
     if (state.enableSetBaudrate !== undefined) setEnableSetBaudrate(state.enableSetBaudrate);
     if (state.baudrateAddress !== undefined) setBaudrateAddress(state.baudrateAddress);
     if (state.baudrateMappings !== undefined) setBaudrateMappings(state.baudrateMappings);
-    if (state.registers !== undefined) setRegisters(state.registers);
+    setRegisters(state.registers);
     setHasDraft(false);
   };
 
@@ -86,7 +99,7 @@ export default function ModbusDeviceCreator() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        const state: CreatorState = JSON.parse(saved);
+        const state: CreatorState = { ...emptyCreatorState(), ...JSON.parse(saved) };
         loadFromState(state);
       } catch {
         // Invalid JSON, ignore
@@ -97,15 +110,7 @@ export default function ModbusDeviceCreator() {
   const clearDraft = () => {
     localStorage.removeItem(STORAGE_KEY);
     setHasDraft(false);
-    setModelName('');
-    setFileName('');
-    setCategory('sensors');
-    setEnableSetAddress(false);
-    setSetAddressAddress(256);
-    setEnableSetBaudrate(false);
-    setBaudrateAddress(257);
-    setBaudrateMappings({ '9600': 9600, '19200': 19200 });
-    setRegisters([]);
+    loadFromState(emptyCreatorState());
   };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -204,27 +209,7 @@ export default function ModbusDeviceCreator() {
     }
   };
 
-  const generateJSON = (): DeviceConfig => {
-    const config: DeviceConfig = {
-      model: modelName,
-      registers_base: groupRegistersIntoBlocks(registers),
-    };
-    
-    if (enableSetAddress || enableSetBaudrate) {
-      config.set_base = {};
-      if (enableSetAddress) {
-        config.set_base.set_address_address = setAddressAddress;
-      }
-      if (enableSetBaudrate) {
-        config.set_base.set_baudrate = {
-          address: baudrateAddress,
-          possible_baudrates: baudrateMappings,
-        };
-      }
-    }
-    
-    return config;
-  };
+  const generateJSON = (): DeviceConfig => buildDeviceConfig({ modelName, fileName, category, manufacturer, description, defaultAddress, defaultUpdateInterval, enableSetAddress, setAddressAddress, enableSetBaudrate, baudrateAddress, baudrateMappings, registers, passthrough, importedBlocks });
 
   const downloadJSON = () => {
     const json = JSON.stringify(generateJSON(), null, 2);
@@ -244,6 +229,19 @@ export default function ModbusDeviceCreator() {
     await copyToClipboard(json);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const saveToDevice = async () => {
+    const key = fileName || modelName.toLowerCase().replace(/\s+/g, '-');
+    if (!isValidModelKey(key)) { setSaveError(t('modbus_creator.invalid_key')); return; }
+    setSaving(true); setSaveError(null); setSaveWarning(null);
+    try {
+      const result = editingKey ? await updateDefinition(editingKey, generateJSON()) : await createDefinition(key, generateJSON());
+      setEditingKey(result.key); setSaveWarning(result.warning); localStorage.removeItem(STORAGE_KEY); onSaved?.();
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail;
+      setSaveError(typeof detail === 'string' ? detail : t('modbus_creator.save_failed'));
+    } finally { setSaving(false); }
   };
 
   return (
@@ -295,6 +293,10 @@ export default function ModbusDeviceCreator() {
         setFileName={setFileName}
         category={category}
         setCategory={setCategory}
+        manufacturer={manufacturer} setManufacturer={setManufacturer}
+        description={description} setDescription={setDescription}
+        defaultAddress={defaultAddress} setDefaultAddress={setDefaultAddress}
+        defaultUpdateInterval={defaultUpdateInterval} setDefaultUpdateInterval={setDefaultUpdateInterval}
         testDeviceAddress={testDeviceAddress}
         setTestDeviceAddress={setTestDeviceAddress}
       />
@@ -329,6 +331,7 @@ export default function ModbusDeviceCreator() {
         generateJSON={generateJSON}
         onCopyJSON={copyJSON}
         onDownloadJSON={downloadJSON}
+        onSaveToDevice={saveToDevice} saving={saving} saveError={saveError} saveWarning={saveWarning} editingKey={editingKey}
       />
     </div>
   );

@@ -14,12 +14,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from boneio.webui.sudo_rate_limiter import (
-    SUDO_AUTH_FAILED_RESPONSE,
-    SUDO_RATE_LIMITED_RESPONSE,
-    sudo_rate_limiter,
-)
-
 from boneio.core.config import ConfigHelper
 from boneio.core.config.yaml_util import (
     load_config_from_file,
@@ -34,6 +28,11 @@ from boneio.webui.services.logs import (
     get_standalone_logs,
     get_systemd_logs,
     is_running_as_service,
+)
+from boneio.webui.sudo_rate_limiter import (
+    SUDO_AUTH_FAILED_RESPONSE,
+    SUDO_RATE_LIMITED_RESPONSE,
+    sudo_rate_limiter,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -247,6 +246,9 @@ async def get_init(config_helper: ConfigHelper = Depends(get_config_helper)):
         "has_boneio": has_boneio,
         "board_version": board_version,
         "has_irrigation": has_irrigation,
+        "features": {
+            "addons": os.environ.get("BONEIO_ADDONS", "").lower() in {"1", "true", "yes", "on"},
+        },
     }
 
 @router.get("/name")
@@ -1360,4 +1362,3 @@ async def change_overlay(body: OverlayChangeRequest, request: Request):
         "restart_required": True,
         "message": "Overlay changed. System restart required for changes to take effect.",
     }
-

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 import tarfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -27,6 +28,101 @@ from boneio.webui.routes.config_core import (
 _LOGGER = logging.getLogger(__name__)
 
 MAX_BACKUPS = 10
+_MAX_RESTORE_FILE = 2 * 1024 * 1024
+_MAX_RESTORE_MEMBERS = 2048
+
+
+def _iter_config_backup_files(config_dir: Path):
+    """Yield durable configuration files, including pinned declarative add-ons."""
+    seen: set[Path] = set()
+    for pattern in ("*.yaml", "*.yml"):
+        for path in config_dir.glob(pattern):
+            if path.is_file() and not path.is_symlink():
+                seen.add(path)
+                yield path, path.name
+    for subdir in config_dir.iterdir():
+        if not subdir.is_dir() or subdir.name.startswith(".") or subdir.name in {"backups", "addons"}:
+            continue
+        patterns = ("*.yaml", "*.yml", "*.json") if subdir.name == "modbus_devices" else ("*.yaml", "*.yml")
+        for pattern in patterns:
+            for path in subdir.glob(pattern):
+                if path.is_file() and not path.is_symlink() and path not in seen:
+                    seen.add(path)
+                    yield path, f"{subdir.name}/{path.name}"
+
+    addons = config_dir / "addons"
+    for name in ("repositories.json", "state.json"):
+        path = addons / name
+        if path.is_file() and not path.is_symlink():
+            yield path, f"addons/{name}"
+    installed = addons / "installed"
+    if installed.is_dir():
+        for path in installed.rglob("*"):
+            relative = path.relative_to(addons)
+            allowed = (len(relative.parts) == 4 and relative.parts[0] == "installed" and path.name == "manifest.yaml") or (
+                len(relative.parts) == 6
+                and relative.parts[0] == "installed"
+                and relative.parts[3:5] == ("files", "modbus_devices")
+                and path.suffix == ".json"
+            )
+            if allowed and path.is_file() and not path.is_symlink():
+                yield path, f"addons/{relative.as_posix()}"
+
+
+def _add_config_files_to_tar(archive: tarfile.TarFile, config_dir: Path) -> None:
+    for source, archive_name in _iter_config_backup_files(config_dir):
+        archive.add(source, arcname=archive_name, recursive=False)
+        _LOGGER.debug("Added %s to config archive", archive_name)
+
+
+def _allowed_restore_path(name: str) -> bool:
+    path = PurePosixPath(name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return False
+    if len(path.parts) <= 2 and path.suffix in {".yaml", ".yml"}:
+        return True
+    if len(path.parts) == 2 and path.parts[0] == "modbus_devices" and path.suffix == ".json":
+        return True
+    if name in {"addons/repositories.json", "addons/state.json"}:
+        return True
+    if len(path.parts) >= 5 and path.parts[0] == "addons" and path.parts[1] == "installed":
+        if path.name == "manifest.yaml" and len(path.parts) == 5:
+            return True
+        return len(path.parts) == 7 and path.parts[4:6] == ("files", "modbus_devices") and path.suffix == ".json"
+    return False
+
+
+def _restore_config_members(archive: tarfile.TarFile, config_dir: Path) -> list[str]:
+    from boneio.addons.storage import atomic_write_bytes
+
+    restored: list[str] = []
+    members = archive.getmembers()
+    if len(members) > _MAX_RESTORE_MEMBERS:
+        raise ValueError("Archive contains too many files")
+    seen: set[str] = set()
+    for member in members:
+        if member.name == "_boneio_meta.json":
+            continue
+        folded_name = member.name.casefold()
+        if folded_name in seen:
+            raise ValueError(f"Duplicate file path in archive: {member.name}")
+        seen.add(folded_name)
+        if not _allowed_restore_path(member.name):
+            raise ValueError(f"Invalid file path in archive: {member.name}")
+        if not member.isfile() or member.issym() or member.islnk() or member.size > _MAX_RESTORE_FILE:
+            raise ValueError(f"Invalid file type or size in archive: {member.name}")
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError(f"Could not read archive member: {member.name}")
+        payload = source.read(_MAX_RESTORE_FILE + 1)
+        if len(payload) > _MAX_RESTORE_FILE:
+            raise ValueError(f"Archive member is too large: {member.name}")
+        target = (config_dir / member.name).resolve()
+        if not target.is_relative_to(config_dir.resolve()):
+            raise ValueError(f"Invalid file path in archive: {member.name}")
+        atomic_write_bytes(target, payload)
+        restored.append(member.name)
+    return restored
 
 
 def _add_backup_metadata_to_tar(tar: tarfile.TarFile, config_helper):
@@ -51,10 +147,9 @@ def _add_backup_metadata_to_tar(tar: tarfile.TarFile, config_helper):
 
 def _apply_serial_override_from_tar(fileobj, config_file):
     import json
-    try:
+
+    with contextlib.suppress(Exception):
         fileobj.seek(0)
-    except Exception:
-        pass
     effective_serial = None
     try:
         with tarfile.open(fileobj=fileobj, mode="r:gz") as tar:
@@ -95,21 +190,7 @@ async def download_config():
     buffer = io.BytesIO()
 
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for pattern in ["*.yaml", "*.yml"]:
-            for yaml_file in config_dir.glob(pattern):
-                if yaml_file.is_file():
-                    arcname = yaml_file.name
-                    tar.add(str(yaml_file), arcname=arcname)
-                    _LOGGER.debug(f"Added {arcname} to config archive")
-
-        for subdir in config_dir.iterdir():
-            if subdir.is_dir() and not subdir.name.startswith("."):
-                for pattern in ["*.yaml", "*.yml"]:
-                    for yaml_file in subdir.glob(pattern):
-                        if yaml_file.is_file():
-                            arcname = f"{subdir.name}/{yaml_file.name}"
-                            tar.add(str(yaml_file), arcname=arcname)
-                            _LOGGER.debug(f"Added {arcname} to config archive")
+        _add_config_files_to_tar(tar, config_dir)
 
         manager: Manager = _get_app_state().manager
         _add_backup_metadata_to_tar(tar, manager.config_helper)
@@ -148,49 +229,14 @@ async def restore_config(file: UploadFile = File(...), override_serial: bool = F
         backup_path = backup_dir / f"config_backup_v{__version__}_{timestamp}.tar.gz"
 
         with tarfile.open(backup_path, mode="w:gz") as tar:
-            for pattern in ["*.yaml", "*.yml"]:
-                for yaml_file in config_dir.glob(pattern):
-                    if yaml_file.is_file():
-                        tar.add(str(yaml_file), arcname=yaml_file.name)
-
-            for subdir in config_dir.iterdir():
-                if subdir.is_dir() and not subdir.name.startswith(".") and subdir.name != "backups":
-                    for pattern in ["*.yaml", "*.yml"]:
-                        for yaml_file in subdir.glob(pattern):
-                            if yaml_file.is_file():
-                                tar.add(str(yaml_file), arcname=f"{subdir.name}/{yaml_file.name}")
-
+            _add_config_files_to_tar(tar, config_dir)
             _add_backup_metadata_to_tar(tar, _get_app_state().manager.config_helper)
 
         _LOGGER.info(f"Created backup before restore: {backup_path}")
 
         # Extract and restore
-        restored_files = []
         with tarfile.open(fileobj=buffer, mode="r:gz") as tar:
-            members = tar.getmembers()
-            for member in members:
-                if ".." in member.name or member.name.startswith("/"):
-                    return {"status": "error", "message": f"Invalid file path in archive: {member.name}"}
-
-                if not (member.name.endswith(".yaml") or member.name.endswith(".yml")):
-                    _LOGGER.warning(f"Skipping non-YAML file: {member.name}")
-                    continue
-
-            for member in members:
-                if member.name.endswith(".yaml") or member.name.endswith(".yml"):
-                    target_path = config_dir / member.name
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    source = tar.extractfile(member)
-                    if source is None:
-                        _LOGGER.warning(f"Could not extract {member.name}")
-                        continue
-
-                    with source, open(target_path, "wb") as target:
-                        target.write(source.read())
-
-                    restored_files.append(member.name)
-                    _LOGGER.info(f"Restored: {member.name}")
+            restored_files = _restore_config_members(tar, config_dir)
 
         if override_serial:
             _apply_serial_override_from_tar(io.BytesIO(contents), config_file)
@@ -306,42 +352,13 @@ async def restore_config_backup(
         new_backup_path = backup_dir / f"config_backup_v{__version__}_{timestamp}.tar.gz"
 
         with tarfile.open(new_backup_path, mode="w:gz") as tar:
-            for pattern in ["*.yaml", "*.yml"]:
-                for yaml_file in config_dir.glob(pattern):
-                    if yaml_file.is_file():
-                        tar.add(str(yaml_file), arcname=yaml_file.name)
-
-            for subdir in config_dir.iterdir():
-                if subdir.is_dir() and not subdir.name.startswith(".") and subdir.name != "backups":
-                    for pattern in ["*.yaml", "*.yml"]:
-                        for yaml_file in subdir.glob(pattern):
-                            if yaml_file.is_file():
-                                tar.add(str(yaml_file), arcname=f"{subdir.name}/{yaml_file.name}")
-
+            _add_config_files_to_tar(tar, config_dir)
             _add_backup_metadata_to_tar(tar, _get_app_state().manager.config_helper)
 
         _LOGGER.info(f"Created backup before restore: {new_backup_path}")
 
-        restored_files = []
         with tarfile.open(backup_file, mode="r:gz") as tar:
-            members = tar.getmembers()
-            for member in members:
-                if ".." in member.name or member.name.startswith("/"):
-                    continue
-
-                if member.name.endswith((".yaml", ".yml")):
-                    target_path = config_dir / member.name
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    source = tar.extractfile(member)
-                    if source is None:
-                        continue
-
-                    with source, open(target_path, "wb") as target:
-                        target.write(source.read())
-
-                    restored_files.append(member.name)
-                    _LOGGER.info(f"Restored: {member.name}")
+            restored_files = _restore_config_members(tar, config_dir)
 
         if override_serial:
             with open(backup_file, "rb") as f:
@@ -403,18 +420,7 @@ async def create_config_backup():
         backup_path = backup_dir / f"config_backup_v{__version__}_{timestamp}.tar.gz"
 
         with tarfile.open(backup_path, mode="w:gz") as tar:
-            for pattern in ["*.yaml", "*.yml"]:
-                for yaml_file in config_dir.glob(pattern):
-                    if yaml_file.is_file():
-                        tar.add(str(yaml_file), arcname=yaml_file.name)
-
-            for subdir in config_dir.iterdir():
-                if subdir.is_dir() and not subdir.name.startswith(".") and subdir.name != "backups":
-                    for pattern in ["*.yaml", "*.yml"]:
-                        for yaml_file in subdir.glob(pattern):
-                            if yaml_file.is_file():
-                                tar.add(str(yaml_file), arcname=f"{subdir.name}/{yaml_file.name}")
-
+            _add_config_files_to_tar(tar, config_dir)
             _add_backup_metadata_to_tar(tar, _get_app_state().manager.config_helper)
 
         _LOGGER.info(f"Created config backup: {backup_path}")
@@ -507,7 +513,7 @@ async def inspect_backup_file(file: UploadFile = File(...)):
         return _inspect_tar_fileobj(fileobj, config_helper)
     except Exception as e:
         _LOGGER.error("Failed to inspect backup file: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/config/inspect_backup_path")
@@ -534,17 +540,16 @@ async def inspect_backup_path(backup_path: str = Body(..., embed=True)):
         raise
     except Exception as e:
         _LOGGER.error("Failed to inspect backup path: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 def _inspect_tar_fileobj(fileobj, config_helper):
     import json
+
     meta = None
     try:
-        try:
+        with contextlib.suppress(Exception):
             fileobj.seek(0)
-        except Exception:
-            pass
         with tarfile.open(fileobj=fileobj, mode="r:gz") as tar:
             try:
                 meta_member = tar.getmember("_boneio_meta.json")

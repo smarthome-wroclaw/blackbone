@@ -1,5 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-import { FaCode, FaList, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaToolbox, FaProjectDiagram, FaPuzzlePiece, FaServer } from 'react-icons/fa';
+import { FaCode, FaList, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaToolbox, FaProjectDiagram, FaPuzzlePiece, FaServer, FaBoxes } from 'react-icons/fa';
 import ThemeChanger from './ThemeChanger';
 import LanguageSelector from './LanguageSelector';
 import { useEffect } from 'react';
@@ -133,6 +133,7 @@ function Menu({ sideMenu = false }: { sideMenu?: boolean }) {
   const location = useLocation();
   const { hasBoneioSection } = useConfig();
   const { isNodeRedAvailable } = useNodeRedAvailability();
+  const { data: initData } = useAppInit();
 
   const menuItems: MenuItem[] = [
     { path: '/', default: true, icon: FaLightbulb, label: t('navigation.outputs') },
@@ -140,6 +141,7 @@ function Menu({ sideMenu = false }: { sideMenu?: boolean }) {
     { path: '/sensors', icon: FaThermometerHalf, label: t('navigation.sensors') },
     { path: '/modbus', icon: FaNetworkWired, label: t('navigation.modbus') },
     { path: '/templates', icon: FaPuzzlePiece, label: t('navigation.templates') },
+    ...(initData?.features?.addons ? [{ path: '/addons', icon: FaBoxes, label: t('navigation.addons'), experimental: true }] : []),
     { path: '/tools', icon: FaToolbox, label: t('navigation.tools'), right: true },
     // Settings (experimental) - only show if boneio section exists in config
     ...(hasBoneioSection ? [{ path: '/settings', icon: FaCog, label: t('navigation.settings'), right: true }] : []),

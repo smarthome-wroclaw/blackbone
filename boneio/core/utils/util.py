@@ -72,6 +72,17 @@ def open_json(path: str, model: str) -> dict:
     Raises:
         FileNotFoundError: If JSON file is not found
     """
+    # The runtime historically passes either the Modbus package directory or
+    # its devices subdirectory. Resolve those through the registry first so a
+    # definition stored next to config.yaml behaves exactly like a built-in.
+    from boneio.modbus import device_registry
+    requested = os.path.normpath(path)
+    if requested in (device_registry.BUILTIN_DIR, os.path.dirname(device_registry.BUILTIN_DIR)):
+        try:
+            return device_registry.load_model(model)
+        except device_registry.ModelNotFoundError:
+            pass
+
     filename = f"{model}.json"
     
     # First try direct path (backward compatibility)
