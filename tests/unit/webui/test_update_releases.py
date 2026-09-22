@@ -137,6 +137,32 @@ class TestReleaseSource:
 
         assert requests_stub.get.call_args[0][0] == "https://api.github.com/repos/someone/else/releases"
 
+    async def test_async_default_repo_is_the_fork(self, monkeypatch):
+        """The async fetch must query the fork too.
+
+        Every caller in production uses the async variant, so a default of
+        boneIO-eu/app_black there would point the whole fork's update check at
+        upstream's releases while the synchronous guard above still passed.
+        """
+        requests_stub = _fake_requests(_ok_response([]))
+        monkeypatch.setitem(sys.modules, "requests", requests_stub)
+
+        releases, error = await _routes_update._fetch_github_releases_async()
+
+        assert error is None
+        assert releases == []
+        requested_url = requests_stub.get.call_args[0][0]
+        assert requested_url == "https://api.github.com/repos/smarthome-wroclaw/blackbone/releases"
+
+    async def test_async_explicit_repo_still_honoured(self, monkeypatch):
+        """An explicit repo argument overrides the async default."""
+        requests_stub = _fake_requests(_ok_response([]))
+        monkeypatch.setitem(sys.modules, "requests", requests_stub)
+
+        await _routes_update._fetch_github_releases_async(repo="someone/else")
+
+        assert requests_stub.get.call_args[0][0] == "https://api.github.com/repos/someone/else/releases"
+
 
 class TestCheckUpdateWithForkReleases:
     """BlackBone tags start at v0.1.0 and must survive the version filter."""

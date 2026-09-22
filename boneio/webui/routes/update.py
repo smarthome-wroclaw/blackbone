@@ -93,7 +93,7 @@ def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | Non
 
 
 async def _fetch_github_releases_async(
-    repo: str = "boneIO-eu/app_black",
+    repo: str = GITHUB_RELEASES_REPO,
 ) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API without stalling the event loop.
 
