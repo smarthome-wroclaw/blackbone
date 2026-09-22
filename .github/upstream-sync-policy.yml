@@ -1,0 +1,65 @@
+# How the upstream sync workflow treats each path when applying an upstream
+# batch. Every class below is resolved without a human; anything not listed is
+# left for git's three-way merge, and a surviving conflict opens a draft PR.
+#
+# Design: docs/superpowers/specs/2026-09-22-upstream-sync-conflict-policy-design.md
+#
+# A path may be claimed by at most one class. Two claims is a load-time error,
+# because silent precedence between classes is impossible to reason about.
+#
+# Globs: `*` matches within one path segment, `**` matches across segments.
+
+# The fork owns these outright. Upstream's changes are dropped and reported in
+# the PR body, so its evolution of them is visible rather than silently lost.
+# The .github/workflows/** glob also stops the fork inheriting *new* upstream
+# workflows, which would otherwise apply cleanly and run against this fork's
+# different release machinery and secrets.
+fork_owned:
+  - boneio/version.py
+  - CHANGELOG.md
+  - CHANGELOG.pl.md
+  - release-please-config.json
+  - .release-please-manifest.json
+  - .github/workflows/**
+  - .github/dependabot.yml
+  - .github/upstream-sync-policy.yml
+  - install.sh
+  - README.md
+
+# Upstream edits files this fork deliberately removed. Dropped silently.
+# Currently empty: .github/workflows/** above already covers
+# publish-to-pypi.yaml, the only such file today. Kept as a class because
+# non-workflow deletions will need it.
+fork_deleted: []
+
+# Upstream removed these; the fork follows. Upstream went pnpm-only, so the
+# npm lockfile is vestigial here.
+upstream_deleted:
+  - frontend/package-lock.json
+
+# Keep both sides' lines and de-duplicate.
+union:
+  - .gitignore
+
+# Never merged textually. Rebuilt from their manifests after the patch applies.
+regenerate:
+  - path: uv.lock
+    command: uv lock
+  - path: frontend/pnpm-lock.yaml
+    command: pnpm install --lockfile-only --dir frontend
+
+# Merged semantically rather than by hunk: upstream's structure, the fork's
+# identity keys, and per-dependency pin resolution.
+manifests:
+  - path: pyproject.toml
+    identity_keys:
+      - project.name
+      - project.description
+      - project.authors
+      - project.urls.Repository
+      - project.urls.Changelog
+  - path: frontend/package.json
+    identity_keys:
+      - name
+      - description
+      - repository
