@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 concurrency:
   group: upstream-sync-${{ github.repository }}
@@ -18,6 +19,7 @@ env:
   SOURCE_REPOSITORY: ${{ vars.UPSTREAM_REPOSITORY || 'boneIO-eu/app_black' }}
   SOURCE_BRANCH: ${{ vars.UPSTREAM_BRANCH || 'dev-debian13' }}
   TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+  UPSTREAM_SYNC_BATCH_SIZE: ${{ vars.UPSTREAM_SYNC_BATCH_SIZE || '25' }}
 
 jobs:
   create-sync-pr:
@@ -30,6 +32,27 @@ jobs:
         with:
           ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install sync tooling
+        shell: bash
+        run: pip install --quiet packaging PyYAML
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        shell: bash
+        run: npm install -g pnpm@10
 
       - name: Validate configuration
         shell: bash
@@ -113,9 +136,11 @@ jobs:
             base_sha=$(git merge-base HEAD "$source_sha")
           fi
 
-          # Every run takes all changes currently available in upstream. A merge
-          # made upstream remains atomic, and all of its commits are enumerated
-          # in the generated PR body below.
+          # A run takes at most UPSTREAM_SYNC_BATCH_SIZE upstream first-parent
+          # commits. Cutting only on the first-parent chain keeps a merge made
+          # upstream atomic, and every included commit is enumerated in the PR
+          # body below. The cap matters when digging out of a backlog; once the
+          # fork is current, a daily batch is far smaller than it.
           pending_count=$(git rev-list --first-parent --count "${base_sha}..${source_sha}")
 
           if (( pending_count == 0 )); then
@@ -126,8 +151,20 @@ jobs:
             exit 0
           fi
 
-          batch_end=$source_sha
-          first_parent_count=$pending_count
+          batch_size="${UPSTREAM_SYNC_BATCH_SIZE:-25}"
+          if [[ ! "$batch_size" =~ ^[0-9]+$ ]] || (( batch_size < 1 )); then
+            echo "Invalid UPSTREAM_SYNC_BATCH_SIZE: ${batch_size}" >&2
+            exit 1
+          fi
+
+          if (( pending_count > batch_size )); then
+            batch_end=$(git rev-list --first-parent --reverse "${base_sha}..${source_sha}" \
+              | sed -n "${batch_size}p")
+            echo "Capping this batch at ${batch_size} of ${pending_count} pending commits."
+          else
+            batch_end=$source_sha
+          fi
+          first_parent_count=$(git rev-list --first-parent --count "${base_sha}..${batch_end}")
           included_count=$(git rev-list --count "${base_sha}..${batch_end}")
           base_short=$(git rev-parse --short=12 "$base_sha")
           end_short=$(git rev-parse --short=12 "$batch_end")
@@ -147,6 +184,7 @@ jobs:
 
       - name: Apply selected upstream batch
         if: steps.batch.outputs.has_changes == 'true'
+        id: apply
         env:
           BASE_SHA: ${{ steps.batch.outputs.base_sha }}
           BATCH_END: ${{ steps.batch.outputs.batch_end }}
@@ -162,13 +200,18 @@ jobs:
           # Apply the net change for the exact source range instead of depending
           # on a particular GitHub merge strategy. The state file makes squash,
           # rebase and merge-commit PRs advance to the same next batch.
-          patch_file="${RUNNER_TEMP}/upstream-sync.patch"
-          git diff --binary --full-index "$BASE_SHA" "$BATCH_END" > "$patch_file"
-          if [[ -s "$patch_file" ]] && ! git apply --3way --index "$patch_file"; then
-            echo "The selected range ${BASE_SHA}..${BATCH_END} conflicts with ${TARGET_BRANCH}." >&2
-            echo "Resolve the conflict manually, then rerun the workflow." >&2
-            exit 1
-          fi
+          #
+          # The pipeline resolves everything .github/upstream-sync-policy.yml
+          # claims, applies the rest file by file, and leaves genuine conflicts
+          # in the tree with their markers. A conflict is a reviewable outcome,
+          # not a failure, so this step exits 0 and the PR below is opened as a
+          # draft instead.
+          python -m scripts.upstream_sync.cli \
+            --repo . \
+            --base "$BASE_SHA" \
+            --end "$BATCH_END" \
+            --report-file "${RUNNER_TEMP}/upstream-sync-report.md" \
+            --github-output "$GITHUB_OUTPUT"
 
           mkdir -p .github
           jq -n \
@@ -177,7 +220,9 @@ jobs:
             --arg commit "$BATCH_END" \
             '{repository: $repository, branch: $branch, commit: $commit}' \
             > .github/upstream-sync-state.json
-          git add .github/upstream-sync-state.json
+          # -A stages the conflicted files too, markers and all, so the draft
+          # PR shows exactly what a human has to resolve.
+          git add -A
           git commit \
             -m "chore(sync): upstream ${BASE_SHA:0:12}..${BATCH_END:0:12}" \
             -m "Source: ${SOURCE_REPOSITORY}:${SOURCE_BRANCH}" \
@@ -229,6 +274,10 @@ jobs:
 
           {
             echo
+            echo '## What the sync resolved automatically'
+            echo
+            cat "${RUNNER_TEMP}/upstream-sync-report.md"
+            echo
             echo '---'
             echo 'This PR was generated automatically. Merge it before the next batch is opened.'
           } >> upstream-sync-pr.md
@@ -241,6 +290,9 @@ jobs:
           SYNC_BRANCH: ${{ steps.batch.outputs.sync_branch }}
           BASE_SHORT: ${{ steps.batch.outputs.base_short }}
           END_SHORT: ${{ steps.batch.outputs.end_short }}
+          NEEDS_HUMAN: ${{ steps.apply.outputs.needs_human }}
+          CONFLICT_COUNT: ${{ steps.apply.outputs.conflict_count }}
+          UNAPPLIED_COUNT: ${{ steps.apply.outputs.unapplied_count }}
         shell: bash
         run: |
           set -euo pipefail
@@ -251,15 +303,79 @@ jobs:
           fi
 
           git push origin "HEAD:refs/heads/${SYNC_BRANCH}"
+
+          # A batch needing a human is opened as a draft and labelled, so the
+          # "Stop if another sync PR is open" guard above pauses the schedule
+          # until someone resolves it. It is never a silent failure again.
+          draft_args=()
+          title="chore(sync): upstream ${BASE_SHORT}..${END_SHORT}"
+          if [[ "$NEEDS_HUMAN" == "true" ]]; then
+            draft_args+=(--draft --label upstream-sync-conflict)
+            title="${title} [conflicts]"
+            gh label create upstream-sync-conflict \
+              --repo "$GITHUB_REPOSITORY" \
+              --color d93f0b \
+              --description "Upstream sync batch that needs manual resolution" \
+              --force >/dev/null 2>&1 || true
+          fi
+
           pr_url=$(gh pr create \
             --repo "$GITHUB_REPOSITORY" \
             --base "$TARGET_BRANCH" \
             --head "$SYNC_BRANCH" \
-            --title "chore(sync): upstream ${BASE_SHORT}..${END_SHORT}" \
-            --body-file upstream-sync-pr.md)
+            --title "$title" \
+            --body-file upstream-sync-pr.md \
+            "${draft_args[@]}")
 
           echo "url=$pr_url" >> "$GITHUB_OUTPUT"
-          echo "### Upstream sync PR created" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$NEEDS_HUMAN" == "true" ]]; then
+            echo "### Upstream sync PR needs a human" >> "$GITHUB_STEP_SUMMARY"
+            echo "${CONFLICT_COUNT} conflict(s), ${UNAPPLIED_COUNT} unapplied." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Upstream sync PR created" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "${pr_url}" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo "Exact source range: \`${{ steps.batch.outputs.base_sha }}..${{ steps.batch.outputs.batch_end }}\`." >> "$GITHUB_STEP_SUMMARY"
+
+      # A conflict opens a draft PR above and is not a failure. Reaching here
+      # means something genuinely broke: a malformed policy, a rewritten
+      # upstream history, or regeneration falling over. Six such failures went
+      # unnoticed before this existed, so give the failure a mouth.
+      - name: Report a blocked sync
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          title="Upstream sync blocked"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body=$(printf '%s\n' \
+            "The scheduled upstream sync failed for a reason the policy could not absorb." \
+            "" \
+            "- Run: ${run_url}" \
+            "- Source: \`${SOURCE_REPOSITORY}:${SOURCE_BRANCH}\`" \
+            "" \
+            "A conflicting batch would have opened a draft pull request instead, so this is" \
+            "a genuine error: a malformed policy, rewritten upstream history, or lockfile" \
+            "regeneration failing." \
+            "" \
+            "This issue is reused; the sync stays broken until it is closed.")
+
+          existing=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "$title in:title" \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body "$body"
+          fi
