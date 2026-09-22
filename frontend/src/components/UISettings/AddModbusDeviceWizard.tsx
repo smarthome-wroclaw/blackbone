@@ -8,11 +8,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  MODBUS_DEVICE_CATALOG,
-  MODBUS_CATEGORIES,
-  ModbusDeviceInfo
-} from '../../generated/modbusDeviceCatalog';
+import { ModbusDeviceInfo } from '../../generated/modbusDeviceCatalog';
+import { useModbusCatalog } from '@/hooks/useModbusCatalog';
 import SimpleTimePeriodInput from './widgets/SimpleTimePeriodInput';
 import AreaSelect from './widgets/AreaSelect';
 import {
@@ -56,6 +53,7 @@ export const AddModbusDeviceWizard: React.FC<AddModbusDeviceWizardProps> = ({
   onAdd,
 }) => {
   const { t } = useTranslation();
+  const { catalog } = useModbusCatalog();
   const [step, setStep] = useState(1);
 
   /**
@@ -186,12 +184,12 @@ export const AddModbusDeviceWizard: React.FC<AddModbusDeviceWizardProps> = ({
   }, [open]);
 
   // Compute a list of devices in the selected category
-  const filteredDevices = Object.values(MODBUS_DEVICE_CATALOG).filter(
+  const filteredDevices = Object.values(catalog).filter(
     (device) => device.category === selectedCategory
   );
 
   // Search filter across all devices
-  const allDevices = Object.values(MODBUS_DEVICE_CATALOG);
+  const allDevices = Object.values(catalog);
   const searchResults = searchQuery.trim() === ''
     ? []
     : allDevices.filter(device => {
@@ -358,7 +356,7 @@ export const AddModbusDeviceWizard: React.FC<AddModbusDeviceWizardProps> = ({
                     {t('modbus_wizard.step1_title') || 'Or select device category:'}
                   </h4>
                   <div className="gap-4 grid grid-cols-2">
-                    {MODBUS_CATEGORIES.map((category) => (
+                    {[...new Set(Object.values(catalog).map(device => device.category))].map((category) => (
                       <button
                         key={category}
                         type="button"

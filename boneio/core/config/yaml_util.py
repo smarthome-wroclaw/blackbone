@@ -82,19 +82,10 @@ _BOARD_CONFIG_CACHE = {}
 
 
 def _get_modbus_device_models() -> list[str]:
-    """Scan modbus/devices/ directory and return filenames as model keys.
+    """Return package and user-provided model keys from the central registry."""
+    from boneio.modbus import device_registry
 
-    Only does os.walk (no JSON parsing) — <1ms even on BeagleBone.
-    """
-    devices_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "../../modbus/devices"))
-    models = []
-    if os.path.isdir(devices_dir):
-        for root, dirs, files in os.walk(devices_dir):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
-            for fname in files:
-                if fname.endswith(".json"):
-                    models.append(fname[:-5])
-    return sorted(models)
+    return sorted(ref.key for ref in device_registry.list_models())
 
 
 def _inject_modbus_models(schema: dict) -> None:
@@ -1226,6 +1217,9 @@ def load_config_from_file(
     import time as _time
 
     _t0 = _time.monotonic()
+
+    from boneio.modbus import device_registry
+    device_registry.configure_from_config(config_file)
 
     # Try loading from cache first (fast path: ~0.5s vs ~20s)
     cached = _try_load_cached_config(config_file)
