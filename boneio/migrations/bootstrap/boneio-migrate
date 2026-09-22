@@ -24,6 +24,7 @@ import logging.handlers
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,8 @@ ALLOWED_ACTIONS = {
     "ufw_allow",
     "apt_install",
     "pip_install_wheel",
+    "disable_apparmor_profiles",
+    "prune_orphaned_journal_dirs",
 }
 
 # Debian package names accepted by the apt_install action
@@ -496,6 +499,125 @@ def handle_pip_install_wheel(action: dict[str, Any], assets_base: str) -> None:
     _LOGGER.info("INSTALLED: %s into %s", wheel_path.name, python)
 
 
+def handle_prune_orphaned_journal_dirs(action: dict[str, Any], assets_base: str) -> None:
+    """Remove journal directories belonging to a previous machine-id.
+
+    journald manages only the directory matching /etc/machine-id. Any other
+    machine-id directory is invisible to journalctl --vacuum-* and to
+    SystemMaxUse, so it is never cleaned, yet log2ram rsyncs it on every boot.
+
+    They appear because the image pipeline truncates /etc/machine-id, so each
+    reflash leaves the previous journal directory behind permanently.
+
+    Args:
+        action: Unused.
+        assets_base: Unused.
+    """
+    try:
+        machine_id = Path("/etc/machine-id").read_text().strip()
+    except OSError as exc:
+        _LOGGER.warning("Cannot read /etc/machine-id: %s", exc)
+        return
+
+    if not re.fullmatch(r"[0-9a-f]{32}", machine_id):
+        _LOGGER.warning("Refusing to prune: /etc/machine-id is %r", machine_id)
+        return
+
+    removed = 0
+    freed_apparent = 0
+    for root in (Path("/var/log/journal"), Path("/var/hdd.log/journal")):
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if not child.is_dir() or child.name == machine_id:
+                continue
+            # Only touch things that look like a machine-id.
+            if not re.fullmatch(r"[0-9a-f]{32}", child.name):
+                continue
+            try:
+                for f in child.rglob("*"):
+                    if f.is_file():
+                        freed_apparent += f.stat().st_size
+                shutil.rmtree(child)
+                removed += 1
+            except OSError as exc:
+                _LOGGER.warning("Cannot remove %s: %s", child, exc)
+
+    if removed:
+        _LOGGER.info(
+            "Removed %d orphaned journal dir(s), %.1f MB apparent",
+            removed,
+            freed_apparent / 1048576,
+        )
+    else:
+        _LOGGER.info("No orphaned journal directories found")
+
+
+def handle_disable_apparmor_profiles(action: dict[str, Any], assets_base: str) -> None:
+    """Disable AppArmor profiles not needed on a headless controller.
+
+    Debian's ``apparmor`` package ships ~106 profiles in /etc/apparmor.d,
+    virtually all for desktop software: browsers, Discord, Slack, Steam,
+    1Password, MongoDB Compass, Xorg, plasmashell, nautilus, and the sbuild/lxc
+    tool families. apparmor.service loads every one of them at boot.
+
+    Measured on a BeagleBone Black: apparmor.service took 11.4 s and sat on the
+    critical path ahead of networking.service. Compiled policy is cached, so the
+    cost is reading ~9 MB of it from SD plus 111 kernel profile loads on a 1 GHz
+    single-core CPU.
+
+    Implemented as a **keep-list**, not a removal list: anything not named stays
+    disabled, so a future apparmor package that adds twenty new browser profiles
+    does not quietly restore the boot cost.
+
+    The profiles are owned by the apparmor package, so files are never deleted —
+    that would fight dpkg on every upgrade. Instead each profile gets a symlink
+    in /etc/apparmor.d/disable/, the mechanism apparmor_parser itself honours.
+    Fully reversible by removing the symlinks.
+
+    Args:
+        action: Action dict with ``keep`` (list of profile basenames to leave
+            enabled).
+        assets_base: Unused.
+    """
+    keep = set(action.get("keep", []))
+    profile_dir = Path("/etc/apparmor.d")
+    disable_dir = profile_dir / "disable"
+
+    if not profile_dir.is_dir():
+        _LOGGER.info("No /etc/apparmor.d — AppArmor not installed, skipping")
+        return
+
+    disable_dir.mkdir(mode=0o755, exist_ok=True)
+
+    disabled = 0
+    kept = []
+    for entry in sorted(profile_dir.iterdir()):
+        # Only top-level profile files. abstractions/, tunables/, local/ and
+        # disable/ are include trees, not profiles.
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name in keep:
+            kept.append(name)
+            continue
+        link = disable_dir / name
+        try:
+            if link.is_symlink() or link.exists():
+                continue
+            link.symlink_to(entry)
+            disabled += 1
+        except OSError as exc:
+            _LOGGER.warning("Cannot disable AppArmor profile %s: %s", name, exc)
+
+    _LOGGER.info(
+        "AppArmor: disabled %d profile(s), kept %d (%s)",
+        disabled,
+        len(kept),
+        ", ".join(kept) if kept else "none",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -512,6 +634,8 @@ ACTION_HANDLERS = {
     "ufw_allow": handle_ufw_allow,
     "apt_install": handle_apt_install,
     "pip_install_wheel": handle_pip_install_wheel,
+    "disable_apparmor_profiles": handle_disable_apparmor_profiles,
+    "prune_orphaned_journal_dirs": handle_prune_orphaned_journal_dirs,
 }
 
 
@@ -619,7 +743,12 @@ def main() -> int:
         )
         return 2
 
-    write_applied_flag(version)
+    # Skip flag for internal operations (e.g. overlay repair) that should
+    # not leave .applied markers.
+    if not payload.get("skip_applied_flag", False):
+        write_applied_flag(version)
+    else:
+        _LOGGER.info("Skipping applied flag for version=%s (skip_applied_flag=True)", version)
     _LOGGER.info("Migration %s completed successfully.", version)
     return 0
 

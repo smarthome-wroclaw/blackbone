@@ -322,6 +322,74 @@ class PipInstallWheel(MigrationAction):
 
 
 # ---------------------------------------------------------------------------
+# AppArmor
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DisableApparmorProfiles(MigrationAction):
+    """Disable AppArmor profiles not needed on a headless controller.
+
+    Debian's ``apparmor`` package ships ~106 profiles in ``/etc/apparmor.d``,
+    almost entirely for desktop software — browsers, Discord, Slack, Steam,
+    1Password, MongoDB Compass, Xorg, plasmashell, and the sbuild/lxc tool
+    families. ``apparmor.service`` loads all of them at boot, which measured
+    11.4 s on a BeagleBone Black and sat ahead of ``networking.service`` on the
+    critical path.
+
+    Expressed as a keep-list so that a future apparmor package adding more
+    desktop profiles cannot silently reintroduce the cost.
+
+    Profiles are disabled via symlinks in ``/etc/apparmor.d/disable/`` — the
+    mechanism ``apparmor_parser`` honours natively. Files are never deleted,
+    since they belong to the apparmor package and would return on every upgrade.
+    Reversible by removing the symlinks.
+
+    Args:
+        keep: Profile basenames to leave enabled. Everything else in
+            ``/etc/apparmor.d`` is disabled.
+    """
+
+    keep: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict."""
+        return {"action": "disable_apparmor_profiles", "keep": self.keep}
+
+
+# ---------------------------------------------------------------------------
+# Journal housekeeping
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PruneOrphanedJournalDirs(MigrationAction):
+    """Delete journal directories whose machine-id is not the current one.
+
+    ``/var/log/journal/`` and log2ram's disk copy contain one subdirectory per
+    machine-id. journald only ever manages the directory matching
+    ``/etc/machine-id``, so any other one is invisible to
+    ``journalctl --vacuum-*`` and to ``SystemMaxUse`` — it is never cleaned.
+
+    They accumulate because the image pipeline truncates ``/etc/machine-id``
+    (setup_boneio.sh, and the eMMC flasher), so a new one is generated on the
+    next boot while the previous journal directory stays behind. A controller
+    examined in the field had **nine** of them.
+
+    That matters because log2ram rsyncs the whole tree on every boot, so every
+    reflash permanently adds to boot time.
+
+    Only directories whose name looks like a machine-id (32 hex characters) and
+    differs from the current one are removed, so nothing else under
+    ``journal/`` is touched.
+    """
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict."""
+        return {"action": "prune_orphaned_journal_dirs"}
+
+
+# ---------------------------------------------------------------------------
 # Helper utilities (used by runner, not sent to boneio-migrate)
 # ---------------------------------------------------------------------------
 
