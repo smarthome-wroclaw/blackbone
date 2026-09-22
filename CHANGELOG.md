@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.0](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.4...v0.2.0) (2026-09-22)
+
+
+### Features
+
+* **addons:** add dashboard lifecycle workflow ([0913251](https://github.com/smarthome-wroclaw/blackbone/commit/0913251f896021bcac24632685cd7875dd47a148))
+* **addons:** add secure declarative pack lifecycle ([804711c](https://github.com/smarthome-wroclaw/blackbone/commit/804711c45c6f55272a82a574d89b6cd7918b5f6a))
+* **modbus:** support user-provided device definitions ([693b31e](https://github.com/smarthome-wroclaw/blackbone/commit/693b31e688e6aa3127f52f67bad4e4eeaeb884c4))
+* **sync:** resolve mechanical upstream conflicts instead of failing ([8e97a8f](https://github.com/smarthome-wroclaw/blackbone/commit/8e97a8fcf55b20a4d2b5ea7f545d56d780077057))
+* **sync:** resolve mechanical upstream conflicts instead of failing ([96faa3f](https://github.com/smarthome-wroclaw/blackbone/commit/96faa3fc95e93f31761311414d6234e9f8b5bd76))
+
+
+### Bug Fixes
+
+* **update:** keep release discovery pointed at the fork ([bdfdad9](https://github.com/smarthome-wroclaw/blackbone/commit/bdfdad9a2bde06a6f7eb1b10de07e4d293b1f9a7))
+
+
+### Documentation
+
+* **sync:** design a conflict policy for the upstream sync workflow ([f999a92](https://github.com/smarthome-wroclaw/blackbone/commit/f999a92e4c8039c3c2f23a6ad80f268a99669cb8))
+
 ## [0.1.4](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.3...v0.1.4) (2026-09-09)
 
 
