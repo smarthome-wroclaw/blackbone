@@ -20,6 +20,7 @@ from boneio.core.config.yaml_util import (
     update_yaml_field,
     wait_for_pending_yaml_saves,
 )
+from boneio.core.utils import overlay as overlay_util
 from boneio.exceptions import ConfigurationException
 from boneio.models.logs import LogEntry, LogsResponse
 from boneio.version import __version__
@@ -1062,8 +1063,9 @@ def _read_current_overlay(uenv_path: str) -> str | None:
         Overlay basename (e.g. ``BONEIO-BLACK-PINS-v0.4-v0.8.dtbo``) or None.
     """
     # Fix #5: tolerate trailing whitespace and inline comments after overlay name
+    # Fix #6: optional path prefix — uEnv.txt may use bare filename or full path
     pattern = re.compile(
-        r"^uboot_overlay_addr\d+=.*/(BONEIO-BLACK-PINS\S+\.dtbo)\s*(?:#.*)?$"
+        r"^uboot_overlay_addr\d+=(?:.*/)?(BONEIO-BLACK-PINS\S*\.dtbo)\s*(?:#.*)?$"
     )
     try:
         with open(uenv_path, encoding="utf-8", errors="replace") as f:
@@ -1101,7 +1103,13 @@ _OVERLAY_SEARCH_DIRS = [
 def _overlay_file_exists(overlay_name: str) -> bool:
     """Check if the overlay .dtbo file exists on disk.
 
-    Searches common overlay directories and any ``/boot/dtbs/*/overlays/`` paths.
+    Prefers the **current** kernel's DTB directory, then falls back to
+    common overlay directories and other kernel versions.
+
+    Note that U-Boot resolves bare overlay filenames from
+    ``/boot/dtbs/$uname_r/`` — *not* its ``overlays/`` subdirectory — so both
+    are checked. Checking only ``overlays/`` reported the overlay as installed
+    while U-Boot could not find it and silently booted the stock pinmux.
 
     Args:
         overlay_name: Overlay basename (e.g. ``BONEIO-BLACK-PINS-v0.4-v0.8.dtbo``).
@@ -1109,14 +1117,25 @@ def _overlay_file_exists(overlay_name: str) -> bool:
     Returns:
         True if the file is found in at least one location.
     """
+    # Prefer current kernel's DTB directories (this is what U-Boot actually loads)
+    kernel_version = overlay_util.kernel_release()
+    if kernel_version:
+        for directory in overlay_util.overlay_dirs_for_kernel(kernel_version):
+            if os.path.isfile(os.path.join(str(directory), overlay_name)):
+                return True
+
     for search_dir in _OVERLAY_SEARCH_DIRS:
         if os.path.isfile(os.path.join(search_dir, overlay_name)):
             return True
 
-    # Check /boot/dtbs/<kernel>/overlays/ for any installed kernel
-    for path in glob.glob(f"/boot/dtbs/*/overlays/{overlay_name}"):
-        if os.path.isfile(path):
-            return True
+    # Fallback: check any kernel dir (overlay installed but maybe in old kernel)
+    for pattern in (
+        f"/boot/dtbs/*/{overlay_name}",
+        f"/boot/dtbs/*/overlays/{overlay_name}",
+    ):
+        for path in glob.glob(pattern):
+            if os.path.isfile(path):
+                return True
 
     return False
 
@@ -1170,9 +1189,14 @@ async def get_overlay_status():
         "current_overlay": current,
         "expected_overlay": expected,
         "uenv_path": uenv,
-        "match": current == expected if (current and expected) else True,
+        "match": (current == expected) if (current is not None and expected is not None) else False,
         "has_backup": has_backup,
-        "overlay_available": _overlay_file_exists(expected) if expected else True,
+        "overlay_available": _overlay_file_exists(expected) if expected else False,
+        # Effective state from the kernel, not the filesystem. uEnv.txt and the
+        # .dtbo files can both look correct while U-Boot merged nothing —
+        # /proc/device-tree/chosen/overlays/ is the only authoritative source.
+        "overlay_applied": overlay_util.is_boneio_overlay_applied(),
+        "applied_overlays": overlay_util.applied_overlay_names(),
     }
 
 
@@ -1279,10 +1303,11 @@ async def change_overlay(body: OverlayChangeRequest, request: Request):
 
     # Fix #4: sed skips commented lines using address /^[[:space:]]*#/!
     # Only modifies uncommented uboot_overlay_addr lines containing BONEIO-BLACK-PINS
+    # Fix #7: handle both path-prefixed and bare overlay names in uEnv.txt
     sed_pattern = (
         r"/^[[:space:]]*#/!s|"
-        r"\(uboot_overlay_addr[0-9]*=.*/\)BONEIO-BLACK-PINS[^ ]*|"
-        rf"\1{overlay}|"
+        r"\(uboot_overlay_addr[0-9]*=\)\(.*\/\)\{0,1\}BONEIO-BLACK-PINS[^ ]*|"
+        rf"\1\2{overlay}|"
     )
 
     cmd = ["sudo", "-S", "sed", "-i", sed_pattern, uenv]

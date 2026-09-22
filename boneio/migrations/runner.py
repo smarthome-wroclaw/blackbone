@@ -28,6 +28,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from boneio.core.utils import overlay as overlay_util
 from boneio.migrations.actions import InstallFile, MigrationAction, render_template, sha256_of_content
 
 if TYPE_CHECKING:
@@ -114,6 +115,8 @@ class MigrationRunner:
         self.bootstrap_required: bool = False
         self.pending_count: int = 0
         self.last_error: str | None = None
+        self.overlay_repair_needed: bool = False
+        self.overlay_applied: bool = True
         self._manifest: dict[str, str] = {}
         self._all_migrations: list[MigrationInfo] = []
         self._applied: set[str] = set()
@@ -163,6 +166,10 @@ class MigrationRunner:
             _LOGGER.error("Migration startup_check failed: %s", exc, exc_info=True)
             self.last_error = str(exc)
             self.status = MigrationStatus.ERROR
+        finally:
+            # Safety net: always check overlay in current kernel dir,
+            # even when early-returning from no-pending or bootstrap paths.
+            self._check_overlay_in_current_kernel()
 
         return self.status
 
@@ -221,6 +228,10 @@ class MigrationRunner:
             "pending": [{"version": m.version, "description": m.description} for m in pending],
             "applied": applied_list,
             "last_error": self.last_error,
+            # Effective device tree state, not file presence. False means the
+            # board is running the stock BeagleBone pinmux.
+            "overlay_applied": self.overlay_applied,
+            "overlay_repair_needed": self.overlay_repair_needed,
         }
 
     def bootstrap_install(self, sudo_password: str) -> tuple[bool, str]:
@@ -569,3 +580,147 @@ class MigrationRunner:
         # Applied flags are written by boneio-migrate helper (as root).
         # We reload from disk to pick them up.
         self._load_applied_flags()
+
+    def _check_overlay_in_current_kernel(self) -> None:
+        """Ensure boneIO overlays are present where U-Boot and tooling expect them.
+
+        Two destinations must be populated for the running kernel:
+
+        * ``/boot/dtbs/$uname_r/`` — the only path U-Boot resolves bare overlay
+          filenames from, and therefore the only one that affects boot
+        * ``/boot/dtbs/$uname_r/overlays/`` — kernel/userspace overlay tooling
+
+        This is a safety net for systems whose kernel was upgraded before the
+        ``zz-boneio-overlay`` postinst hook existed. Until now it only ever
+        checked and repaired ``overlays/``, so it reported success while leaving
+        the boot-relevant path empty.
+
+        Also verifies the *effective* state via
+        ``/proc/device-tree/chosen/overlays/``. Files on disk prove nothing
+        about what U-Boot merged, so a present-but-not-applied overlay is
+        reported distinctly — it means uEnv.txt is wrong rather than the files
+        being absent, and a reboot alone will not fix it.
+
+        Sets :attr:`overlay_repair_needed` when files had to be copied and
+        :attr:`overlay_applied` to the kernel-reported state.
+        """
+        try:
+            kernel_version = overlay_util.kernel_release()
+            if not kernel_version:
+                return
+
+            self.overlay_applied = overlay_util.is_boneio_overlay_applied()
+
+            missing = overlay_util.missing_overlay_dirs(kernel_version)
+            if missing:
+                self.overlay_repair_needed = True
+                self._repair_overlay_dirs(kernel_version, missing)
+            else:
+                _LOGGER.debug(
+                    "Overlay files present in both destinations for %s", kernel_version
+                )
+
+            if not self.overlay_applied:
+                applied = overlay_util.applied_overlay_names()
+                if missing:
+                    _LOGGER.error(
+                        "No boneIO overlay is active in the device tree and overlay "
+                        "files were missing from %s. Files have been repaired where "
+                        "possible — REBOOT REQUIRED. Inputs/outputs, Modbus UART and "
+                        "1-Wire may be misconfigured until then. "
+                        "Device tree currently reports: %s",
+                        ", ".join(str(d) for d in missing),
+                        applied or "no overlays at all",
+                    )
+                else:
+                    # Files are in place, so uEnv.txt is the problem: wrong
+                    # filename, a stale duplicate declaration, or
+                    # enable_uboot_overlays not set. Rebooting will not help.
+                    _LOGGER.error(
+                        "boneIO overlay files are installed for %s but NO boneIO "
+                        "overlay is active in the device tree. This points at "
+                        "/boot/uEnv.txt, not at the files — check "
+                        "enable_uboot_overlays=1 and a single "
+                        "uboot_overlay_addr0=BONEIO-BLACK-PINS-*.dtbo line. "
+                        "Device tree currently reports: %s",
+                        kernel_version,
+                        applied or "no overlays at all",
+                    )
+        except Exception as exc:
+            _LOGGER.warning("Overlay check failed: %s", exc)
+
+    def _repair_overlay_dirs(self, kernel_version: str, missing: list[Path]) -> None:
+        """Copy boneIO overlays into the given destinations via the helper.
+
+        Args:
+            kernel_version: Running kernel release.
+            missing: Destination directories lacking boneIO overlays.
+        """
+        _LOGGER.warning(
+            "No boneIO overlays in %s — searching other kernel dirs...",
+            ", ".join(str(d) for d in missing),
+        )
+
+        src_dir = overlay_util.find_overlay_source(exclude=tuple(missing))
+        if src_dir is None:
+            _LOGGER.error(
+                "No boneIO overlay source found in any kernel dir. "
+                "Inputs may not work! Run: cd /opt/source/black-pins-overlay "
+                "&& git pull && ./build_boneio_black_pins.sh && sudo reboot"
+            )
+            return
+
+        if not self._helper_installed():
+            _LOGGER.warning(
+                "Cannot copy overlays — boneio-migrate helper not installed."
+            )
+            return
+
+        dtbo_files = sorted(src_dir.glob(overlay_util.OVERLAY_GLOB))
+        actions: list[dict[str, object]] = []
+        for dest in missing:
+            for dtbo in dtbo_files:
+                actions.append({
+                    "action": "install_file",
+                    "src": dtbo.name,
+                    "dst": str(dest / dtbo.name),
+                    "mode": 0o644,
+                    "owner": "root",
+                    "group": "root",
+                    "template_vars": {},
+                })
+
+        if not actions:
+            return
+
+        # skip_applied_flag avoids writing a useless "_overlay_repair.applied"
+        # marker that would suppress future repairs.
+        plan_payload = {
+            "version": "_overlay_repair",
+            "actions": actions,
+            "assets_base": str(src_dir),
+            "skip_applied_flag": True,
+        }
+
+        copy_result = subprocess.run(
+            ["sudo", "-n", HELPER_PATH],
+            input=json.dumps(plan_payload),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if copy_result.returncode == 0:
+            _LOGGER.warning(
+                "Copied %d boneIO overlay(s) from %s to %s. "
+                "Reboot required for changes to take effect.",
+                len(dtbo_files),
+                src_dir,
+                ", ".join(str(d) for d in missing),
+            )
+        else:
+            _LOGGER.error(
+                "Failed to copy overlays (rc=%d): %s",
+                copy_result.returncode,
+                copy_result.stderr.strip(),
+            )

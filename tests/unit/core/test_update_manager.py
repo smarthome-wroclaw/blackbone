@@ -624,8 +624,12 @@ class TestForkReleaseDiscovery:
         um = _make_update_manager(pending=[])
         monkeypatch.setattr(_update_mod, "__version__", "0.1.2")
 
+        # The manager awaits the async fetch, so the stub must expose that
+        # name; stubbing only the blocking one made this an ImportError.
         fake_routes = types.ModuleType("boneio.webui.routes.update")
-        fake_routes._fetch_github_releases = MagicMock(return_value=(_fork_releases(), None))
+        fake_routes._fetch_github_releases_async = AsyncMock(
+            return_value=(_fork_releases(), None)
+        )
         monkeypatch.setitem(sys.modules, "boneio.webui.routes.update", fake_routes)
 
         result = asyncio.run(um._check_update_from_github())
