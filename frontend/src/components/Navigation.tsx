@@ -133,7 +133,11 @@ function Menu({ sideMenu = false }: { sideMenu?: boolean }) {
   const location = useLocation();
   const { hasBoneioSection } = useConfig();
   const { isNodeRedAvailable } = useNodeRedAvailability();
+<<<<<<< ours
   const { data: initData } = useAppInit();
+=======
+  const { isAdmin } = useAuth();
+>>>>>>> theirs
 
   const menuItems: MenuItem[] = [
     { path: '/', default: true, icon: FaLightbulb, label: t('navigation.outputs') },
@@ -143,13 +147,18 @@ function Menu({ sideMenu = false }: { sideMenu?: boolean }) {
     { path: '/templates', icon: FaPuzzlePiece, label: t('navigation.templates') },
     ...(initData?.features?.addons ? [{ path: '/addons', icon: FaBoxes, label: t('navigation.addons'), experimental: true }] : []),
     { path: '/tools', icon: FaToolbox, label: t('navigation.tools'), right: true },
-    // Settings (experimental) - only show if boneio section exists in config
-    ...(hasBoneioSection ? [{ path: '/settings', icon: FaCog, label: t('navigation.settings'), right: true }] : []),
-    { path: '/config', icon: FaCode, label: t('navigation.config'), right: true },
     { path: '/logs', icon: FaList, label: t('navigation.logs'), right: true },
-    { path: '/system', icon: FaServer, label: t('navigation.system_update'), right: true },
+    // Everything below configures the device, so a viewer is not offered it.
+    // The backend refuses these routes for a viewer regardless; hiding them
+    // just avoids dead ends. See boneio/webui/middleware/policy.py.
+    // Settings (experimental) - only show if boneio section exists in config
+    ...(isAdmin && hasBoneioSection ? [{ path: '/settings', icon: FaCog, label: t('navigation.settings'), right: true }] : []),
+    ...(isAdmin ? [
+      { path: '/config', icon: FaCode, label: t('navigation.config'), right: true },
+      { path: '/system', icon: FaServer, label: t('navigation.system_update'), right: true },
+    ] : []),
     // Node-RED - only show if available via nginx proxy
-    ...(isNodeRedAvailable ? [{ path: '/nodered', icon: FaProjectDiagram, label: 'Node-RED', right: true }] : []),
+    ...(isAdmin && isNodeRedAvailable ? [{ path: '/nodered', icon: FaProjectDiagram, label: 'Node-RED', right: true }] : []),
   ];
 
   const isActive = (item: MenuItem) => 
