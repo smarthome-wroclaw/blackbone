@@ -396,7 +396,9 @@
     "confirm_shutdown": "Are you sure you want to shutdown the device? After shutdown, you will need to power it on physically.",
     "shutdown_failed": "Failed to shutdown device",
     "device_shutting_down": "Device is shutting down...",
-    "shutdown_warning": "After shutdown, the device must be powered on physically by disconnecting and reconnecting power."
+    "shutdown_warning": "After shutdown, the device must be powered on physically by disconnecting and reconnecting power.",
+    "web_sections": "Web panel",
+    "badge_restart": "restart"
   },
   "array_table_widget": {
     "fix_validation_errors_before_saving": "Please fix validation errors before saving",
@@ -763,7 +765,8 @@
     "can": "CAN Bus",
     "mcp23017": "MCP23017 (Advanced)",
     "board_sensors": "Board Sensors",
-    "oled": "OLED Display"
+    "oled": "OLED Display",
+    "accounts": "User accounts"
   },
   "mcp": {
     "info_title": "MCP23017 Configuration",
@@ -1062,10 +1065,7 @@
     "proxy_port_help": "Port used in Home Assistant discovery URL. Set this if you use nginx reverse proxy (e.g. for Node-RED integration).",
     "proxy_port_placeholder": "Leave empty to use web server port",
     "auth": "Authentication (optional)",
-    "username": "Username",
-    "username_help": "Username to connect to web interface",
-    "password": "Password",
-    "password_help": "Password to web interface"
+    "accounts_moved": "Panel sign-in is no longer configured here. From 1.6 accounts have hashed passwords and roles — manage them under"
   },
   "common": {
     "save": "Save",
@@ -2588,5 +2588,83 @@
     "success": "Overlay changed! System will restart...",
     "change_failed": "Failed to change overlay. Please update /boot/uEnv.txt manually.",
     "not_available": "The required overlay file ({{overlay}}) is not installed on this system. Update the system image or install the overlay package before changing the version."
+  },
+  "onboarding": {
+    "title": "First-time setup",
+    "step_welcome": "Start",
+    "step_account": "Account",
+    "step_import": "Import",
+    "step_done": "Done",
+    "welcome_intro": "This device does not have an administrator account yet. This wizard will create one and can import the configuration from your previous boneIO.",
+    "welcome_why": "This device has no owner yet: the wizard is open to anyone on your network, so whoever completes it first takes control of the controller. The rest of the API is already refusing requests. This only takes a moment.",
+    "legacy_migrated": "Old credentials were found in config.yaml and the account “{{username}}” has been moved into secure storage (the password is hashed now). Please delete the web.auth section from config.yaml — it is no longer used and still holds your password in plain text.",
+    "legacy_secret_hint": "The password came from secrets.yaml — you can remove that entry too.",
+    "start": "Get started",
+    "account_intro": "Create an administrator account. You will use it to sign in to the panel.",
+    "username": "Username",
+    "password": "Password",
+    "confirm_password": "Confirm password",
+    "password_hint": "At least {{min}} characters.",
+    "create_account": "Create account",
+    "error_password_short": "The password must be at least {{min}} characters.",
+    "error_password_mismatch": "The passwords do not match.",
+    "error_already_provisioned": "This device has already been set up. Reload the page and sign in.",
+    "error_create_failed": "Could not create the account.",
+    "import_intro": "Have a configuration backup from a previous boneIO? Upload the .tar.gz archive to restore it. You can also skip this and set the device up from scratch.",
+    "import_button": "Import configuration",
+    "import_done": "Configuration imported. It takes effect after a restart.",
+    "import_failed": "Could not import the configuration.",
+    "skip_import": "Skip",
+    "next": "Next",
+    "done_summary": "All set. The administrator account “{{username}}” has been created and the panel is now password-protected.",
+    "done_remove_web_auth": "Remember to remove the web.auth section from config.yaml.",
+    "finish": "Go to the panel",
+    "step_cloud": "Cloud",
+    "cloud_intro": "You can register this device with boneIO Cloud. It gets its own subdomain and a real SSL certificate, so the connection stops being flagged as untrusted.",
+    "cloud_benefit_ssl": "Encrypted HTTPS with a trusted certificate, instead of a self-signed certificate warning.",
+    "cloud_benefit_pwa": "Install the panel as an app (PWA) on your phone and desktop.",
+    "cloud_caveat": "Registration sends the device serial number to boneIO Cloud. The subdomain points at your local IP, so the device stays reachable only on your own network. Your router must not have DNS rebinding protection enabled. You can turn this on later under Settings → Web server.",
+    "cloud_enable": "Enable registration",
+    "cloud_skip": "Skip",
+    "cloud_done": "Registration enabled. It takes effect after the device restarts.",
+    "cloud_failed": "Could not enable cloud registration."
+  },
+  "accounts": {
+    "title": "User accounts",
+    "intro": "An administrator changes configuration and manages accounts. A read-only account (viewer) can watch the device and operate its outputs, but cannot change settings or restart the controller.",
+    "admin_only": "Only an administrator can manage accounts.",
+    "username": "Username",
+    "password": "Password",
+    "role": "Role",
+    "actions": "Actions",
+    "you": "you",
+    "role_admin": "Administrator",
+    "role_viewer": "Read-only",
+    "reset_password": "Change password",
+    "delete": "Delete",
+    "add_title": "Add account",
+    "add_intro": "New accounts are read-only by default.",
+    "add_button": "Add account",
+    "created": "Account created.",
+    "create_failed": "Could not create the account.",
+    "deleted": "Account “{{username}}” has been deleted.",
+    "delete_failed": "Could not delete the account.",
+    "confirm_delete": "Delete the account “{{username}}”?",
+    "role_failed": "Could not change the role.",
+    "prompt_new_password": "New password for “{{username}}” (at least 8 characters):",
+    "password_reset": "Password for “{{username}}” has been changed.",
+    "password_failed": "Could not change the password.",
+    "load_failed": "Could not load the account list."
+  },
+  "security": {
+    "anonymous_title": "Unauthenticated access is enabled.",
+    "anonymous_body": "Anyone who can reach this device on the network can read its configuration, switch its outputs and reboot it, with no password. Remove “allow_anonymous” from web.auth in config.yaml and create an administrator account."
+  },
+  "login": {
+    "title": "Sign in to your",
+    "username": "Username",
+    "password": "Password",
+    "submit": "Sign in",
+    "invalid": "Invalid username or password."
   }
 }

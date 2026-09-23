@@ -37,6 +37,11 @@ def get_arguments() -> argparse.Namespace:
         description="boneIO app for BeagleBone Black.",
     )
     subparsers = parser.add_subparsers(dest=ACTION, required=True)
+
+    from boneio.core.auth.cli import add_accounts_parser
+
+    add_accounts_parser(subparsers)
+
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument(
         "--debug",
@@ -389,6 +394,10 @@ def main() -> int:
             mqttpassword=args.mqttpassword,
             debug=debug,
         )
+    elif args.action == "accounts":
+        from boneio.core.auth.cli import run_accounts_command
+
+        exit_code = run_accounts_command(args=args)
     elif args.action == "modbus":
         from boneio.modbus import device_registry
         device_registry.configure_from_config(args.config)

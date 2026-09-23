@@ -21,6 +21,8 @@ from starlette.websockets import WebSocketState
 
 from boneio.components.input import RemoteInputBase
 from boneio.const import COVER, NONE
+from boneio.core.auth.migration import migrate_legacy_auth
+from boneio.core.auth.store import UserStore, UserStoreError
 from boneio.core.config import ConfigHelper
 from boneio.core.events import GracefulExit
 from boneio.core.manager import Manager
@@ -42,11 +44,23 @@ from boneio.models.events import (
 )
 from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
-from boneio.webui.middleware.auth import AuthMiddleware, set_auth_config, set_jwt_secret
+from boneio.webui.security_headers import apply_security_headers
+from boneio.webui.middleware.auth import (
+    AuthMiddleware,
+    is_auth_required,
+    set_allow_anonymous,
+    set_auth_config,
+    set_jwt_secret,
+    set_user_store,
+)
 
 # Import routes
 from boneio.webui.routes import (
+<<<<<<< ours
     addons_router,
+=======
+    accounts_router,
+>>>>>>> theirs
     auth_router,
     caddy_router,
     can_router,
@@ -57,6 +71,11 @@ from boneio.webui.routes import (
     irrigation_router,
     migrations_router,
     modbus_router,
+<<<<<<< ours
+=======
+    nodered_router,
+    onboarding_router,
+>>>>>>> theirs
     mqtt_reference_router,
     mqtt_topics_router,
     nodered_router,
@@ -70,6 +89,7 @@ from boneio.webui.routes import (
     update_router,
 )
 from boneio.webui.routes import config as config_module
+from boneio.webui.routes import onboarding as onboarding_module
 from boneio.webui.routes import system as system_module
 
 # Import WebSocket manager
@@ -147,7 +167,11 @@ def get_config_helper():
 
 # Include routers
 app.include_router(auth_router)
+<<<<<<< ours
 app.include_router(addons_router)
+=======
+app.include_router(accounts_router)
+>>>>>>> theirs
 app.include_router(outputs_router)
 app.include_router(covers_router)
 app.include_router(dashboard_router)
@@ -160,6 +184,7 @@ app.include_router(schema_router)
 app.include_router(sensors_router)
 app.include_router(caddy_router)
 app.include_router(nodered_router)
+app.include_router(onboarding_router)
 app.include_router(can_router)
 app.include_router(remote_devices_router)
 app.include_router(templates_router)
@@ -687,6 +712,7 @@ def init_app(
     jwt_secret: str | None = None,
     web_server: WebServer | None = None,
     initial_config: dict | None = None,
+    web_security: dict | None = None,
 ) -> BoneIOApp:
     """
     Initialize the FastAPI application with manager.
@@ -696,6 +722,8 @@ def init_app(
         yaml_config_file: Path to YAML config file.
         config_helper: ConfigHelper instance.
         auth_config: Authentication configuration.
+        web_security: The ``web.security`` section, carrying the optional CSP
+            frame-ancestors policy.
         jwt_secret: JWT secret for token signing.
         web_server: WebServer instance.
         initial_config: Pre-parsed config to populate cache.
@@ -712,14 +740,58 @@ def init_app(
     # Set JWT secret in auth middleware so it uses the same secret as WebSocket
     set_jwt_secret(jwt_secret)
 
+    # Accounts live in users.json next to config.yaml. Build the store before
+    # anything reads the auth state, then move a pre-1.6 web.auth block across
+    # so upgrading never costs the owner their login.
+    user_store = UserStore.for_config_file(yaml_config_file)
+    migration_info: dict | None = None
+    try:
+        user_store.load()
+        migration = migrate_legacy_auth(user_store, auth_config)
+        if migration:
+            migration_info = {
+                "username": migration.username,
+                "used_secret_file": migration.used_secret_file,
+            }
+    except UserStoreError as err:
+        # Refusing to start would brick the UI over a file the user can fix,
+        # but the store must not be silently treated as empty either — that
+        # would reopen first-admin creation on a device that has an owner.
+        # is_auth_required() fails closed on a store it cannot read.
+        _LOGGER.error("Account store is unusable: %s", err)
+
+    set_user_store(user_store)
+    onboarding_module.set_user_store(user_store)
+    onboarding_module.set_legacy_migration(migration_info)
+
+    # Explicit opt-out of authentication. Never exposed in the UI: see the note
+    # on _allow_anonymous in the auth middleware.
+    #
+    # BONEIO_DEV opts in too, so a developer running the Vite dev server against
+    # a freshly flashed controller is not blocked by the wizard. It reuses this
+    # one mechanism rather than adding a second bypass path, which means it
+    # inherits the same limit: the moment an account exists, authentication is
+    # required again. A dev box therefore still exercises the real login and the
+    # real role checks — the part of the UI that depends on them stays testable.
+    dev_mode = bool(os.environ.get("BONEIO_DEV"))
+    allow_anonymous = bool(auth_config.get("allow_anonymous")) or dev_mode
+    set_allow_anonymous(allow_anonymous)
+
+    auth_required = is_auth_required()
+
     # Set app state
     app.state.manager = manager
     app.state.auth_config = auth_config
     app.state.yaml_config_file = yaml_config_file
     app.state.web_server = web_server
     app.state.config_helper = config_helper
+<<<<<<< ours
     app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=bool(auth_config))
     app.state.addon_token_secret = jwt_secret.encode("utf-8")
+=======
+    app.state.user_store = user_store
+    app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=auth_required)
+>>>>>>> theirs
 
     # Configure route modules with app state
     config_module.set_app_state(app.state)
@@ -728,8 +800,9 @@ def init_app(
 
     # Pre-populate config cache if initial_config provided
     if initial_config is not None:
-        import os
-
+        # NOTE: no local `import os` here. The module already imports it, and a
+        # function-local import makes `os` local to this whole function, so any
+        # earlier use in init_app raises UnboundLocalError.
         from boneio.webui.routes.config import _config_cache, _get_config_mtime
 
         _config_cache["data"] = initial_config
@@ -742,15 +815,49 @@ def init_app(
     config_dir = os.path.dirname(os.path.abspath(yaml_config_file))
     init_wled_cache(config_dir)
 
-    # Add auth middleware if configured
+    # Keep the legacy pair reachable for a device whose web.auth could not be
+    # migrated (an unrepresentable username, say), so it can still log in.
     if auth_config:
-        username = auth_config.get("username")
-        password = auth_config.get("password")
-        if not username or not password:
-            _LOGGER.error("Missing username or password in config!")
-        else:
+        if auth_config.get("username") and auth_config.get("password"):
             set_auth_config(auth_config)
-            app.add_middleware(AuthMiddleware)
+        else:
+            _LOGGER.error("Missing username or password in web.auth!")
+
+    if dev_mode:
+        # BONEIO_DEV also mounts the fake-device router and widens CORS to the
+        # Vite dev server, and it lives in a systemd unit file — one copy into
+        # an image and a shipped device carries developer surface. Say so on
+        # every start so that never goes unnoticed.
+        _LOGGER.warning(
+            "SECURITY: BONEIO_DEV is set. Development routes are mounted and "
+            "CORS accepts localhost dev servers. Unset it on any device that "
+            "is not a development board."
+        )
+
+    # Always installed, never conditional on config.yaml. A device provisioned
+    # through the first-run wizard has an admin in users.json and an empty
+    # web.auth, and adding the middleware only when web.auth exists would leave
+    # that device unauthenticated until the next restart. The middleware itself
+    # decides per request whether credentials exist.
+    app.add_middleware(AuthMiddleware)
+
+    if not auth_required:
+        if allow_anonymous:
+            _LOGGER.warning(
+                "SECURITY: unauthenticated access is enabled (%s). Anyone who "
+                "can reach this device on the network can read its "
+                "configuration, switch its outputs and reboot it, with no "
+                "password. It closes by itself as soon as an account exists — "
+                "run the first-run wizard, or create one with 'boneio accounts "
+                "add'.",
+                "BONEIO_DEV is set" if dev_mode else "web.auth.allow_anonymous",
+            )
+        else:
+            _LOGGER.warning(
+                "This device has no administrator account. The API is refusing "
+                "requests until setup is finished — open the web UI to run the "
+                "first-run wizard."
+            )
 
     # Add CORS middleware — restrict to same-origin by default,
     # allow localhost dev servers when BONEIO_DEV is set.
@@ -772,14 +879,19 @@ def init_app(
         allow_headers=["*"],
     )
 
-    # Security headers middleware
-    # NOTE: No X-Frame-Options — boneIO must be embeddable in HA ingress iframe
+    # Security headers middleware (F-13).
+    # NOTE: still no X-Frame-Options — boneIO must be embeddable in an HA
+    # ingress iframe, and that header cannot name an allowed origin. Framing is
+    # expressed through CSP frame-ancestors instead, configured per install.
+    frame_ancestors = (web_security or {}).get("frame_ancestors")
+    if isinstance(frame_ancestors, list):
+        frame_ancestors = " ".join(str(item) for item in frame_ancestors)
+
     @app.middleware("http")
     async def security_headers_middleware(request, call_next):
         """Add security headers to all responses."""
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
+        apply_security_headers(request, response, frame_ancestors)
         return response
 
     # Add GZip compression
