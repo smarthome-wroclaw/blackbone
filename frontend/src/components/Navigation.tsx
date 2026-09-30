@@ -133,11 +133,8 @@ function Menu({ sideMenu = false }: { sideMenu?: boolean }) {
   const location = useLocation();
   const { hasBoneioSection } = useConfig();
   const { isNodeRedAvailable } = useNodeRedAvailability();
-<<<<<<< ours
   const { data: initData } = useAppInit();
-=======
   const { isAdmin } = useAuth();
->>>>>>> theirs
 
   const menuItems: MenuItem[] = [
     { path: '/', default: true, icon: FaLightbulb, label: t('navigation.outputs') },

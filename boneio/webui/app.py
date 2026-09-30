@@ -56,11 +56,8 @@ from boneio.webui.middleware.auth import (
 
 # Import routes
 from boneio.webui.routes import (
-<<<<<<< ours
     addons_router,
-=======
     accounts_router,
->>>>>>> theirs
     auth_router,
     caddy_router,
     can_router,
@@ -71,11 +68,7 @@ from boneio.webui.routes import (
     irrigation_router,
     migrations_router,
     modbus_router,
-<<<<<<< ours
-=======
-    nodered_router,
     onboarding_router,
->>>>>>> theirs
     mqtt_reference_router,
     mqtt_topics_router,
     nodered_router,
@@ -167,11 +160,8 @@ def get_config_helper():
 
 # Include routers
 app.include_router(auth_router)
-<<<<<<< ours
 app.include_router(addons_router)
-=======
 app.include_router(accounts_router)
->>>>>>> theirs
 app.include_router(outputs_router)
 app.include_router(covers_router)
 app.include_router(dashboard_router)
@@ -785,13 +775,9 @@ def init_app(
     app.state.yaml_config_file = yaml_config_file
     app.state.web_server = web_server
     app.state.config_helper = config_helper
-<<<<<<< ours
-    app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=bool(auth_config))
     app.state.addon_token_secret = jwt_secret.encode("utf-8")
-=======
     app.state.user_store = user_store
     app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=auth_required)
->>>>>>> theirs
 
     # Configure route modules with app state
     config_module.set_app_state(app.state)
