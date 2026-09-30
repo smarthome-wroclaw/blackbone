@@ -43,7 +43,7 @@ jobs:
         run: pip install --quiet packaging PyYAML
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Set up Node
         uses: actions/setup-node@v7
