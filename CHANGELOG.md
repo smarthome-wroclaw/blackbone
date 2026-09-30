@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/smarthome-wroclaw/blackbone/compare/v0.2.0...v0.2.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* resolve upstream sync conflicts in PR 98 ([a14d777](https://github.com/smarthome-wroclaw/blackbone/commit/a14d77773dd156ce73244e0565c8a551ae5e755a))
+
 ## [0.2.0](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.4...v0.2.0) (2026-09-22)
 
 
