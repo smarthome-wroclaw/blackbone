@@ -396,7 +396,9 @@
     "confirm_shutdown": "Czy na pewno chcesz wyłączyć urządzenie? Po wyłączeniu będzie trzeba włączyć je fizycznie.",
     "shutdown_failed": "Nie udało się wyłączyć urządzenia",
     "device_shutting_down": "Urządzenie się wyłącza...",
-    "shutdown_warning": "Po wyłączeniu urządzenie musi być włączone fizycznie przez odłączenie i ponowne podłączenie zasilania."
+    "shutdown_warning": "Po wyłączeniu urządzenie musi być włączone fizycznie przez odłączenie i ponowne podłączenie zasilania.",
+    "web_sections": "Panel webowy",
+    "badge_restart": "restart"
   },
   "array_table_widget": {
     "fix_validation_errors_before_saving": "Proszę naprawić błędy walidacji przed zapisaniem",
@@ -727,7 +729,8 @@
     "can": "Magistrala CAN",
     "mcp23017": "MCP23017 (Zaawansowane)",
     "board_sensors": "Czujniki sterownika",
-    "oled": "Wyświetlacz OLED"
+    "oled": "Wyświetlacz OLED",
+    "accounts": "Konta użytkowników"
   },
   "mcp": {
     "info_title": "Konfiguracja MCP23017",
@@ -1062,10 +1065,7 @@
     "proxy_port_help": "Port używany w URL autodiscovery Home Assistant. Ustaw jeśli używasz nginx reverse proxy (np. dla integracji Node-RED).",
     "proxy_port_placeholder": "Zostaw puste aby użyć portu serwera web",
     "auth": "Uwierzytelnianie (opcjonalnie)",
-    "username": "Nazwa użytkownika",
-    "username_help": "Nazwa użytkownika do interfejsu web",
-    "password": "Hasło",
-    "password_help": "Hasło do interfejsu web"
+    "accounts_moved": "Logowanie do panelu nie jest już konfigurowane tutaj. Od wersji 1.6 konta mają hasła zapisane jako hash i role — zarządzasz nimi w zakładce"
   },
   "common": {
     "save": "Zapisz",
@@ -2587,5 +2587,83 @@
     "success": "Overlay zmieniony! System zostanie zrestartowany...",
     "change_failed": "Nie udało się zmienić overlay. Zaktualizuj /boot/uEnv.txt ręcznie.",
     "not_available": "Wymagany plik overlay ({{overlay}}) nie jest zainstalowany w tym systemie. Zaktualizuj obraz systemu lub zainstaluj paczkę z overlayem przed zmianą wersji."
+  },
+  "onboarding": {
+    "title": "Pierwsze uruchomienie",
+    "step_welcome": "Start",
+    "step_account": "Konto",
+    "step_import": "Import",
+    "step_done": "Gotowe",
+    "welcome_intro": "To urządzenie nie ma jeszcze konta administratora. Kreator przeprowadzi Cię przez jego utworzenie i pozwoli zaimportować konfigurację z poprzedniego boneIO.",
+    "welcome_why": "Urządzenie nie ma jeszcze właściciela: kreator jest otwarty dla każdego w Twojej sieci, więc kto pierwszy go przejdzie, ten przejmie sterownik. Reszta API jest już zablokowana. Zajmie to chwilę.",
+    "legacy_migrated": "Znaleziono stare dane logowania w config.yaml i przeniesiono konto „{{username}}” do bezpiecznego magazynu (hasło jest teraz hashowane). Usuń sekcję web.auth z config.yaml — nie jest już używana, a wciąż zawiera hasło otwartym tekstem.",
+    "legacy_secret_hint": "Hasło pochodziło z secrets.yaml — ten wpis też możesz usunąć.",
+    "start": "Zaczynajmy",
+    "account_intro": "Utwórz konto administratora. Będziesz się nim logować do panelu.",
+    "username": "Nazwa użytkownika",
+    "password": "Hasło",
+    "confirm_password": "Powtórz hasło",
+    "password_hint": "Minimum {{min}} znaków.",
+    "create_account": "Utwórz konto",
+    "error_password_short": "Hasło musi mieć co najmniej {{min}} znaków.",
+    "error_password_mismatch": "Hasła nie są takie same.",
+    "error_already_provisioned": "To urządzenie zostało już skonfigurowane. Odśwież stronę i zaloguj się.",
+    "error_create_failed": "Nie udało się utworzyć konta.",
+    "import_intro": "Masz kopię konfiguracji z poprzedniego boneIO? Wgraj archiwum .tar.gz, żeby ją odtworzyć. Możesz też pominąć ten krok i skonfigurować urządzenie od zera.",
+    "import_button": "Importuj konfigurację",
+    "import_done": "Konfiguracja zaimportowana. Zacznie obowiązywać po restarcie.",
+    "import_failed": "Nie udało się zaimportować konfiguracji.",
+    "skip_import": "Pomiń",
+    "next": "Dalej",
+    "done_summary": "Gotowe. Konto administratora „{{username}}” zostało utworzone, a panel jest teraz chroniony hasłem.",
+    "done_remove_web_auth": "Pamiętaj, żeby usunąć sekcję web.auth z config.yaml.",
+    "finish": "Przejdź do panelu",
+    "step_cloud": "Chmura",
+    "cloud_intro": "Możesz zarejestrować to urządzenie w boneIO Cloud. Dostanie własną subdomenę i prawdziwy certyfikat SSL, więc połączenie przestanie być oznaczane jako niezaufane.",
+    "cloud_benefit_ssl": "Szyfrowane połączenie HTTPS z zaufanym certyfikatem — zamiast ostrzeżenia o certyfikacie samopodpisanym.",
+    "cloud_benefit_pwa": "Instalacja panelu jako aplikacji (PWA) na telefonie i komputerze.",
+    "cloud_caveat": "Rejestracja wysyła numer seryjny urządzenia do boneIO Cloud. Subdomena wskazuje na Twoje lokalne IP, więc urządzenie pozostaje dostępne tylko w Twojej sieci. Router nie może mieć włączonej ochrony przed DNS rebinding. Możesz to włączyć później w Ustawieniach → Serwer Web.",
+    "cloud_enable": "Włącz rejestrację",
+    "cloud_skip": "Pomiń",
+    "cloud_done": "Rejestracja włączona. Zacznie działać po restarcie urządzenia.",
+    "cloud_failed": "Nie udało się włączyć rejestracji w chmurze."
+  },
+  "accounts": {
+    "title": "Konta użytkowników",
+    "intro": "Administrator zmienia konfigurację i zarządza kontami. Konto tylko do odczytu (viewer) może obserwować urządzenie i sterować wyjściami, ale nie zmieni ustawień ani nie zrestartuje sterownika.",
+    "admin_only": "Tylko administrator może zarządzać kontami.",
+    "username": "Nazwa użytkownika",
+    "password": "Hasło",
+    "role": "Rola",
+    "actions": "Akcje",
+    "you": "to Ty",
+    "role_admin": "Administrator",
+    "role_viewer": "Tylko odczyt",
+    "reset_password": "Zmień hasło",
+    "delete": "Usuń",
+    "add_title": "Dodaj konto",
+    "add_intro": "Nowe konta domyślnie dostają rolę tylko do odczytu.",
+    "add_button": "Dodaj konto",
+    "created": "Konto zostało utworzone.",
+    "create_failed": "Nie udało się utworzyć konta.",
+    "deleted": "Konto „{{username}}” zostało usunięte.",
+    "delete_failed": "Nie udało się usunąć konta.",
+    "confirm_delete": "Usunąć konto „{{username}}”?",
+    "role_failed": "Nie udało się zmienić roli.",
+    "prompt_new_password": "Nowe hasło dla konta „{{username}}” (min. 8 znaków):",
+    "password_reset": "Hasło konta „{{username}}” zostało zmienione.",
+    "password_failed": "Nie udało się zmienić hasła.",
+    "load_failed": "Nie udało się wczytać listy kont."
+  },
+  "security": {
+    "anonymous_title": "Dostęp bez logowania jest włączony.",
+    "anonymous_body": "Każdy, kto ma dostęp do tego urządzenia w sieci, może odczytać konfigurację, przełączać wyjścia i je zrestartować — bez hasła. Usuń „allow_anonymous” z sekcji web.auth w config.yaml i utwórz konto administratora."
+  },
+  "login": {
+    "title": "Zaloguj się do",
+    "username": "Nazwa użytkownika",
+    "password": "Hasło",
+    "submit": "Zaloguj",
+    "invalid": "Nieprawidłowa nazwa użytkownika lub hasło."
   }
 }

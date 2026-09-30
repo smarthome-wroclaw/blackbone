@@ -29,7 +29,7 @@ dependencies = [
     "gpiod==2.5.0",
     "requests==2.34.2",
     "packaging==26.3",
-    "aioesphomeapi>=29.0.0",
+    "aioesphomeapi>=45.0.0",
     "zeroconf>=0.149.16",
     "canopen-asyncio>=2.4.1",
 ]

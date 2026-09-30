@@ -10,6 +10,7 @@ from importlib import import_module
 
 _ROUTERS = {
     "addons_router": "addons",
+    "accounts_router": "accounts",
     "auth_router": "auth",
     "caddy_router": "caddy",
     "can_router": "can",
@@ -23,6 +24,7 @@ _ROUTERS = {
     "mqtt_reference_router": "mqtt_reference",
     "mqtt_topics_router": "mqtt_topics",
     "nodered_router": "nodered",
+    "onboarding_router": "onboarding",
     "outputs_router": "outputs",
     "remote_devices_router": "remote_devices",
     "schema_router": "schema",
