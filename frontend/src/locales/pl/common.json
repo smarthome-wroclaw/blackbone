@@ -14,7 +14,11 @@
     "templates": "Szablony",
     "experimental": "EKSPERYMENTALNE",
     "irrigation": "Nawadnianie",
+<<<<<<< ours
     "addons": "Dodatki"
+=======
+    "diagnostics": "Diagnostyka"
+>>>>>>> theirs
   },
   "outputs": {
     "title": "Wyjścia",
@@ -398,7 +402,8 @@
     "device_shutting_down": "Urządzenie się wyłącza...",
     "shutdown_warning": "Po wyłączeniu urządzenie musi być włączone fizycznie przez odłączenie i ponowne podłączenie zasilania.",
     "web_sections": "Panel webowy",
-    "badge_restart": "restart"
+    "badge_restart": "restart",
+    "security_sections": "Bezpieczeństwo"
   },
   "array_table_widget": {
     "fix_validation_errors_before_saving": "Proszę naprawić błędy walidacji przed zapisaniem",
@@ -730,7 +735,8 @@
     "mcp23017": "MCP23017 (Zaawansowane)",
     "board_sensors": "Czujniki sterownika",
     "oled": "Wyświetlacz OLED",
-    "accounts": "Konta użytkowników"
+    "accounts": "Konta użytkowników",
+    "security": "Bezpieczeństwo"
   },
   "mcp": {
     "info_title": "Konfiguracja MCP23017",
@@ -1699,7 +1705,8 @@
     "exclude_modules": "Wyklucz",
     "excluded_count_one": "{{count}} wykluczony",
     "excluded_count_other": "{{count}} wykluczonych",
-    "search_placeholder": "Szukaj w logach..."
+    "search_placeholder": "Szukaj w logach...",
+    "first_seen": "Pierwszy raz: {{first}} — ostatni: {{last}}"
   },
   "tools": {
     "title": "Narzędzia",
@@ -2588,11 +2595,30 @@
     "change_failed": "Nie udało się zmienić overlay. Zaktualizuj /boot/uEnv.txt ręcznie.",
     "not_available": "Wymagany plik overlay ({{overlay}}) nie jest zainstalowany w tym systemie. Zaktualizuj obraz systemu lub zainstaluj paczkę z overlayem przed zmianą wersji."
   },
+  "password_policy": {
+    "too_short": "Hasło musi mieć co najmniej {{min}} znaków.",
+    "contains_username": "Hasło nie może zawierać nazwy użytkownika — jest ona publiczna, więc takie hasło zgadnie każdy, kto widzi ekran logowania."
+  },
   "onboarding": {
     "title": "Pierwsze uruchomienie",
     "step_welcome": "Start",
     "step_account": "Konto",
     "step_import": "Import",
+    "step_devices": "Urządzenia",
+    "step_counter": "Krok {{current}} z {{total}}",
+    "devices_intro": "Wyjścia są już skonfigurowane pod Twoją płytkę. Przypisz do nich wejścia.",
+    "devices_restore_state": "Przywracaj stan przekaźników i rolet po restarcie.",
+    "devices_mode_outputs": "Wejścia sterują wyjściami ({{outputs}})",
+    "devices_mode_covers": "Wejścia sterują roletami ({{covers}}, po dwa wejścia)",
+    "devices_mode_covers_and_outputs": "Wejścia sterują roletami ({{covers}}) i wyjściami ({{outputs}})",
+    "devices_mode_none": "Nic nie przypisuj — zrobię to sam",
+    "devices_summary": "{{device}} · {{inputs}} wolnych wejść",
+    "devices_replace_warning": "Zastąpi obecne akcje wejść, także zaimportowane. Ustawia tylko pojedyncze kliknięcie.",
+    "devices_apply": "Zastosuj",
+    "devices_skip": "Pomiń",
+    "devices_done": "Konfiguracja zapisana. Zacznie obowiązywać po restarcie sterownika.",
+    "devices_failed": "Nie udało się zapisać konfiguracji wejść.",
+    "devices_targets_failed": "Nie udało się odczytać konfiguracji wyjść sterownika.",
     "step_done": "Gotowe",
     "welcome_intro": "To urządzenie nie ma jeszcze konta administratora. Kreator przeprowadzi Cię przez jego utworzenie i pozwoli zaimportować konfigurację z poprzedniego boneIO.",
     "welcome_why": "Urządzenie nie ma jeszcze właściciela: kreator jest otwarty dla każdego w Twojej sieci, więc kto pierwszy go przejdzie, ten przejmie sterownik. Reszta API jest już zablokowana. Zajmie to chwilę.",
@@ -2603,9 +2629,10 @@
     "username": "Nazwa użytkownika",
     "password": "Hasło",
     "confirm_password": "Powtórz hasło",
+    "show_password": "Pokaż hasło",
+    "hide_password": "Ukryj hasło",
     "password_hint": "Minimum {{min}} znaków.",
     "create_account": "Utwórz konto",
-    "error_password_short": "Hasło musi mieć co najmniej {{min}} znaków.",
     "error_password_mismatch": "Hasła nie są takie same.",
     "error_already_provisioned": "To urządzenie zostało już skonfigurowane. Odśwież stronę i zaloguj się.",
     "error_create_failed": "Nie udało się utworzyć konta.",
@@ -2613,8 +2640,15 @@
     "import_button": "Importuj konfigurację",
     "import_done": "Konfiguracja zaimportowana. Zacznie obowiązywać po restarcie.",
     "import_failed": "Nie udało się zaimportować konfiguracji.",
+    "import_skips_rest": "Kroki „Urządzenia\" i „Chmura\" zostaną pominięte, żeby nie nadpisać zaimportowanej konfiguracji.",
+    "done_import_skipped": "Pominięto kroki „Urządzenia\" i „Chmura\", bo zaimportowana konfiguracja już je określa. Zmienisz je w Ustawieniach — wejścia w sekcji Wejścia Lokalne, chmurę w Serwer Web.",
+    "import_invalid_type": "To nie jest archiwum konfiguracji boneIO. Wybierz plik .tar.gz lub .tgz pobrany z poprzedniego urządzenia.",
+    "import_too_large": "Ten plik jest większy niż {{max}} MB. Archiwum konfiguracji ma zaledwie kilka kilobajtów, więc to niemal na pewno nie ten plik.",
+    "import_empty": "Archiwum nie zawierało plików konfiguracyjnych, więc nic nie zostało przywrócone. Upewnij się, że wybrałeś kopię konfiguracji boneIO, a nie inne archiwum.",
+    "import_invalid_config": "Konfiguracja została przywrócona, ale nie przechodzi walidacji. Możesz dokończyć konfigurację i poprawić ją później w edytorze.",
     "skip_import": "Pomiń",
     "next": "Dalej",
+    "back": "Wstecz",
     "done_summary": "Gotowe. Konto administratora „{{username}}” zostało utworzone, a panel jest teraz chroniony hasłem.",
     "done_remove_web_auth": "Pamiętaj, żeby usunąć sekcję web.auth z config.yaml.",
     "finish": "Przejdź do panelu",
@@ -2656,8 +2690,97 @@
     "load_failed": "Nie udało się wczytać listy kont."
   },
   "security": {
+    "title": "Bezpieczeństwo",
+    "intro": "Co na tym sterowniku jest jeszcze otwarte i gdzie to zamknąć. Te same informacje trafiają do Home Assistant jako encja diagnostyczna.",
+    "outstanding": "Do zrobienia: {{count}}",
+    "all_clear": "Nic pilnego — sprawdzono {{count}} pozycji.",
+    "passed": "W porządku ({{count}})",
+    "fix": "Napraw",
+    "recheck": "Sprawdź ponownie",
+    "retry": "Spróbuj ponownie",
+    "unavailable": "Nie udało się sprawdzić stanu bezpieczeństwa.",
+    "severity": {
+      "critical": "Krytyczne",
+      "warning": "Ostrzeżenie",
+      "info": "Informacja"
+    },
+    "severity_count": {
+      "critical": "krytyczne: {{count}}",
+      "warning": "ostrzeżenia: {{count}}",
+      "info": "informacje: {{count}}"
+    },
+    "checks": {
+      "admin_account": {
+        "title": "Konto administratora",
+        "detail": "To urządzenie nie ma żadnego konta. Kto pierwszy otworzy kreator pierwszego uruchomienia, ten je przejmuje.",
+        "ok": "Konto administratora istnieje.",
+        "remedy": "Dokończ kreator pierwszego uruchomienia albo uruchom: boneio accounts add <nazwa> --role admin"
+      },
+      "anonymous_access": {
+        "title": "Dostęp bez logowania",
+        "detail": "Każdy w Twojej sieci może odczytać konfigurację, przełączać wyjścia i zrestartować urządzenie bez hasła.",
+        "ok": "Żądania wymagają zalogowania.",
+        "remedy": "Załóż konto i usuń allow_anonymous z web.auth w config.yaml."
+      },
+      "mqtt_password": {
+        "title": "Hasło brokera MQTT",
+        "detail": "Broker nadal używa hasła, z którym boneIO wychodzi z fabryki — jest opublikowane i identyczne na każdym urządzeniu.",
+        "ok": "Hasło brokera zostało zmienione.",
+        "remedy": "Ustaw nowe hasło brokera, a potem wpisz je w Home Assistant."
+      },
+      "legacy_web_auth": {
+        "title": "Stare dane logowania w config.yaml",
+        "detail": "W config.yaml został blok web.auth sprzed 1.6, z hasłem zapisanym otwartym tekstem. Nie jest już używany.",
+        "ok": "W config.yaml nie ma zapisanych danych logowania.",
+        "remedy": "Usuń username i password z sekcji web.auth w config.yaml."
+      },
+      "certificate": {
+        "title": "Certyfikat HTTPS",
+        "detail": "Panel działa na certyfikacie samopodpisanym, więc przeglądarka ostrzega przy każdej wizycie — a ludzie uczą się to ostrzeżenie klikać.",
+        "ok": "Panel działa na certyfikacie, któremu przeglądarki ufają.",
+        "remedy": "Włącz rejestrację w boneIO Cloud, żeby dostać zaufany certyfikat."
+      },
+      "frame_ancestors": {
+        "title": "Osadzanie w innych stronach",
+        "detail": "Dowolna strona może osadzić ten panel w ramce — dokładnie tego potrzebuje clickjacking.",
+        "ok": "Panel mogą osadzić tylko wskazane adresy.",
+        "remedy": "Włącz ograniczenie poniżej, a jeśli Twój dashboard osadza urządzenie wprost — dopisz adres Home Assistanta."
+      },
+      "dev_mode": {
+        "title": "Tryb deweloperski",
+        "detail": "Ustawione jest BONEIO_DEV: działają trasy deweloperskie, a CORS wpuszcza lokalne serwery dev.",
+        "ok": "Tryb deweloperski wyłączony.",
+        "remedy": "Usuń BONEIO_DEV na każdym urządzeniu, które nie jest płytką deweloperską."
+      }
+    },
+    "after_update": {
+      "title": "boneIO zaktualizowane do {{version}}",
+      "body": "Ta wersja dokłada ustawienia bezpieczeństwa, których Twoje urządzenie jeszcze nie ma włączonych. Sprawdzenie zajmuje chwilę.",
+      "body_clean": "Ta wersja dokłada ustawienia bezpieczeństwa. Na tym urządzeniu nic nie wymaga uwagi.",
+      "review": "Pokaż bezpieczeństwo",
+      "later": "Później",
+      "outstanding": "Do zrobienia: {{count}}",
+      "title_first": "Zalecenia bezpieczeństwa"
+    },
     "anonymous_title": "Dostęp bez logowania jest włączony.",
-    "anonymous_body": "Każdy, kto ma dostęp do tego urządzenia w sieci, może odczytać konfigurację, przełączać wyjścia i je zrestartować — bez hasła. Usuń „allow_anonymous” z sekcji web.auth w config.yaml i utwórz konto administratora."
+    "anonymous_body": "Każdy, kto ma dostęp do tego urządzenia w sieci, może odczytać konfigurację, przełączać wyjścia i je zrestartować — bez hasła. Usuń „allow_anonymous” z sekcji web.auth w config.yaml i utwórz konto administratora.",
+    "advice": "Do rozważenia",
+    "advice_intro": "Dotyczy niemal każdego sterownika i zależy od tego, jak korzystasz z urządzenia. Nie jest to problem tego egzemplarza.",
+    "framing": {
+      "title": "Osadzanie panelu w innych stronach",
+      "intro": "Ogranicza, kto może wyświetlić ten panel w ramce. Domyślnie tylko to urządzenie — dodatek boneIO Black w Home Assistant działa z tym ustawieniem, bo sam proxuje sterownik.",
+      "restrict": "Ogranicz osadzanie",
+      "restrict_help": "Wyłączenie pozwala każdej stronie w internecie wyświetlić ten panel w ramce. Tego potrzebuje clickjacking.",
+      "extra_origin": "Dodatkowy adres, któremu ufasz",
+      "extra_origin_help": "Potrzebne tylko wtedy, gdy Twój dashboard osadza to urządzenie wprost (karta iframe albo panel_iframe), z pominięciem dodatku. Podaj sam adres serwera, bez ścieżki.",
+      "save": "Zapisz",
+      "saving": "Zapisuję...",
+      "restart_needed": "Zapisane — zadziała po restarcie aplikacji.",
+      "load_failed": "Nie udało się odczytać ustawienia.",
+      "save_failed": "Nie udało się zapisać ustawienia.",
+      "add_origin": "Dodaj adres",
+      "remove_origin": "Usuń adres"
+    }
   },
   "login": {
     "title": "Zaloguj się do",
@@ -2665,5 +2788,31 @@
     "password": "Hasło",
     "submit": "Zaloguj",
     "invalid": "Nieprawidłowa nazwa użytkownika lub hasło."
+  },
+  "diagnostics": {
+    "title": "Dane diagnostyczne dla wsparcia",
+    "intro": "Zbiera w jeden plik to, o co wsparcie i tak zapyta. Możesz go wysłać mailem — nie musisz nikomu dawać dostępu do sterownika.",
+    "contains_title": "Co jest w środku:",
+    "contains_config": "Twoja konfiguracja YAML",
+    "contains_logs": "Log urządzenia",
+    "contains_status": "Stan MQTT, Mosquitto, Dockera, systemu i sieci",
+    "excluded": "Czego nie ma: plik secrets.yaml i plik kont nie są w ogóle czytane, a hasła z konfiguracji są zamienione na znacznik wszędzie, także w logach.",
+    "privacy": "Plik nadal zawiera nazwy Twoich urządzeń, topiki MQTT i adresy w sieci. Wyślij go komuś, kogo prosisz o pomoc — nie na publiczne forum.",
+    "capture_title": "Logi są zwykle za ubogie",
+    "capture_help": "Domyślnie urządzenie nie zapisuje szczegółów, więc paczka zebrana „na zimno” rzadko tłumaczy usterkę. Otwórz okno diagnostyczne, odtwórz problem, a potem pobierz paczkę — obejmie dokładnie ten czas. Okno zamyka się samo.",
+    "capture_length": "Długość okna",
+    "capture_minutes": "{{count}} min",
+    "capture_start": "Otwórz okno diagnostyczne",
+    "capture_stop": "Zamknij teraz",
+    "capture_active": "Okno diagnostyczne otwarte — odtwórz problem. Zamknie się za {{time}}.",
+    "capture_failed": "Nie udało się zmienić okna diagnostycznego.",
+    "download": "Pobierz paczkę diagnostyczną",
+    "building": "Zbieram...",
+    "build_time": "Zebranie zajmuje kilkanaście sekund.",
+    "download_failed": "Nie udało się zebrać paczki.",
+    "page_title": "Diagnostyka",
+    "page_intro": "Co robi to urządzenie i dlaczego. Log na żywo, okno ze szczegółami, i paczka do wysłania, gdy trzeba kogoś poprosić o pomoc.",
+    "persistent_levels": "Na stałe poziomy logowania ustawisz w",
+    "menu": "Wsparcie"
   }
 }

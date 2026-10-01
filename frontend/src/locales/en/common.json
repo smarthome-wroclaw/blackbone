@@ -14,7 +14,11 @@
     "templates": "Templates",
     "experimental": "EXPERIMENTAL",
     "irrigation": "Irrigation",
+<<<<<<< ours
     "addons": "Add-ons"
+=======
+    "diagnostics": "Diagnostics"
+>>>>>>> theirs
   },
   "outputs": {
     "title": "Outputs",
@@ -398,7 +402,8 @@
     "device_shutting_down": "Device is shutting down...",
     "shutdown_warning": "After shutdown, the device must be powered on physically by disconnecting and reconnecting power.",
     "web_sections": "Web panel",
-    "badge_restart": "restart"
+    "badge_restart": "restart",
+    "security_sections": "Security"
   },
   "array_table_widget": {
     "fix_validation_errors_before_saving": "Please fix validation errors before saving",
@@ -766,7 +771,8 @@
     "mcp23017": "MCP23017 (Advanced)",
     "board_sensors": "Board Sensors",
     "oled": "OLED Display",
-    "accounts": "User accounts"
+    "accounts": "User accounts",
+    "security": "Security"
   },
   "mcp": {
     "info_title": "MCP23017 Configuration",
@@ -1700,7 +1706,8 @@
     "exclude_modules": "Exclude",
     "excluded_count_one": "{{count}} excluded",
     "excluded_count_other": "{{count}} excluded",
-    "search_placeholder": "Search logs..."
+    "search_placeholder": "Search logs...",
+    "first_seen": "First seen {{first}} — last {{last}}"
   },
   "tools": {
     "title": "Tools",
@@ -2589,11 +2596,30 @@
     "change_failed": "Failed to change overlay. Please update /boot/uEnv.txt manually.",
     "not_available": "The required overlay file ({{overlay}}) is not installed on this system. Update the system image or install the overlay package before changing the version."
   },
+  "password_policy": {
+    "too_short": "The password must be at least {{min}} characters.",
+    "contains_username": "The password must not contain the username — the username is public, so anyone who sees the login screen can guess it."
+  },
   "onboarding": {
     "title": "First-time setup",
     "step_welcome": "Start",
     "step_account": "Account",
     "step_import": "Import",
+    "step_devices": "Devices",
+    "step_counter": "Step {{current}} of {{total}}",
+    "devices_intro": "The outputs are already configured for your board. Wire the inputs to them.",
+    "devices_restore_state": "Restore relay and cover state after a restart.",
+    "devices_mode_outputs": "Inputs control outputs ({{outputs}})",
+    "devices_mode_covers": "Inputs control covers ({{covers}}, two inputs each)",
+    "devices_mode_covers_and_outputs": "Inputs control covers ({{covers}}) and outputs ({{outputs}})",
+    "devices_mode_none": "Wire nothing — I will do it myself",
+    "devices_summary": "{{device}} · {{inputs}} free inputs",
+    "devices_replace_warning": "Replaces the current input actions, imported ones included. Sets the single click only.",
+    "devices_apply": "Apply",
+    "devices_skip": "Skip",
+    "devices_done": "Configuration saved. It takes effect after the device restarts.",
+    "devices_failed": "Could not save the input configuration.",
+    "devices_targets_failed": "Could not read the device output configuration.",
     "step_done": "Done",
     "welcome_intro": "This device does not have an administrator account yet. This wizard will create one and can import the configuration from your previous boneIO.",
     "welcome_why": "This device has no owner yet: the wizard is open to anyone on your network, so whoever completes it first takes control of the controller. The rest of the API is already refusing requests. This only takes a moment.",
@@ -2604,9 +2630,10 @@
     "username": "Username",
     "password": "Password",
     "confirm_password": "Confirm password",
+    "show_password": "Show password",
+    "hide_password": "Hide password",
     "password_hint": "At least {{min}} characters.",
     "create_account": "Create account",
-    "error_password_short": "The password must be at least {{min}} characters.",
     "error_password_mismatch": "The passwords do not match.",
     "error_already_provisioned": "This device has already been set up. Reload the page and sign in.",
     "error_create_failed": "Could not create the account.",
@@ -2614,8 +2641,15 @@
     "import_button": "Import configuration",
     "import_done": "Configuration imported. It takes effect after a restart.",
     "import_failed": "Could not import the configuration.",
+    "import_skips_rest": "The Devices and Cloud steps will be skipped so the imported configuration is not overwritten.",
+    "done_import_skipped": "The Devices and Cloud steps were skipped because the imported configuration already covers them. You can change both in Settings — inputs under Local Inputs, cloud under Web Server.",
+    "import_invalid_type": "That is not a boneIO configuration archive. Pick the .tar.gz or .tgz file you downloaded from the other device.",
+    "import_too_large": "That file is larger than {{max}} MB. A configuration archive is only a few kilobytes, so this is almost certainly the wrong file.",
+    "import_empty": "The archive contained no configuration files, so nothing was restored. Make sure you picked a boneIO config backup and not some other archive.",
+    "import_invalid_config": "The configuration was restored but it does not pass validation. You can finish setup and fix it in the editor afterwards.",
     "skip_import": "Skip",
     "next": "Next",
+    "back": "Back",
     "done_summary": "All set. The administrator account “{{username}}” has been created and the panel is now password-protected.",
     "done_remove_web_auth": "Remember to remove the web.auth section from config.yaml.",
     "finish": "Go to the panel",
@@ -2657,8 +2691,97 @@
     "load_failed": "Could not load the account list."
   },
   "security": {
+    "title": "Security",
+    "intro": "What is still open on this controller, and where to close it. The same information reaches Home Assistant as a diagnostic entity.",
+    "outstanding": "{{count}} outstanding",
+    "all_clear": "Nothing urgent — {{count}} checks run.",
+    "passed": "Passing ({{count}})",
+    "fix": "Fix",
+    "recheck": "Check again",
+    "retry": "Try again",
+    "unavailable": "Could not read the security state.",
+    "severity": {
+      "critical": "Critical",
+      "warning": "Warning",
+      "info": "Information"
+    },
+    "severity_count": {
+      "critical": "{{count}} critical",
+      "warning": "{{count}} warning",
+      "info": "{{count}} info"
+    },
+    "checks": {
+      "admin_account": {
+        "title": "Administrator account",
+        "detail": "This device has no account. Whoever reaches the first-run wizard first takes control of it.",
+        "ok": "An administrator account exists.",
+        "remedy": "Finish the first-run wizard, or run: boneio accounts add <name> --role admin"
+      },
+      "anonymous_access": {
+        "title": "Unauthenticated access",
+        "detail": "Anyone on the network can read the configuration, switch outputs and reboot this device without a password.",
+        "ok": "Requests need to be signed in.",
+        "remedy": "Create an account, and remove allow_anonymous from web.auth in config.yaml."
+      },
+      "mqtt_password": {
+        "title": "MQTT broker password",
+        "detail": "The broker still uses the password every boneIO ships with, which is published and identical on every device.",
+        "ok": "The broker password has been changed.",
+        "remedy": "Set a new broker password, then update Home Assistant with it."
+      },
+      "legacy_web_auth": {
+        "title": "Old credentials in config.yaml",
+        "detail": "config.yaml still holds the pre-1.6 web.auth block, with the password in clear text. It is no longer read.",
+        "ok": "No credentials are stored in config.yaml.",
+        "remedy": "Delete the web.auth username and password from config.yaml."
+      },
+      "certificate": {
+        "title": "HTTPS certificate",
+        "detail": "Served with a self-signed certificate, so browsers warn on every visit and people learn to click through the warning.",
+        "ok": "Served with a certificate browsers trust.",
+        "remedy": "Enable boneIO Cloud registration to get a trusted certificate."
+      },
+      "frame_ancestors": {
+        "title": "Embedding in other sites",
+        "detail": "Any site may embed this panel in a frame, which is what clickjacking needs.",
+        "ok": "Only the listed addresses may embed this panel.",
+        "remedy": "Turn the restriction on below, adding your Home Assistant address if a dashboard frames this device directly."
+      },
+      "dev_mode": {
+        "title": "Development mode",
+        "detail": "BONEIO_DEV is set: development routes are mounted and CORS accepts local dev servers.",
+        "ok": "Development mode is off.",
+        "remedy": "Unset BONEIO_DEV on any device that is not a development board."
+      }
+    },
+    "after_update": {
+      "title": "boneIO updated to {{version}}",
+      "body": "This release adds security settings your device does not have switched on yet. Reviewing them takes a moment.",
+      "body_clean": "This release adds security settings. Nothing on this device needs attention.",
+      "review": "Review security",
+      "later": "Later",
+      "outstanding": "{{count}} outstanding",
+      "title_first": "Security recommendations"
+    },
     "anonymous_title": "Unauthenticated access is enabled.",
-    "anonymous_body": "Anyone who can reach this device on the network can read its configuration, switch its outputs and reboot it, with no password. Remove “allow_anonymous” from web.auth in config.yaml and create an administrator account."
+    "anonymous_body": "Anyone who can reach this device on the network can read its configuration, switch its outputs and reboot it, with no password. Remove “allow_anonymous” from web.auth in config.yaml and create an administrator account.",
+    "advice": "Worth considering",
+    "advice_intro": "Applies to nearly every controller and depends on how you use the device. Not a problem with this one.",
+    "framing": {
+      "title": "Embedding this panel in other sites",
+      "intro": "Limits who may show this panel in a frame. The default is this device only — the boneIO Black add-on for Home Assistant works with that, because it proxies the controller itself.",
+      "restrict": "Restrict embedding",
+      "restrict_help": "Turning this off lets any site on the internet show this panel in a frame, which is what clickjacking needs.",
+      "extra_origin": "One more address you trust",
+      "extra_origin_help": "Only needed when your dashboard frames this device directly (an iframe card or panel_iframe) rather than through the add-on. Give the server address only, with no path.",
+      "save": "Save",
+      "saving": "Saving...",
+      "restart_needed": "Saved — takes effect after the app restarts.",
+      "load_failed": "Could not read the setting.",
+      "save_failed": "Could not save the setting.",
+      "add_origin": "Add an address",
+      "remove_origin": "Remove address"
+    }
   },
   "login": {
     "title": "Sign in to your",
@@ -2666,5 +2789,31 @@
     "password": "Password",
     "submit": "Sign in",
     "invalid": "Invalid username or password."
+  },
+  "diagnostics": {
+    "title": "Diagnostics for support",
+    "intro": "Collects what support will ask for into one file. You can email it — nobody needs access to the controller.",
+    "contains_title": "What is inside:",
+    "contains_config": "Your YAML configuration",
+    "contains_logs": "The device log",
+    "contains_status": "MQTT, Mosquitto, Docker, system and network state",
+    "excluded": "What is not: secrets.yaml and your account file are never read, and passwords from the configuration are replaced with a placeholder everywhere, including in the logs.",
+    "privacy": "The file still holds your device names, MQTT topics and network addresses. Send it to someone you are asking for help, not to a public forum.",
+    "capture_title": "The logs are usually too thin",
+    "capture_help": "By default the device does not record the detail, so a bundle collected cold rarely explains a fault. Open a capture window, reproduce the problem, then download — the bundle covers exactly that period. The window closes itself.",
+    "capture_length": "Window length",
+    "capture_minutes": "{{count}} min",
+    "capture_start": "Open a capture window",
+    "capture_stop": "Close now",
+    "capture_active": "Capture window open — reproduce the problem. It closes in {{time}}.",
+    "capture_failed": "Could not change the capture window.",
+    "download": "Download diagnostics",
+    "building": "Collecting...",
+    "build_time": "Collecting takes a few seconds.",
+    "download_failed": "Could not collect the bundle.",
+    "page_title": "Diagnostics",
+    "page_intro": "What this device is doing, and why. The live log, a window with more detail, and a bundle to send when you need to ask someone for help.",
+    "persistent_levels": "Set logging levels permanently in",
+    "menu": "Support"
   }
 }
