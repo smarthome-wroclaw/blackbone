@@ -76,6 +76,7 @@ export default defineConfig(({ mode }) => {
       }),
     ],
     resolve: {
+<<<<<<< ours
       alias: [
         // monaco-editor 0.56 added an exports map ("./*": "./esm/vs/*.js") that
         // already injects the "esm/vs/" prefix. Deep imports that spell it out
@@ -85,20 +86,52 @@ export default defineConfig(({ mode }) => {
         { find: /^monaco-editor\/esm\/vs\//, replacement: "monaco-editor/" },
         { find: "@", replacement: path.resolve(__dirname, "./src") },
       ],
+=======
+      alias: {
+        "@": path.resolve(__dirname, "./src"),
+        // monaco-yaml's worker imports Prettier unconditionally for its
+        // optional "format document" provider, which only registers when
+        // configureMonacoYaml() is given format.enable. boneIO never enables
+        // it, so stub Prettier out and keep ~420 kB out of the YAML worker.
+        "prettier/standalone": path.resolve(__dirname, "./src/stubs/prettier-standalone.ts"),
+        "prettier/plugins/yaml": path.resolve(__dirname, "./src/stubs/prettier-plugin.ts"),
+        "prettier/plugins/estree": path.resolve(__dirname, "./src/stubs/prettier-plugin.ts"),
+      },
+>>>>>>> theirs
     },
     build: {
       outDir: path.resolve(__dirname, '../boneio/webui/frontend-dist'),
       emptyOutDir: true,
       rollupOptions: {
         output: {
-          manualChunks(id: string) {
-            if (id.includes('monaco-editor') || id.includes('@monaco-editor/react') || id.includes('monaco-yaml')) {
-              return 'monaco';
-            }
-            if (id.includes('react-dom') || id.includes('react-router-dom') || id.includes('/react/')) {
-              return 'vendor';
-            }
-          }
+          // Name — but deliberately do NOT force — the Monaco chunk.
+          //
+          // A manualChunks rule for Monaco looks tempting, but it makes the
+          // chunk a static dependency of the entry: the CommonJS interop helper
+          // that Monaco's `marked`/`dompurify` deps share with axios lands
+          // inside it, so index.js imports the chunk, index.html preloads it,
+          // and all 3.6 MB downloads on every page load even though
+          // ConfigEditor is React.lazy. Letting the bundler split on the
+          // dynamic-import boundary and only renaming the result keeps Monaco
+          // out of the entry graph while still giving the service-worker rules
+          // below a "monaco-*" filename to match.
+          chunkFileNames(chunk: { moduleIds?: string[] }) {
+            const fromMonaco = (chunk.moduleIds ?? []).some((id) =>
+              id.replace(/\\/g, '/').includes('/node_modules/monaco-editor/'),
+            );
+            return fromMonaco ? 'assets/monaco-[hash].js' : 'assets/[name]-[hash].js';
+          },
+          // Monaco's stylesheet is emitted as "editor.css", a name the
+          // service-worker rules below do not recognise. Identify it by content
+          // — every Monaco rule is prefixed .monaco- — rather than by a name the
+          // bundler picks, and give it the monaco-* name those rules expect.
+          // Binary assets (the codicon font) keep their own names.
+          assetFileNames(asset: { source?: string | Uint8Array }) {
+            const source = typeof asset.source === 'string' ? asset.source : '';
+            return source.includes('.monaco-')
+              ? 'assets/monaco-[hash][extname]'
+              : 'assets/[name]-[hash][extname]';
+          },
         }
       },
     },

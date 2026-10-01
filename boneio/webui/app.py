@@ -44,6 +44,7 @@ from boneio.models.events import (
 )
 from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
+from boneio.webui.middleware.csrf import CSRFMiddleware
 from boneio.webui.security_headers import apply_security_headers
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
@@ -74,7 +75,12 @@ from boneio.webui.routes import (
     nodered_router,
     outputs_router,
     remote_devices_router,
+<<<<<<< ours
     schema_router,
+=======
+    diagnostics_router,
+    security_router,
+>>>>>>> theirs
     sensors_router,
     system_router,
     templates_router,
@@ -83,6 +89,8 @@ from boneio.webui.routes import (
 )
 from boneio.webui.routes import config as config_module
 from boneio.webui.routes import onboarding as onboarding_module
+from boneio.webui.routes import diagnostics as diagnostics_module
+from boneio.webui.routes import security as security_module
 from boneio.webui.routes import system as system_module
 
 # Import WebSocket manager
@@ -172,6 +180,8 @@ app.include_router(update_router)
 app.include_router(modbus_router)
 app.include_router(schema_router)
 app.include_router(sensors_router)
+app.include_router(security_router)
+app.include_router(diagnostics_router)
 app.include_router(caddy_router)
 app.include_router(nodered_router)
 app.include_router(onboarding_router)
@@ -783,6 +793,8 @@ def init_app(
     config_module.set_app_state(app.state)
     config_module.set_websocket_manager(app.state.websocket_manager)
     system_module.set_app_state(app.state)
+    security_module.set_app_state(app.state)
+    diagnostics_module.set_app_state(app.state)
 
     # Pre-populate config cache if initial_config provided
     if initial_config is not None:
@@ -857,6 +869,11 @@ def init_app(
         ]
         _LOGGER.info("CORS: dev mode — allowing origins: %s", cors_origins)
 
+    # Refuses cross-site state changes, trusting exactly the origins CORS
+    # trusts. Added before CORS so CORS ends up outermost and its headers are
+    # still attached to the refusal, which is what lets the browser show it.
+    app.add_middleware(CSRFMiddleware, allowed_origins=cors_origins)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -868,10 +885,12 @@ def init_app(
     # Security headers middleware (F-13).
     # NOTE: still no X-Frame-Options — boneIO must be embeddable in an HA
     # ingress iframe, and that header cannot name an allowed origin. Framing is
-    # expressed through CSP frame-ancestors instead, configured per install.
+    # expressed through CSP frame-ancestors instead. Unset means the secure
+    # default, which the HA add-on satisfies because it proxies; see
+    # security_headers for why.
+    # Passed through as configured — a list or, from an older config, a
+    # string. build_csp reads both; joining here would only lose the shape.
     frame_ancestors = (web_security or {}).get("frame_ancestors")
-    if isinstance(frame_ancestors, list):
-        frame_ancestors = " ".join(str(item) for item in frame_ancestors)
 
     @app.middleware("http")
     async def security_headers_middleware(request, call_next):

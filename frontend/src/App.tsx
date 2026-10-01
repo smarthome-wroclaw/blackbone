@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { createContext, useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { getRouterBasename } from './api/basePath';
 
@@ -7,7 +7,7 @@ import { getRouterBasename } from './api/basePath';
 // needed on every page. Everything else loads on-demand when the route is visited.
 const lazyImports = {
   ConfigEditor: () => import('./components/ConfigEditor'),
-  LogViewer: () => import('./components/LogViewer'),
+  DiagnosticsView: () => import('./components/DiagnosticsView'),
   OutputsView: () => import('./components/OutputsView'),
   InputsView: () => import('./components/InputsView'),
   SensorView: () => import('./components/SensorView'),
@@ -22,7 +22,7 @@ const lazyImports = {
 } as const;
 
 const ConfigEditor = lazy(lazyImports.ConfigEditor);
-const LogViewer = lazy(lazyImports.LogViewer);
+const DiagnosticsView = lazy(lazyImports.DiagnosticsView);
 const OutputsView = lazy(lazyImports.OutputsView);
 const InputsView = lazy(lazyImports.InputsView);
 const SensorView = lazy(lazyImports.SensorView);
@@ -49,7 +49,7 @@ function prefetchRouteChunks() {
     lazyImports.SensorView,
     lazyImports.ModbusView,
     lazyImports.UISettings,
-    lazyImports.LogViewer,
+    lazyImports.DiagnosticsView,
     lazyImports.Tools,
     lazyImports.TemplatesView,
     lazyImports.AddonsView,
@@ -67,6 +67,7 @@ function prefetchRouteChunks() {
 
 import LoginView from './components/LoginView';
 import OnboardingWizard from './components/OnboardingWizard';
+import SecurityUpdatePrompt from './components/SecurityUpdatePrompt';
 import Layout from './components/Layout';
 import { useWebSocket, StateUpdate, isCoverEvent, InputEvent, OutputEvent, SensorEvent, CoverEvent, ModbusDeviceEvent, GroupEvent, isOutputEvent, isGroupEvent, isConfigReloadEvent } from './hooks/useWebSocket';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -75,6 +76,7 @@ import NotAvailable from './components/NotAvailable';
 import { ConfigProvider } from './contexts/ConfigContext';
 import { TranslationProvider } from './contexts/TranslationContext';
 import { appendModbusHistoryPointToStorage, clearModbusHistoryStorage } from './hooks/useModbusHistory';
+import { readProvisioningHint } from '@/utils/provisioning';
 
 export const WebSocketContext = createContext<{
   outputs: OutputEvent[];
@@ -97,18 +99,36 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading: authLoading, isAuthRequired } = useAuth();
   const { isApiAvailable, isLoading: initLoading, needsOnboarding } = useAppInit();
 
+  // Read once per mount: the value cannot change while this render tree lives,
+  // and touching localStorage on every render would be pure waste.
+  const [showShellWhileLoading] = useState(() =>
+    readProvisioningHint(window.localStorage, window.__BONEIO_BASE_PATH__),
+  );
+
   // API confirmed unavailable after retries — show error screen
   if (!isApiAvailable && !initLoading) {
     return <NotAvailable />
   }
 
-  // Still loading init data or auth — show spinner inside layout shell
+  // Still loading init data or auth — show a spinner.
+  //
+  // Inside the layout shell only for a device this browser has seen
+  // provisioned: the navigation is what the user is waiting for, so drawing it
+  // straight away reads as speed. On a device that may still need onboarding
+  // the same shell reads as the app flashing up and being snatched away, so
+  // that case gets a bare spinner on the wizard's own background instead.
   if (initLoading || authLoading) {
+    const spinner = <span className="loading loading-spinner loading-lg text-primary"></span>;
+
+    if (!showShellWhileLoading) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-base-100">{spinner}</div>
+      );
+    }
+
     return (
       <Layout>
-        <div className="flex items-center justify-center h-full min-h-[60vh]">
-          <span className="loading loading-spinner loading-lg text-primary"></span>
-        </div>
+        <div className="flex items-center justify-center h-full min-h-[60vh]">{spinner}</div>
       </Layout>
     );
   }
@@ -409,13 +429,16 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-        <Route path="/logs" element={
+        <Route path="/diagnostics" element={
           <ProtectedRoute>
             <Layout>
-              <LogViewer />
+              <DiagnosticsView />
             </Layout>
           </ProtectedRoute>
         } />
+        {/* The page was /logs until the support bundle joined it. Kept so
+            bookmarks and anything linking to it still land somewhere. */}
+        <Route path="/logs" element={<Navigate to="/diagnostics" replace />} />
         <Route path="/sensors" element={
           <ProtectedRoute>
             <Layout>
@@ -474,6 +497,9 @@ function AppContent() {
         } />
       </Routes>
       </Suspense>
+      {/* Renders nothing unless an admin is signed in and something is
+          outstanding, so it stays inert on the login and wizard screens. */}
+      <SecurityUpdatePrompt />
     </WebSocketContext.Provider>
   );
 }

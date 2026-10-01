@@ -3,6 +3,8 @@ import axios from '@/api/axios';
 import { FaSync, FaArrowUp, FaArrowDown, FaCopy, FaFilter, FaEyeSlash, FaSearch, FaDiscord, FaBug, FaCalendarAlt } from 'react-icons/fa';
 import { useTranslation } from '../hooks/useTranslation';
 import { copyToClipboard } from '@/utils/clipboard';
+import { aggregateLogs, type AggregatedLog } from '../utils/logAggregation';
+import { useCaptureWindow } from '../hooks/useCaptureWindow';
 
 // Create formatter once, not on every function call
 const dateFormatter = new Intl.DateTimeFormat('sv-SE', {
@@ -36,17 +38,6 @@ interface LogEntry {
  * Aggregated log entry — collapses consecutive identical messages
  * into a single entry with a repeat count (like Home Assistant).
  */
-interface AggregatedLog {
-  /** First occurrence timestamp */
-  timestamp: string;
-  /** Last occurrence timestamp (differs from timestamp when count > 1) */
-  lastTimestamp: string;
-  message: string;
-  level: string;
-  /** Number of consecutive identical messages collapsed into this entry */
-  count: number;
-}
-
 const LOG_LEVELS: { value: string; label: string; color: string; activeColor: string }[] = [
   { value: '3', label: 'ERROR', color: 'var(--log-error)', activeColor: 'var(--log-error-bg)' },
   { value: '4', label: 'WARNING', color: 'var(--log-warning)', activeColor: 'var(--log-warning-bg)' },
@@ -80,8 +71,17 @@ export default function LogViewer() {
   const [excludeDropdownOpen, setExcludeDropdownOpen] = useState(false);
   const excludeDropdownRef = useRef<HTMLDivElement>(null);
   const [selectedLevels, setSelectedLevels] = useState<Set<string>>(new Set());
-  const [debugActive, setDebugActive] = useState(false);
-  const [debugLoading, setDebugLoading] = useState(false);
+  // Shared with the support card on the same page: one piece of process-global
+  // state, so one control. The window closes itself, which the old toggle did
+  // not — a device left at debug logs ~21 MQTT publishes a second.
+  const {
+    state: capture,
+    clock: captureClock,
+    busy: debugLoading,
+    open: openCapture,
+    close: closeCapture,
+  } = useCaptureWindow();
+  const debugActive = capture.active;
   const [logSource, setLogSource] = useState<'systemd' | 'standalone' | null>(null);
   const [serverPriority, setServerPriority] = useState<string | null>(null);
   const [dateFrom, setDateFrom] = useState('');
@@ -157,31 +157,12 @@ export default function LogViewer() {
     }
   }, [isLoadingMore, hasMore, logs, buildLogParams]);
 
-  const fetchLogLevel = useCallback(async () => {
-    try {
-      const response = await axios.get('/api/log-level');
-      setDebugActive(response.data.debug_active);
-    } catch (error) {
-      console.error('Error fetching log level:', error);
-    }
-  }, []);
-
-  const toggleDebug = useCallback(async () => {
-    setDebugLoading(true);
-    try {
-      const newLevel = debugActive ? 'RESTORE' : 'DEBUG';
-      await axios.post('/api/log-level', { level: newLevel });
-      setDebugActive(!debugActive);
-    } catch (error) {
-      console.error('Error toggling debug:', error);
-    } finally {
-      setDebugLoading(false);
-    }
-  }, [debugActive]);
+  const toggleDebug = useCallback(() => {
+    void (debugActive ? closeCapture() : openCapture());
+  }, [debugActive, openCapture, closeCapture]);
 
   useEffect(() => {
     fetchLogs();
-    fetchLogLevel();
   }, []);
 
   useEffect(() => {
@@ -271,29 +252,11 @@ export default function LogViewer() {
 
   /**
    * Create a normalised "fingerprint" of a log message for fuzzy matching.
-   * Strips parts that change between otherwise-identical repetitions:
-   *   - thread names in parentheses, e.g. "(modbus_worker_0)" → "(…)"
-   *   - ISO-ish timestamps and bare numbers that look like durations / IDs
-   */
-  const fingerprint = useCallback((msg: string): string => {
-    return msg
-      // Strip thread name: "(MainThread)" / "(modbus_worker_0)" → "(…)"
-      .replace(/\([A-Za-z_]+[\w]*\)/g, '(…)')
-      // Strip float durations like "45.0 seconds" → "… seconds"
-      .replace(/\d+\.\d+\s*(seconds?|s\b)/gi, '… $1')
-      // Keep the rest — module names, actual error text, etc.
-      ;
-  }, []);
-
   /**
    * Logs filtered by selected modules and log levels, then aggregated.
    *
-   * Aggregation works in two passes:
-   *  1. Consecutive lines with identical (level, fingerprint) are collapsed
-   *     (original behaviour, covers the simple case).
-   *  2. Repeating *sequences* of N lines (N = 2..5) are detected and collapsed.
-   *     E.g. [ERROR, WARNING, ERROR, WARNING, …] where each pair has the same
-   *     fingerprints → shown once with ×count.
+   * The folding itself lives in utils/logAggregation — see there for why
+   * consecutive-run detection was not enough.
    */
   const filteredLogs = useMemo((): AggregatedLog[] => {
     const filtered = logs.filter(log => {
@@ -311,89 +274,8 @@ export default function LogViewer() {
       return true;
     });
 
-    // --- Pass 1: collapse identical consecutive lines (fast path) ----------
-    const pass1: AggregatedLog[] = [];
-    for (const log of filtered) {
-      const last = pass1[pass1.length - 1];
-      if (last && last.message === log.message && last.level === log.level) {
-        last.count += 1;
-        last.lastTimestamp = log.timestamp;
-      } else {
-        pass1.push({
-          timestamp: log.timestamp,
-          lastTimestamp: log.timestamp,
-          message: log.message,
-          level: log.level,
-          count: 1,
-        });
-      }
-    }
-
-    // --- Pass 2: detect repeating sequences (seqLen = 2..5) ----------------
-    // Build fingerprint keys once
-    const keys = pass1.map(e => `${e.level}\x00${fingerprint(e.message)}`);
-
-    /**
-     * Check if a sequence of length `seqLen` starting at `start` repeats
-     * at `start + seqLen`. Returns the number of consecutive full repetitions
-     * (minimum 1 = the original, so 2 means one repeat).
-     */
-    const countSequenceRepeats = (start: number, seqLen: number): number => {
-      let reps = 1;
-      let pos = start + seqLen;
-      while (pos + seqLen <= keys.length) {
-        let match = true;
-        for (let j = 0; j < seqLen; j++) {
-          if (keys[pos + j] !== keys[start + j]) {
-            match = false;
-            break;
-          }
-        }
-        if (!match) break;
-        reps++;
-        pos += seqLen;
-      }
-      return reps;
-    };
-
-    const result: AggregatedLog[] = [];
-    let i = 0;
-    while (i < pass1.length) {
-      let collapsed = false;
-
-      // Try sequence lengths 2..5 (longest first for greedier grouping)
-      for (let seqLen = 5; seqLen >= 2; seqLen--) {
-        if (i + seqLen * 2 > pass1.length) continue; // not enough room
-
-        const reps = countSequenceRepeats(i, seqLen);
-        if (reps >= 2) {
-          // Collapse: keep the first occurrence of each line in the sequence,
-          // but multiply their counts by the number of repetitions.
-          for (let j = 0; j < seqLen; j++) {
-            const entry = pass1[i + j];
-            const totalCount = entry.count * reps;
-            // Find last timestamp across all repetitions for this slot
-            const lastEntry = pass1[i + (reps - 1) * seqLen + j];
-            result.push({
-              ...entry,
-              count: totalCount,
-              lastTimestamp: lastEntry.lastTimestamp,
-            });
-          }
-          i += seqLen * reps;
-          collapsed = true;
-          break;
-        }
-      }
-
-      if (!collapsed) {
-        result.push(pass1[i]);
-        i++;
-      }
-    }
-
-    return result;
-  }, [logs, selectedModules, excludedModules, selectedLevels, fingerprint]);
+    return aggregateLogs(filtered);
+  }, [logs, selectedModules, excludedModules, selectedLevels]);
 
   // Clear selection when filter criteria change (indices become stale)
   useEffect(() => {
@@ -649,6 +531,46 @@ export default function LogViewer() {
 
   return (
     <div className="h-[calc(100vh-8rem)] flex flex-col bg-base-100 overflow-hidden">
+      {/* Search gets its own full-width row above everything else. It was a
+          36px-wide box in the middle of a crowded toolbar, which is the one
+          control people reach for first on a page of thousands of lines. */}
+      <div className="bg-base-200 px-2 sm:px-4 pt-2 sm:pt-4">
+        <div className="relative flex items-center w-full">
+          <FaSearch className="absolute left-3 w-4 h-4 text-base-content/40 pointer-events-none" />
+          <input
+            type="text"
+            className="input input-bordered pl-9 w-full font-mono text-sm"
+            placeholder={t('log_viewer.search_placeholder')}
+            value={searchQuery}
+            onChange={(e) => {
+              const val = e.target.value;
+              setSearchQuery(val);
+              if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+              searchDebounceRef.current = setTimeout(() => {
+                setDebouncedGrep(val.trim());
+              }, 600);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+                setDebouncedGrep(searchQuery.trim());
+              }
+            }}
+          />
+          {searchQuery && (
+            <button
+              onClick={() => {
+                setSearchQuery('');
+                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+                setDebouncedGrep('');
+              }}
+              className="absolute right-2 btn btn-ghost btn-sm px-2 text-base-content/40 hover:text-base-content"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
       <div className="bg-base-200 p-2 sm:p-4 border-b border-base-content/10 flex flex-wrap items-center gap-2 sm:gap-4">
         <label className="flex items-center gap-2 cursor-pointer">
           <input
@@ -693,42 +615,6 @@ export default function LogViewer() {
               </button>
             );
           })}
-        </div>
-
-        <div className="relative flex items-center">
-          <FaSearch className="absolute left-2 w-3 h-3 text-base-content/40 pointer-events-none" />
-          <input
-            type="text"
-            className="input input-sm input-bordered pl-7 w-36 sm:w-48 font-mono text-xs"
-            placeholder={t('log_viewer.search_placeholder')}
-            value={searchQuery}
-            onChange={(e) => {
-              const val = e.target.value;
-              setSearchQuery(val);
-              if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-              searchDebounceRef.current = setTimeout(() => {
-                setDebouncedGrep(val.trim());
-              }, 600);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-                setDebouncedGrep(searchQuery.trim());
-              }
-            }}
-          />
-          {searchQuery && (
-            <button
-              onClick={() => {
-                setSearchQuery('');
-                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-                setDebouncedGrep('');
-              }}
-              className="absolute right-1 btn btn-ghost btn-xs px-1 text-base-content/40 hover:text-base-content"
-            >
-              ✕
-            </button>
-          )}
         </div>
 
         <div className="relative" ref={dateFilterRef}>
@@ -870,7 +756,7 @@ export default function LogViewer() {
             title={debugActive ? t('log_viewer.debug_disable') : t('log_viewer.debug_enable')}
           >
             <FaBug className={`w-3 h-3 ${debugLoading ? 'animate-pulse' : ''}`} />
-            {debugActive ? t('log_viewer.debug_on') : t('log_viewer.debug_off')}
+            {debugActive ? `${t('log_viewer.debug_on')} ${captureClock}` : t('log_viewer.debug_off')}
           </button>
           {debugActive && (
             <div className="absolute top-full left-0 mt-1 z-50 hidden group-hover:block bg-warning text-warning-content text-xs rounded px-2 py-1 shadow-lg whitespace-nowrap">
@@ -982,8 +868,11 @@ export default function LogViewer() {
                     color: 'var(--log-error, oklch(0.8 0.15 25))',
                     borderColor: 'var(--log-error-border, oklch(0.5 0.1 25))',
                   }}
-                  title={log.count > 1 && log.timestamp !== log.lastTimestamp
-                    ? `${formatTimestamp(log.timestamp)} — ${formatTimestamp(log.lastTimestamp)}`
+                  title={log.count > 1 && log.firstTimestamp !== log.timestamp
+                    ? t('log_viewer.first_seen', {
+                        first: formatTimestamp(log.firstTimestamp),
+                        last: formatTimestamp(log.timestamp),
+                      })
                     : undefined
                   }
                 >
