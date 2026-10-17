@@ -77,6 +77,10 @@ sudo systemctl restart boneio
 
 From then on in-app updates work normally.
 
+BlackBone keeps its own version line as it incorporates upstream boneIO releases. For example,
+the upstream boneIO 1.6 series is delivered as BlackBone 0.3.x; the upstream version is not copied
+to the BlackBone package, so pip can update existing BlackBone installations safely.
+
 ## Returning to the original boneIO app
 
 The migration is reversible. The safest option is to restore the application backup created by
@@ -212,6 +216,10 @@ sudo systemctl restart boneio
 ```
 
 Od tego momentu aktualizacje z poziomu aplikacji działają normalnie.
+
+BlackBone zachowuje własną numerację wersji podczas włączania wydań upstream boneIO. Na przykład
+seria boneIO 1.6 jest dostarczana jako BlackBone 0.3.x. Wersja upstream nie jest kopiowana do
+pakietu BlackBone, dzięki czemu pip może bezpiecznie aktualizować istniejące instalacje BlackBone.
 
 ### Powrót do oryginalnej aplikacji boneIO
 

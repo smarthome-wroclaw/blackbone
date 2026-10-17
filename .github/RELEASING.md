@@ -11,7 +11,15 @@ Release Please maintains a release pull request containing the version bump and
 release, builds the Python distributions, and publishes them to PyPI as
 `blackbone`.
 
-Version tracking starts at `0.0.0`; the first feature release will be `0.1.0`.
+BlackBone's version is independent of upstream boneIO's version. The upstream
+1.6 series is released by this fork as BlackBone 0.3.x; do not copy upstream's
+`1.6.x` version into the package metadata, because pip would treat BlackBone's
+`0.x` releases as downgrades for existing 1.x installations. Upstream sync
+commits use `chore(sync)` and do not trigger a release by themselves. After the
+sync batch intended for a release is merged, land a `feat(upstream): ...`
+commit describing that upstream baseline. Release Please will then open the
+`0.3.0` release pull request; merging it creates the GitHub release and
+publishes the package.
 
 ## Bilingual release notes
 
@@ -62,8 +70,14 @@ Release Please utrzymuje PR wydania zawierający zmianę wersji oraz aktualizacj
 `CHANGELOG.md`. Scalenie tego PR-a tworzy wydanie GitHub `vX.Y.Z`, buduje
 dystrybucje Pythona i publikuje je w PyPI jako `blackbone`.
 
-Śledzenie wersji rozpoczyna się od `0.0.0`; pierwszym wydaniem funkcjonalnym
-będzie `0.1.0`.
+Wersja BlackBone jest niezależna od wersji boneIO. Seria upstream 1.6 jest
+wydawana przez ten fork jako BlackBone 0.3.x. Nie kopiuj wersji upstream
+`1.6.x` do metadanych pakietu, ponieważ pip uznałby wydania BlackBone `0.x` za
+starsze dla istniejących instalacji 1.x. Commity synchronizacyjne upstreamu
+mają typ `chore(sync)` i same nie uruchamiają wydania. Po scaleniu partii
+synchronizacji przeznaczonej do wydania dodaj commit `feat(upstream): ...`
+opisujący tę bazę upstream. Release Please otworzy wtedy PR wydania `0.3.0`;
+scalenie go utworzy wydanie GitHub i opublikuje pakiet.
 
 ## Dwujęzyczne informacje o wydaniu
 
