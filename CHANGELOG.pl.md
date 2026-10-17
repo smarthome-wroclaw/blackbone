@@ -5,6 +5,15 @@ użyciu Release Please i OpenRouter.
 
 
 
+
+<!-- blackbone-release:0.2.1:start -->
+## [0.2.1](https://github.com/smarthome-wroclaw/blackbone/compare/v0.2.0...v0.2.1) (2026-10-17)
+
+### Poprawki błędów
+
+* rozwiązano konflikty synchronizacji upstream w PR 98 ([a14d777](https://github.com/smarthome-wroclaw/blackbone/commit/a14d77773dd156ce73244e0565c8a551ae5e755a))
+<!-- blackbone-release:0.2.1:end -->
+
 <!-- blackbone-release:0.1.2:start -->
 ## [0.1.2](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.1...v0.1.2) (2026-09-07)
 
