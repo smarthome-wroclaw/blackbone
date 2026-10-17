@@ -14,11 +14,8 @@
     "templates": "Templates",
     "experimental": "EXPERIMENTAL",
     "irrigation": "Irrigation",
-<<<<<<< ours
-    "addons": "Add-ons"
-=======
+    "addons": "Add-ons",
     "diagnostics": "Diagnostics"
->>>>>>> theirs
   },
   "outputs": {
     "title": "Outputs",

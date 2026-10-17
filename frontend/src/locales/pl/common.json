@@ -14,11 +14,8 @@
     "templates": "Szablony",
     "experimental": "EKSPERYMENTALNE",
     "irrigation": "Nawadnianie",
-<<<<<<< ours
-    "addons": "Dodatki"
-=======
+    "addons": "Dodatki",
     "diagnostics": "Diagnostyka"
->>>>>>> theirs
   },
   "outputs": {
     "title": "Wyjścia",

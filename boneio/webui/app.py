@@ -75,12 +75,9 @@ from boneio.webui.routes import (
     nodered_router,
     outputs_router,
     remote_devices_router,
-<<<<<<< ours
     schema_router,
-=======
     diagnostics_router,
     security_router,
->>>>>>> theirs
     sensors_router,
     system_router,
     templates_router,

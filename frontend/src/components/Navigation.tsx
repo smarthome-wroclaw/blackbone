@@ -1,9 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-<<<<<<< ours
-import { FaCode, FaList, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaToolbox, FaProjectDiagram, FaPuzzlePiece, FaServer, FaBoxes } from 'react-icons/fa';
-=======
-import { FaCode, FaStethoscope, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaToolbox, FaProjectDiagram, FaPuzzlePiece, FaServer } from 'react-icons/fa';
->>>>>>> theirs
+import { FaCode, FaStethoscope, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaToolbox, FaProjectDiagram, FaPuzzlePiece, FaServer, FaBoxes } from 'react-icons/fa';
 import ThemeChanger from './ThemeChanger';
 import LanguageSelector from './LanguageSelector';
 import { useEffect } from 'react';

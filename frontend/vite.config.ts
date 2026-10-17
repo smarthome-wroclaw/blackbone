@@ -76,28 +76,19 @@ export default defineConfig(({ mode }) => {
       }),
     ],
     resolve: {
-<<<<<<< ours
       alias: [
         // monaco-editor 0.56 added an exports map ("./*": "./esm/vs/*.js") that
         // already injects the "esm/vs/" prefix. Deep imports that spell it out
-        // resolve to "esm/vs/esm/vs/..." and fail. Affects our own worker
-        // imports and monaco-worker-manager (via monaco-yaml), which hardcodes
-        // 'monaco-editor/esm/vs/editor/editor.worker.js' and can't be edited.
+        // resolve to "esm/vs/esm/vs/..." and fail. Affects worker imports and
+        // monaco-worker-manager (via monaco-yaml), which hardcodes the path.
         { find: /^monaco-editor\/esm\/vs\//, replacement: "monaco-editor/" },
         { find: "@", replacement: path.resolve(__dirname, "./src") },
+        // monaco-yaml imports Prettier for an optional formatter that boneIO
+        // does not enable; stubs keep it out of the YAML worker bundle.
+        { find: "prettier/standalone", replacement: path.resolve(__dirname, "./src/stubs/prettier-standalone.ts") },
+        { find: "prettier/plugins/yaml", replacement: path.resolve(__dirname, "./src/stubs/prettier-plugin.ts") },
+        { find: "prettier/plugins/estree", replacement: path.resolve(__dirname, "./src/stubs/prettier-plugin.ts") },
       ],
-=======
-      alias: {
-        "@": path.resolve(__dirname, "./src"),
-        // monaco-yaml's worker imports Prettier unconditionally for its
-        // optional "format document" provider, which only registers when
-        // configureMonacoYaml() is given format.enable. boneIO never enables
-        // it, so stub Prettier out and keep ~420 kB out of the YAML worker.
-        "prettier/standalone": path.resolve(__dirname, "./src/stubs/prettier-standalone.ts"),
-        "prettier/plugins/yaml": path.resolve(__dirname, "./src/stubs/prettier-plugin.ts"),
-        "prettier/plugins/estree": path.resolve(__dirname, "./src/stubs/prettier-plugin.ts"),
-      },
->>>>>>> theirs
     },
     build: {
       outDir: path.resolve(__dirname, '../boneio/webui/frontend-dist'),
