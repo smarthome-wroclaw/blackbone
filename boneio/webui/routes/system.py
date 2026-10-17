@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from boneio.core.config import ConfigHelper
+from boneio.core.config.secret_masking import collect_secrets, scrub_text
 from boneio.core.config.yaml_util import (
     load_config_from_file,
     update_yaml_field,
@@ -98,13 +99,17 @@ async def get_logs(
             )
             if log_entries:
                 return LogsResponse(
-                    logs=log_entries, has_more=has_more, source="systemd"
+                    logs=_scrub_log_entries(log_entries),
+                    has_more=has_more,
+                    source="systemd",
                 )
 
         log_entries, has_more = get_standalone_logs(limit, before, since, until, grep)
         if log_entries:
             return LogsResponse(
-                logs=log_entries, has_more=has_more, source="standalone"
+                logs=_scrub_log_entries(log_entries),
+                has_more=has_more,
+                source="standalone",
             )
 
         return LogsResponse(
@@ -120,6 +125,47 @@ async def get_logs(
     except Exception as e:
         _LOGGER.warning("Error fetching logs: %s", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+
+def _scrub_log_entries(entries: list) -> list:
+    """Remove configured secrets from log messages.
+
+    A password reaches the journal whenever something logs a connection string
+    or a traceback that happens to carry one, and the log viewer is readable by
+    any signed-in account. The values are known from the configuration, so they
+    can be taken out on the way to the client.
+
+    Never raises: an unreadable configuration must not cost the operator their
+    logs, which are often what they came for. That tolerance hid a defect for
+    a release — the helper was called by a name that does not exist here, so
+    every call raised NameError, was swallowed, and the logs went out
+    unscrubbed. The failure is logged at warning level now: silence is what
+    let it pass.
+
+    Args:
+        entries: Log entries as returned by the log services.
+
+    Returns:
+        The same entries with secret values replaced.
+    """
+    try:
+        config = get_config_helper().get_config()
+        secrets = collect_secrets(config)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Could not collect secrets for log scrubbing: %s", err)
+        return entries
+
+    if not secrets:
+        return entries
+
+    for entry in entries:
+        message = getattr(entry, "message", None)
+        if isinstance(message, str):
+            entry.message = scrub_text(message, secrets)
+        elif isinstance(entry, dict) and isinstance(entry.get("message"), str):
+            entry["message"] = scrub_text(entry["message"], secrets)
+    return entries
 
 
 @router.post("/restart")

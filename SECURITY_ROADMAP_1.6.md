@@ -79,12 +79,47 @@ więc to domyślne hasło w przebraniu.
 
 **Uwaga:** F-08 zostało domknięte już w #1 dla urządzeń z kontem; otwarta zostaje tylko ścieżka urządzenia bez żadnych poświadczeń, czyli stan anonimowy opisany w #2.
 
+### 4. Ochrona sekretów (F-03, część F-12)
+- `GET /api/config` zwraca **placeholder** zamiast hasła MQTT (i każdego innego). Maskowanie zawsze na kopii — parsowany config leży w cache'u współdzielonym z resztą procesu.
+- **Maskowanie samo w sobie byłoby błędem**: formularze ustawień są zasilane tą samą odpowiedzią i odsyłają całą sekcję, więc placeholder zapisany wprost nadpisałby prawdziwe hasło przy pierwszym zapisie czegokolwiek na tej stronie. `PUT` rozwiązuje więc placeholder z tego, co jest zapisane; nowa wartość (także pusta, czyli wyczyszczenie) brana jest dosłownie.
+- Placeholder celowo **nie jest rzędem kropek** — kropki ktoś mógłby wpisać jako hasło i jego wybór zostałby po cichu odrzucony.
+- Logi czyszczone z **konkretnych wartości z configu** (logi to wolny tekst, nie ma klucza do dopasowania). Od najdłuższych, sekrety krótsze niż 4 znaki pomijane. Nigdy nie rzuca wyjątkiem — nieczytelny config nie może kosztować operatora logów.
+
+### 5. Node-RED adminAuth (F-01 — RCE)
+- Node-RED **deleguje uwierzytelnianie do boneIO** zamiast trzymać drugi zestaw poświadczeń: jedna lista kont, brak drugiej implementacji hashowania, reużyta prawdziwa ścieżka logowania razem z rate-limitem z #3.
+- **Tylko admin.** Konto tylko-do-odczytu nie ma czego szukać w edytorze, którego istotą jest wykonywanie kodu.
+- **Fail-closed**: gdy boneIO jest nieosiągalne, odpowiedź brzmi „nie".
+- Nie wymaga nowej paczki — kontener ma już `host.docker.internal`, a obraz Node 22 ma wbudowany `fetch`.
+- Zweryfikowane na żywym sterowniku: admin z dobrym hasłem wpuszczony, admin ze złym odrzucony, **viewer z dobrym hasłem odrzucony**, konto nieistniejące odrzucone, martwy adres → odmowa.
+
+### 6. Ochrona SSRF (F-15)
+Jedno ustalenie, trzy osobne problemy — i wszystkie trzy trzeba było zamknąć osobno:
+- **Dowolny host** → `boneio/core/net/discovery_guard.py` przepuszcza wyłącznie adresy prywatne. Prywatnych **nie blokujemy**, bo tam żyją WLED i ESPHome — blokada zabiłaby funkcję. Odrzucane: loopback (skaner z raportu), link-local (w tym 169.254.169.254), publiczne (sterownik nie ma po co sięgać do internetu), multicast/zarezerwowane. Sprawdzane są **wszystkie** adresy z rozwiązania nazwy, nie pierwszy — inaczej nazwa wskazująca na dwa adresy przeszłaby.
+- **Dowolny port** → lista dozwolonych per protokół (WLED 80/443/8080, ESPHome 6053). Swobodny wybór portu jest tym, co czyni z odkrywania skaner. Nietypowy port: dodanie urządzenia ręcznie.
+- **Echo błędu z góry** → komunikat nigdy nie wraca do klienta, tylko do logu. To on wyciekał banner SSH („Bad status line", „Invalid preamble 0x53"). Każda odmowa brzmi identycznie.
+
+### 7. Ochrona CSRF (F-07)
+- Po #2 CSRF jest **w dużej mierze zamknięte strukturalnie**: token siedzi w nagłówku `Authorization`, nie w ciasteczku, więc formularz cross-site go nie dołączy i dostaje 401.
+- Zostawała dziura dla urządzenia bez uwierzytelniania (`allow_anonymous` / `BONEIO_DEV`) — tam PoC z rebootem działał. Domyka to `CSRFMiddleware`.
+- Sprawdzany jest **tylko `Origin`**: przeglądarka dołącza go dokładnie do żądań cross-site, a curl/skrypt/usługa nie dołączają nic i nie da się ich podstępem zmusić do działania w cudzym imieniu. Ocenianie żądań bez `Origin` zepsułoby każdą integrację, nie chroniąc nikogo.
+- Lista dozwolonych origin to **ta sama, którą zna CORS**, żeby obie nie rozjechały się co do tego, komu się ufa — dzięki temu `pnpm dev` na :5173 dalej działa.
+- Zweryfikowane **poleceniami z raportu**: `create_backup` i `reboot` z `Origin: https://evil.example` → `403`; to samo bez `Origin` → `401`, czyli normalne wymaganie tokenu.
+
+### 8a. Twardnienie kodu aplikacji (F-09, F-16)
+- **F-09 — TOCTOU w `timezone_sudoers.py`.** Nazwa pliku tymczasowego budowana z PID-u była przewidywalna, więc inne lokalne konto mogło ją odgadnąć, podstawić dowiązanie i przechwycić zapis, albo podmienić treść między `visudo -c` a instalacją. Teraz `tempfile.mkstemp()`: `O_EXCL`, tryb 0600, nazwa nie do odgadnięcia.
+- **Trzeci problem, którego raport nie wymienia:** plik lądował w `/etc/sudoers.d/` przez `cp`, a tryb 0440 ustawiał dopiero osobny `chmod`. Między nimi miał złe uprawnienia — a gdyby `chmod` zawiódł, zostałby taki na stałe, w trybie, którego `sudo` nie honoruje, więc reguła po cichu by nie działała. Zastąpione jednym `install -m 0440 -o root -g root`. Sprzątanie pliku tymczasowego przeniesione do `finally`.
+- **F-16 — `!secret` psuł migrację `v4_wled_cache`.** Loader rejestrował tylko `!include`, więc config z `!secret` rzucał „could not determine a constructor", szeroki `except` to łykał i migracja cicho nie robiła nic — **dokładnie u tych, którzy zastosowali się do zaleceń bezpieczeństwa**. Dodany catch-all na dowolny tag (nie tylko `!secret`, żeby nie powtórzyło się przy następnym), ten sam loader dla pliku dołączonego (`remote_devices.yaml` trzyma hasła urządzeń, czyli naturalne miejsce na `!secret`), i głośniejszy komunikat błędu.
+- Zapis pliku idzie **regexem po surowym tekście**, nie przez re-serializację, więc tagi przeżywają nietknięte — sprawdzone.
+- Zweryfikowane na sterowniku scenariuszem z raportu: migracja wykonana, dane wyodrębnione, `!secret` nietknięty, pola WLED usunięte.
+
+**Zostaje w #8 (obraz, `black_debian_images`):** domyślne hasło SSH (F-04 sudo, hasło z obrazu), domyślne MQTT `boneio123` (F-05), certyfikat self-signed i HTTP (F-10), uprawnienia `/etc/mosquitto/passwd` (F-11) oraz throttling SSH przeniesiony z #3.
+
 ## Status
 - [x] 1. Onboarding — **zrobione** (gałąź `feature/onboarding-wizard`, 1.6.0.dev1)
 - [x] 2. Role admin/read-only — **zrobione** (gałąź `feature/rbac-admin-viewer`)
 - [x] 3. Twardnienie logowania — **zrobione w aplikacji** (gałąź `feature/login-hardening`); część SSH przeniesiona do #8
-- [ ] 4. Ochrona sekretów
-- [ ] 5. Node-RED adminAuth
-- [ ] 6. SSRF
-- [ ] 7. CSRF
-- [ ] 8. Twardnienie kodu/systemu
+- [x] 4. Ochrona sekretów — **zrobione**
+- [x] 5. Node-RED adminAuth — **zrobione**
+- [x] 6. SSRF — **zrobione**
+- [x] 7. CSRF — **zrobione**
+- [~] 8. Twardnienie kodu/systemu — **część aplikacyjna zrobiona** (F-09, F-16); obraz (F-04, F-05, F-10, F-11 + SSH z #3) zostaje
