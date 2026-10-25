@@ -231,8 +231,8 @@ const CoverForm: React.FC<CoverFormProps> = ({
                         <span className="label-text font-medium">{t('covers.stop_relay_default_state')}</span>
                       </label>
                       <Select
-                        value={data.stop_relay_default_state || 'off'}
-                        onValueChange={(value) => updateField('stop_relay_default_state', value as 'on' | 'off')}
+                        value={data.stop_relay_default_state ? 'on' : 'off'}
+                        onValueChange={(value) => updateField('stop_relay_default_state', value === 'on')}
                       >
                         <SelectTrigger className="w-full">
                           <SelectValue />

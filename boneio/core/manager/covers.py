@@ -172,8 +172,13 @@ class CoverManager:
                         _cover._open_relay = open_relay
                         _cover._close_relay = close_relay
                         _cover._stop_relay = stop_relay
-                        stop_default_state = str(_config.get("stop_relay_default_state", "off")).lower()
-                        _cover._stop_relay_default_state = stop_default_state if stop_default_state in ("on", "off") else "off"
+                        configured_stop_state = _config.get("stop_relay_default_state", False)
+                        _cover._stop_relay_default_state = (
+                            "on"
+                            if configured_stop_state is True
+                            or str(configured_stop_state).lower() in ("on", "true", "1")
+                            else "off"
+                        )
                         if stop_relay and (
                             old_stop != getattr(stop_relay, "id", None)
                             or old_stop_default_state != _cover._stop_relay_default_state

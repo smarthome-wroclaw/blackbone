@@ -269,7 +269,7 @@ export interface CoverEntity {
   /** Optional relay pulsed when STOP is requested during movement. */
   stop_relay?: string;
   /** Resting state restored after the STOP relay pulse. */
-  stop_relay_default_state?: 'on' | 'off';
+  stop_relay_default_state?: boolean;
   /** STOP relay pulse duration (defaults to 500ms). */
   stop_relay_duration?: number | string;
   /** Open time in milliseconds */

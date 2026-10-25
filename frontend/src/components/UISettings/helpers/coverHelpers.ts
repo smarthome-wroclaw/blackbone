@@ -13,7 +13,7 @@ export interface CoverFormData {
   open_relay?: string;
   close_relay?: string;
   stop_relay?: string;
-  stop_relay_default_state?: 'on' | 'off';
+  stop_relay_default_state?: boolean;
   stop_relay_duration?: string;
   open_time?: string;
   close_time?: string;
@@ -160,7 +160,7 @@ export function buildCoverPayload(data: CoverFormData): CoverFormData {
     delete result.stop_relay_default_state;
     delete result.stop_relay_duration;
   } else if (!result.stop_relay_default_state) {
-    result.stop_relay_default_state = 'off';
+    result.stop_relay_default_state = false;
   }
 
   // Ensure boolean defaults

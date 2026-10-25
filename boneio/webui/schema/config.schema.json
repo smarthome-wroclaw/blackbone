@@ -8114,14 +8114,10 @@
             "title": "Stop relay"
           },
           "stop_relay_default_state": {
-            "type": "string",
-            "enum": [
-              "on",
-              "off"
-            ],
-            "default": "off",
-            "description": "Resting state of the stop relay. The relay is switched to the opposite state for the stop pulse.",
-            "title": "Stop relay resting state"
+            "type": "boolean",
+            "default": false,
+            "description": "Whether the stop relay is on in its resting state.",
+            "title": "Stop relay default state"
           },
           "stop_relay_duration": {
             "type": [

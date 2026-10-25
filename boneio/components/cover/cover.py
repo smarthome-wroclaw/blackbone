@@ -172,14 +172,12 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         self._close_relay = close_relay
         self._stop_relay = kwargs.pop("stop_relay", None)
         self._stop_relay_duration = kwargs.pop("stop_relay_duration", None)
-        self._stop_relay_default_state = str(kwargs.pop("stop_relay_default_state", OFF)).lower()
-        if self._stop_relay_default_state not in (ON.lower(), OFF.lower()):
-            _LOGGER.warning(
-                "Invalid stop_relay_default_state %r for cover %s; using off",
-                self._stop_relay_default_state,
-                id,
-            )
-            self._stop_relay_default_state = OFF.lower()
+        configured_stop_state = kwargs.pop("stop_relay_default_state", False)
+        self._stop_relay_default_state = (
+            ON.lower()
+            if configured_stop_state is True or str(configured_stop_state).lower() in (ON.lower(), "true", "1")
+            else OFF.lower()
+        )
         if self._stop_relay and self._stop_relay_duration is None:
             self._stop_relay_duration = TimePeriod(milliseconds=500)
         if self._stop_relay:
