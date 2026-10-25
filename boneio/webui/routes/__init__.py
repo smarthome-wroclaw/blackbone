@@ -12,7 +12,7 @@ _ROUTERS = {
     "addons_router": "addons",
     "accounts_router": "accounts",
     "auth_router": "auth",
-    "caddy_router": "caddy",
+    "caddy_router": "proxy",
     "can_router": "can",
     "config_router": "config",
     "covers_router": "covers",
