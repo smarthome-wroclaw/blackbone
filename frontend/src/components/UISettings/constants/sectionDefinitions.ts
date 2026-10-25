@@ -82,8 +82,8 @@ export const RELOAD_SECTIONS: SectionDefinition[] = [
  */
 export const RESTART_SECTIONS: SectionDefinition[] = [
   { name: 'boneio', icon: '🔧', translationKey: 'sections.boneio' },
-  { name: 'mqtt', icon: '📡', translationKey: 'sections.mqtt' },
-  { name: 'lox_udp', icon: '📨', translationKey: 'sections.lox_udp' },
+  { name: 'mqtt', icon: '📡', translationKey: 'sections.mqtt', group: 'connections', badge: 'restart' },
+  { name: 'lox_udp', icon: '📨', translationKey: 'sections.lox_udp', group: 'connections', badge: 'restart' },
   { name: 'web', icon: '🌐', translationKey: 'sections.web', group: 'web', badge: 'restart' },
   { name: 'modbus', icon: '🔌', translationKey: 'sections.modbus' },
   { name: 'can', icon: '🔗', translationKey: 'sections.can' },

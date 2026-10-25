@@ -799,7 +799,7 @@
     "logger": "Logger",
     "boneio": "boneIO",
     "mqtt": "MQTT",
-    "lox_udp": "Lox UDP",
+    "lox_udp": "Loxone (UDP)",
     "web": "Web Server",
     "modbus": "Modbus",
     "can": "CAN Bus",

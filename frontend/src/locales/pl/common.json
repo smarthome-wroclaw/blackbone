@@ -751,7 +751,7 @@
     "logger": "Logger",
     "boneio": "boneIO",
     "mqtt": "MQTT",
-    "lox_udp": "Lox UDP",
+    "lox_udp": "Loxone (UDP)",
     "web": "Serwer Web",
     "modbus": "Modbus",
     "can": "Magistrala CAN",

@@ -503,16 +503,41 @@ class MQTTClient(MessageBus):
                 publish_task = asyncio.create_task(self._handle_publish())
                 tasks.add(publish_task)
 
-            topics = (
-                self._topics
-                + list(self._mqtt_energy_listeners.keys())
-                + list(self._topic_discovery_sessions.keys())
-                + self._discovery_topics
-            )
-            await self.subscribe(topics=topics)
+                # Messages that doesn't match a filter will get logged and handled here.
+                messages_task = asyncio.create_task(
+                    self.handle_messages(self.asyncio_client.messages, manager.receive_message)
+                )
+                if not self._connection_established:
+                    self._connection_established = True
+                    reconnect_task = asyncio.create_task(
+                        manager.reconnect_callback()
+                    )
+                    tasks.add(reconnect_task)
+                tasks.add(messages_task)
 
-            # Wait for everything to complete (or fail due to, e.g., network errors).
-            await asyncio.gather(*tasks)
+                topics = self._topics + list(self._mqtt_energy_listeners.keys()) + self._discovery_topics
+                await self.subscribe(topics=topics)
+                self._subscribed.set()
+                # Connected: the next outage starts the backoff from scratch
+                # instead of waiting as long as the worst one before it.
+                self.reconnect_interval = 1
+
+                # Wait for everything to complete (or fail due to, e.g., network errors).
+                await asyncio.gather(*tasks)
+        finally:
+            # asyncio.gather() does NOT cancel sibling tasks when one of them raises
+            # (e.g. messages_task raising MqttError on disconnect), so without this,
+            # publish_task/reconnect_task kept running as orphans after every
+            # reconnect. An orphaned publish_task would then race the next
+            # cycle's publish_task for the same publish_queue, calling publish()
+            # against a client that isn't connected yet ("client is not currently
+            # connected") even once the real connection was healthy again.
+            self.publish_queue.set_connected(False)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     @override

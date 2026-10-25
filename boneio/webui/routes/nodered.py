@@ -796,19 +796,19 @@ async def _fetch_docker_hub_tags_async() -> list[dict[str, str]]:
 async def check_update() -> UpdateCheckResponse:
     """Check if Node-RED update is available.
 
-    # Determine if we are using minimal or standard variant
-    is_minimal = "-minimal" in current_version
-    
-    # Strip suffix to get version part (e.g. 4.1.2-22-minimal -> 4.1.2)
-    # The tag pattern on docker hub is often like 4.0.2-20-minimal or 4.0.2
-    
-    tags = await _fetch_docker_hub_tags_async()
-    if not tags:
-        return UpdateCheckResponse(
-            current_version=current_version,
-            latest_version=current_version,
-            update_available=False,
-        )
+    Only a tag of the same flavour qualifies: the same Node.js major and the
+    same minimal-or-not, so an update never swaps the runtime under the flows,
+    and only one with an image for this machine.
+    """
+    current_version = await asyncio.to_thread(_get_installed_version)
+    no_update = UpdateCheckResponse(
+        current_version=current_version,
+        latest_version=current_version,
+        update_available=False,
+    )
+    current = _VERSION_TAG_RE.match(current_version)
+    if current is None:
+        return no_update
 
     tags = await _fetch_docker_hub_tags_async()
 
