@@ -29,13 +29,15 @@ the workflows only verify them (``--check`` needs the public key alone), so a
 compromised release pipeline cannot mint a plan that runs as root on every
 controller in the field.
 
-Because the manifest names the release it belongs to, bumping the version
-invalidates it even when no migration changed. Release order:
+The manifest's release is the monotonic migration trust release, separate from
+the BlackBone package version. Bump it when shipping a new signed plan set.
+Release order:
 
-    1. bump boneio/version.py
-    2. generate_signed_plans.py --key ~/.config/boneio/migration-signing-key.pem
-    3. commit the version bump and boneio/migrations/plans/ together
-    4. tag vX.Y.Z
+    1. bump __migration_release__ in boneio/version.py
+    2. run scripts/generate_manifest.py if migration assets changed
+    3. generate_signed_plans.py --key ~/.config/boneio/migration-signing-key.pem
+    4. commit the version and boneio/migrations/plans/ together
+    5. tag the BlackBone package release
 
 Skipping step 2 cannot ship a stale manifest: ``--check`` runs in test.yml and
 the publish job depends on it.

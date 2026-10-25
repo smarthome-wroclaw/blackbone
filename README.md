@@ -61,7 +61,11 @@ curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/in
 
 The installer is interactive: it auto-detects your existing virtual environment, offers to back
 up your current configuration and installed app before touching anything, installs BlackBone,
-and restarts the `boneio` service. Your existing config files are left in place.
+and restarts the `boneio` service. Your existing config files are left in place. It also backs up
+the existing system migration trust files, then installs this fork's migration helper and public
+trust anchors as root over SSH. This one-time bootstrap lets the fork sign its own migrations;
+its private keys remain off the controller. The rollback directory printed by the installer
+contains the old trust files as well as any selected app/configuration backups.
 
 ### Controllers running a pre-0.1 BlackBone build
 
@@ -95,6 +99,11 @@ test -n "$APP_BACKUP" || { echo "Application backup not found"; exit 1; }
 sudo systemctl stop boneio
 "$VENV_DIR/bin/pip" uninstall --yes blackbone
 tar -C "$VENV_DIR" -xzf "$APP_BACKUP"
+TRUST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'migration_trust_*.tar.gz' -print -quit)"
+if [ -n "$TRUST_BACKUP" ]; then
+  sudo tar -C / -xzf "$TRUST_BACKUP"
+  sudo systemctl daemon-reload
+fi
 ```
 
 The installer does not change your YAML configuration. If you changed it after migration and also
@@ -125,6 +134,11 @@ VENV_DIR="$HOME/boneio/venv"
 sudo systemctl stop boneio
 "$VENV_DIR/bin/pip" uninstall --yes blackbone
 "$VENV_DIR/bin/pip" install --upgrade --force-reinstall boneio
+TRUST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'migration_trust_*.tar.gz' -print -quit)"
+if [ -n "$TRUST_BACKUP" ]; then
+  sudo tar -C / -xzf "$TRUST_BACKUP"
+  sudo systemctl daemon-reload
+fi
 sudo systemctl start boneio
 sudo systemctl is-active boneio
 ```
@@ -133,6 +147,19 @@ To install a specific official release, use `boneio==VERSION` instead of `boneio
 [official boneIO releases](https://github.com/boneIO-eu/app_black/releases) and
 [update instructions](https://boneio.eu/en/docs/black/products/black_32x10a/software_setup/update-controller)
 before choosing a version.
+
+### Signing system migrations
+
+BlackBone has its own Ed25519 migration trust anchors. The release private key is kept at
+`~/.config/boneio/migration-signing-key.pem`; keep the recovery private key
+(`~/.config/boneio/migration-recovery-key.pem`) in an encrypted offline backup. Never commit
+either private key. A controller must be bootstrapped over SSH with this fork's installer before
+it can accept plans signed by these keys. For a new plan set, add migration IDs after the latest
+existing one (currently `1.6.46`), advance `__migration_release__` in `boneio/version.py`, refresh
+`boneio/migrations/assets/MANIFEST.sha256` if assets changed, then run
+`python3 scripts/generate_signed_plans.py --key ~/.config/boneio/migration-signing-key.pem`.
+Verify with `python3 scripts/generate_signed_plans.py --check` before publishing.
+The CI workflow runs this check for every pull request.
 
 ## Contributing
 
@@ -198,6 +225,10 @@ curl -fsSL https://raw.githubusercontent.com/smarthome-wroclaw/blackbone/main/in
 Instalator działa interaktywnie: sam wykrywa istniejące środowisko wirtualne, proponuje kopię
 zapasową aktualnej konfiguracji i zainstalowanej aplikacji zanim cokolwiek zmieni, instaluje
 BlackBone i restartuje usługę `boneio`. Istniejące pliki konfiguracyjne pozostają nietknięte.
+Tworzy też kopię obecnych systemowych plików zaufania migracji, a następnie przez SSH instaluje
+helper migracji i publiczne klucze tego forka jako root. Ten jednorazowy bootstrap umożliwia
+podpisywanie własnych migracji; klucze prywatne nie trafiają na sterownik. Katalog kopii podany
+przez instalator zawiera stare pliki zaufania oraz wybrane kopie aplikacji i konfiguracji.
 
 #### Sterowniki z buildem BlackBone sprzed 0.1
 
@@ -231,6 +262,11 @@ test -n "$APP_BACKUP" || { echo "Nie znaleziono kopii aplikacji"; exit 1; }
 sudo systemctl stop boneio
 "$VENV_DIR/bin/pip" uninstall --yes blackbone
 tar -C "$VENV_DIR" -xzf "$APP_BACKUP"
+TRUST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'migration_trust_*.tar.gz' -print -quit)"
+if [ -n "$TRUST_BACKUP" ]; then
+  sudo tar -C / -xzf "$TRUST_BACKUP"
+  sudo systemctl daemon-reload
+fi
 ```
 
 Instalator nie zmienia konfiguracji YAML. Jeśli konfiguracja została zmieniona po migracji i
@@ -261,6 +297,11 @@ VENV_DIR="$HOME/boneio/venv"
 sudo systemctl stop boneio
 "$VENV_DIR/bin/pip" uninstall --yes blackbone
 "$VENV_DIR/bin/pip" install --upgrade --force-reinstall boneio
+TRUST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'migration_trust_*.tar.gz' -print -quit)"
+if [ -n "$TRUST_BACKUP" ]; then
+  sudo tar -C / -xzf "$TRUST_BACKUP"
+  sudo systemctl daemon-reload
+fi
 sudo systemctl start boneio
 sudo systemctl is-active boneio
 ```
@@ -268,6 +309,20 @@ sudo systemctl is-active boneio
 Aby zainstalować wybrane oficjalne wydanie, użyj `boneio==WERSJA` zamiast `boneio`. Przed wyborem
 wersji sprawdź [oficjalne wydania boneIO](https://github.com/boneIO-eu/app_black/releases) oraz
 [instrukcję aktualizacji](https://boneio.eu/pl/docs/black/products/black_32x10a/software_setup/update-controller).
+
+### Podpisywanie migracji systemowych
+
+BlackBone ma własne kotwice zaufania Ed25519 dla migracji. Prywatny klucz wydawniczy jest w
+`~/.config/boneio/migration-signing-key.pem`; klucz odzyskiwania
+(`~/.config/boneio/migration-recovery-key.pem`) przechowuj w zaszyfrowanej kopii offline. Nie
+commituj żadnego klucza prywatnego. Sterownik musi jednorazowo przejść bootstrap przez SSH
+instalatorem tego forka, zanim zaakceptuje plany podpisane tymi kluczami. Przy nowym zestawie
+planów dodaj identyfikatory po najnowszym istniejącym (obecnie `1.6.46`), zwiększ
+`__migration_release__` w `boneio/version.py`, odśwież
+`boneio/migrations/assets/MANIFEST.sha256`, jeśli zmieniły się zasoby, a następnie uruchom
+`python3 scripts/generate_signed_plans.py --key ~/.config/boneio/migration-signing-key.pem`.
+Przed publikacją sprawdź wynik przez `python3 scripts/generate_signed_plans.py --check`.
+Workflow CI wykonuje tę kontrolę dla każdego pull requesta.
 
 ### Kontrybuowanie
 

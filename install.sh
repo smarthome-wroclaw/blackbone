@@ -92,6 +92,107 @@ backup_current_app() {
   success "Application backup created: ${archive}"
 }
 
+backup_migration_trust() {
+  local archive="$1"
+  local path
+  local -a existing_paths=()
+  local -a trust_paths=(
+    etc/boneio/migrations.pem
+    etc/boneio/migrations-recovery.pem
+    usr/lib/boneio/trusted
+    usr/lib/boneio/proxy-config
+    usr/sbin/boneio-migrate
+    usr/sbin/boneio-migrate-v2
+    usr/sbin/boneio-helpers-heal
+    usr/sbin/boneio-containers
+    usr/sbin/boneio-system
+    etc/sudoers.d/boneio-migrate
+    etc/sudoers.d/boneio-helpers
+    etc/systemd/system/boneio-helpers-heal.service
+  )
+
+  for path in "${trust_paths[@]}"; do
+    if "${SUDO[@]}" test -e "/${path}"; then
+      existing_paths+=("${path}")
+    fi
+  done
+
+  if [[ ${#existing_paths[@]} -eq 0 ]]; then
+    info "No existing migration trust files to back up."
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$archive")"
+  "${SUDO[@]}" tar -C / -czf "$archive" "${existing_paths[@]}"
+  "${SUDO[@]}" chown "$(id -u):$(id -g)" "$archive"
+  chmod 600 "$archive"
+  success "Previous migration trust state backed up: ${archive}"
+}
+
+install_fork_migration_trust() {
+  local assets_dir="$1"
+  local name
+
+  [[ -r "${assets_dir}/migrations.pem" ]] || fail "The fork release key is missing from ${assets_dir}."
+  [[ -r "${assets_dir}/migrations-recovery.pem" ]] || fail "The fork recovery key is missing from ${assets_dir}."
+  openssl pkey -pubin -in "${assets_dir}/migrations.pem" -text -noout 2>/dev/null \
+    | grep -q ED25519 || fail "The fork release key is not a valid Ed25519 public key."
+  openssl pkey -pubin -in "${assets_dir}/migrations-recovery.pem" -text -noout 2>/dev/null \
+    | grep -q ED25519 || fail "The fork recovery key is not a valid Ed25519 public key."
+  if cmp -s "${assets_dir}/migrations.pem" "${assets_dir}/migrations-recovery.pem"; then
+    fail "The fork release and recovery keys must be different."
+  fi
+
+  "${SUDO[@]}" install -d -o root -g root -m 0755 \
+    /etc/boneio /usr/lib/boneio/trusted /usr/lib/boneio
+
+  for name in migrations.pem migrations-recovery.pem; do
+    "${SUDO[@]}" install -o root -g root -m 0444 \
+      "${assets_dir}/${name}" "/etc/boneio/${name}"
+    "${SUDO[@]}" install -o root -g root -m 0444 \
+      "${assets_dir}/${name}" "/usr/lib/boneio/trusted/${name}"
+  done
+
+  for name in boneio-migrate-v2 boneio-containers boneio-system boneio-helpers-heal; do
+    "${SUDO[@]}" install -o root -g root -m 0755 \
+      "${assets_dir}/helpers/${name}" "/usr/lib/boneio/trusted/${name}"
+    "${SUDO[@]}" install -o root -g root -m 0755 \
+      "${assets_dir}/helpers/${name}" "/usr/sbin/${name}"
+  done
+
+  "${SUDO[@]}" install -o root -g root -m 0755 \
+    "${assets_dir}/helpers/boneio-proxy-config" \
+    /usr/lib/boneio/trusted/boneio-proxy-config
+  "${SUDO[@]}" install -o root -g root -m 0755 \
+    "${assets_dir}/helpers/boneio-proxy-config" /usr/lib/boneio/proxy-config
+
+  "${SUDO[@]}" install -o root -g root -m 0644 \
+    "${assets_dir}/docker/nodered/docker-compose.yaml" \
+    /usr/lib/boneio/trusted/docker-compose.yaml
+  "${SUDO[@]}" install -o root -g root -m 0644 \
+    "${assets_dir}/docker/nodered/docker-compose-cloud.yaml" \
+    /usr/lib/boneio/trusted/docker-compose-cloud.yaml
+
+  "${SUDO[@]}" visudo -cf "${assets_dir}/sudoers/boneio-helpers" \
+    || fail "The fork's privileged helper rules failed validation."
+  "${SUDO[@]}" install -o root -g root -m 0440 \
+    "${assets_dir}/sudoers/boneio-helpers" \
+    /usr/lib/boneio/trusted/sudoers-boneio-helpers
+  "${SUDO[@]}" install -o root -g root -m 0440 \
+    "${assets_dir}/sudoers/boneio-helpers" /etc/sudoers.d/boneio-helpers
+
+  "${SUDO[@]}" install -o root -g root -m 0644 \
+    "${assets_dir}/systemd/boneio-helpers-heal.service" \
+    /etc/systemd/system/boneio-helpers-heal.service
+  "${SUDO[@]}" systemctl daemon-reload
+  "${SUDO[@]}" systemctl enable boneio-helpers-heal.service
+  "${SUDO[@]}" /usr/sbin/boneio-helpers-heal
+  "${SUDO[@]}" /usr/sbin/boneio-migrate-v2 --selftest \
+    || fail "The fork's privileged migration helper failed its self-test."
+
+  success "Migration helper and trust anchors now use this BlackBone fork."
+}
+
 if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
   fail "This installer requires an interactive terminal. Run it from an SSH session."
 fi
@@ -132,15 +233,15 @@ if ask_yes_no "Create a backup of the currently installed application?"; then
   backup_app=true
 fi
 
-if [[ $backup_config == true || $backup_app == true ]]; then
-  mkdir -p "$BACKUP_ROOT"
-fi
+mkdir -p "$BACKUP_ROOT"
 if [[ $backup_config == true ]]; then
   backup_configuration "${BACKUP_ROOT}/configuration_${TIMESTAMP}.tar.gz"
 fi
 if [[ $backup_app == true ]]; then
   backup_current_app "${BACKUP_ROOT}/stock_black_app_${current_version}_${TIMESTAMP}.tar.gz"
 fi
+
+backup_migration_trust "${BACKUP_ROOT}/migration_trust_${TIMESTAMP}.tar.gz"
 
 if "$PIP_BIN" show "$LEGACY_PACKAGE_NAME" >/dev/null 2>&1; then
   info "Removing the legacy ${LEGACY_PACKAGE_NAME} distribution..."
@@ -154,6 +255,12 @@ installed_version="$($PYTHON_BIN -c "$VERIFY_CODE")" \
   || fail "The package was installed, but application verification failed."
 success "Installed ${PACKAGE_NAME} ${installed_version}."
 
+info "Stopping the service before replacing the migration trust anchors..."
+"${SUDO[@]}" systemctl stop "$SERVICE_NAME"
+
+migration_assets="$($PYTHON_BIN -c 'from pathlib import Path; import boneio; print(Path(boneio.__file__).parent / "migrations" / "assets")')"
+install_fork_migration_trust "$migration_assets"
+
 info "Restarting the ${SERVICE_NAME} service..."
 "${SUDO[@]}" systemctl restart "$SERVICE_NAME"
 sleep 3
@@ -163,6 +270,4 @@ if ! "${SUDO[@]}" systemctl is-active --quiet "$SERVICE_NAME"; then
 fi
 
 success "Migration complete. The ${SERVICE_NAME} service is running."
-if [[ $backup_config == true || $backup_app == true ]]; then
-  info "Backups are stored in: ${BACKUP_ROOT}"
-fi
+info "Rollback data, including any previous migration trust state, is stored in: ${BACKUP_ROOT}"

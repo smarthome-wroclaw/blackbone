@@ -47,6 +47,17 @@ def test_installer_removes_legacy_distribution_before_installing_blackbone():
     assert content.index(uninstall) < content.index(install)
 
 
+def test_installer_repins_migration_trust_before_restarting_service():
+    content = INSTALLER.read_text(encoding="utf-8")
+
+    assert "backup_migration_trust" in content
+    assert "install_fork_migration_trust \"$migration_assets\"" in content
+    assert "--selftest" in content
+    assert content.index("install_fork_migration_trust \"$migration_assets\"") < content.index(
+        'systemctl restart "$SERVICE_NAME"'
+    )
+
+
 def test_installer_verification_code_is_valid_python():
     content = INSTALLER.read_text(encoding="utf-8")
     match = re.search(r"^readonly VERIFY_CODE=(.+)$", content, re.MULTILINE)
