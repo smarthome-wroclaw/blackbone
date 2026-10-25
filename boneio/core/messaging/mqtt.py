@@ -79,6 +79,7 @@ class MQTTClient(MessageBus):
         self._subscribed = asyncio.Event()
         self.publish_queue: UniqueQueue = UniqueQueue()
         self._mqtt_energy_listeners: dict[str, Callable[..., Awaitable[None]]] = {}
+        self._topic_discovery_sessions: dict[str, list[set[str]]] = {}
         # Listeners that are told whether a message is a retained replay.
         self._retain_aware_listeners: set[str] = set()
         self._discovery_topics = (
@@ -238,6 +239,29 @@ class MQTTClient(MessageBus):
         del self._mqtt_energy_listeners[topic]
         self._retain_aware_listeners.discard(topic)
 
+    async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
+        """Temporarily subscribe to a filter and collect concrete topic names."""
+        discovered: set[str] = set()
+        sessions = self._topic_discovery_sessions.setdefault(topic_filter, [])
+        first_session = not sessions
+        sessions.append(discovered)
+        try:
+            persistent = topic_filter in self._topics or topic_filter in self._mqtt_energy_listeners or topic_filter in self._discovery_topics
+            if self._connection_established and first_session and not persistent:
+                await self.subscribe(topics=[topic_filter])
+            await asyncio.sleep(timeout)
+        finally:
+            sessions.remove(discovered)
+            if not sessions:
+                self._topic_discovery_sessions.pop(topic_filter, None)
+                persistent = topic_filter in self._topics or topic_filter in self._mqtt_energy_listeners or topic_filter in self._discovery_topics
+                if self._connection_established and not persistent:
+                    try:
+                        await self.unsubscribe([topic_filter])
+                    except MqttError as exc:
+                        _LOGGER.warning("Failed to unsubscribe MQTT topic discovery filter %s: %s", topic_filter, exc)
+        return sorted(discovered)
+
     async def unsubscribe(
         self,
         topics: list[str],
@@ -260,7 +284,7 @@ class MQTTClient(MessageBus):
         qos: int = 0,
     ) -> None:
         """Send a message from the manager options.
-        
+
         Args:
             topic: MQTT topic
             payload: Message payload (will be JSON-encoded if dict, None becomes empty bytes)
@@ -281,7 +305,7 @@ class MQTTClient(MessageBus):
             encoded_payload = str(payload)
         else:
             encoded_payload = payload
-        
+
         message = MQTTMessageSend(
             topic=topic,
             payload=encoded_payload,
@@ -545,6 +569,13 @@ class MQTTClient(MessageBus):
                 )
                 continue
             callback_start = True
+            topic_name = str(message.topic)
+            for topic_filter, sessions in list(self._topic_discovery_sessions.items()):
+                if message.topic.matches(topic_filter):
+                    for session in sessions:
+                        session.add(topic_name)
+                    if not any(message.topic.matches(persistent) for persistent in self._topics):
+                        callback_start = False
             for discovery_topic in self._discovery_topics:
                 if message.topic.matches(discovery_topic):
                     callback_start = False

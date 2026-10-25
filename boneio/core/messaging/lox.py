@@ -11,6 +11,7 @@ between BoneIO and a Loxone Miniserver:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import socket
@@ -245,7 +246,14 @@ class LoxUDPClient(MessageBus):
             return
 
         # Extract state value from payload
-        state_value = self._extract_state_value(payload)
+        if suffix == "pos":
+            try:
+                position_data = json.loads(payload) if isinstance(payload, str) else payload
+            except (TypeError, ValueError):
+                position_data = None
+            state_value = str(position_data["position"]) if isinstance(position_data, dict) and "position" in position_data else self._extract_state_value(payload)
+        else:
+            state_value = self._extract_state_value(payload)
         if not state_value:
             return
 
