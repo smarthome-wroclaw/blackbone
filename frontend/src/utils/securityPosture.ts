@@ -1,0 +1,134 @@
+/**
+ * The decisions the security UI makes, kept out of the components.
+ *
+ * Three of them are worth pinning down: where a check's Fix button goes,
+ * which text wins when the panel has no translation for a check, and whether
+ * the prompt after an update appears at all. Each is a rule that can be wrong
+ * in a way nobody notices — a Fix button leading nowhere, a dotted key shown
+ * as a sentence, a notice that either never appears or appears every time.
+ *
+ * The frontend has no DOM in its test environment, so a rule that lives inside
+ * a component is a rule that is not tested.
+ */
+import type { SecurityCheck, SecurityPosture } from '../hooks/useSecurityPosture';
+
+/**
+ * The route that fixes a check, or null when there is no control for it.
+ *
+ * The backend names a destination rather than a URL: a bare name is a
+ * Settings section, `system:<anchor>` is a spot on the System page. Keeping
+ * the mapping here means a new check needs no frontend release to be
+ * actionable, as long as it points at somewhere that already exists.
+ *
+ * Pass `currentRoute` to suppress a button that leads where the reader already
+ * is — some checks are fixed by a control on this very page, and a Fix button
+ * that does nothing teaches people the buttons do nothing.
+ */
+export function fixRoute(
+  check: Pick<SecurityCheck, 'settings_section'>,
+  currentRoute?: string,
+): string | null {
+  const target = check.settings_section;
+  if (!target) return null;
+  const route = target.startsWith('system:')
+    ? `/system#${target.slice('system:'.length)}`
+    : `/settings/${target}`;
+  return route === currentRoute ? null : route;
+}
+
+/**
+ * Translated text for a check, falling back to what the backend said.
+ *
+ * The backend is the source of truth and writes in English; the panel
+ * translates by check id. A check this bundle has never heard of — newer
+ * backend, older frontend — then still reads as a sentence rather than a
+ * dotted key, because `t` returns the key itself when there is no translation.
+ *
+ * A check whose wording depends on the device carries a `variant`, and the
+ * variant's key is tried first. Keying by id alone meant one translated
+ * sentence per check: the certificate check has four states, and in Polish all
+ * four said "enable cloud registration" — including on a device whose owner
+ * had declined it. An untranslated variant falls through to the plain field
+ * rather than to the key, so the worst case is the old wording, never a dotted
+ * string on screen.
+ */
+export function checkText(
+  t: (key: string) => string,
+  id: string,
+  field: string,
+  fallback: string,
+  variant?: string,
+): string {
+  const lookup = (key: string): string | null => {
+    const value = t(key);
+    return value === key || !value ? null : value;
+  };
+  const specific = variant ? lookup(`security.checks.${id}.${field}_${variant}`) : null;
+  return specific ?? lookup(`security.checks.${id}.${field}`) ?? fallback;
+}
+
+export interface PromptDecision {
+  show: boolean;
+  /** True when a previous version was recorded, so "updated to X" is truthful. */
+  knownUpgrade: boolean;
+}
+
+/**
+ * Whether the post-update security prompt should be on screen.
+ *
+ * It appears for an administrator, once per version, and only when something
+ * actionable is outstanding — interrupting someone to say everything is fine
+ * is how the next notice gets dismissed unread, and the INFO advice applies
+ * to nearly every device, so it would fire for everyone forever.
+ *
+ * With no recorded version there is no evidence an update happened; this
+ * browser may simply never have been here. The prompt still appears, because
+ * a device that has been running since 1.5 is exactly the one that needs it,
+ * but `knownUpgrade` tells the caller not to claim a version change it cannot
+ * demonstrate.
+ */
+export function promptDecision(input: {
+  isAdmin: boolean;
+  version: string | null;
+  seenVersion: string | null;
+  posture: SecurityPosture | null;
+  dismissed: boolean;
+  /**
+   * Whether the first-run wizard is still on screen.
+   *
+   * The wizard adopts a token the moment it creates the account, so from the
+   * second step onwards an administrator is signed in and everything gated on
+   * that starts firing — over a wizard that is still running. Whatever this
+   * has to say keeps until the wizard is done, and the wizard reloads the page
+   * when it finishes, so nothing is lost by waiting.
+   */
+  onboarding?: boolean;
+  /**
+   * When a "remind me tomorrow" runs out, as epoch milliseconds.
+   *
+   * Separate from `seenVersion`, which silences the prompt for a whole
+   * release. Somebody who is in the middle of something wants to be asked
+   * again, and had only one button that meant never.
+   */
+  snoozedUntil?: number | null;
+  /** Now, injected so the decision stays a pure function. */
+  now?: number;
+}): PromptDecision {
+  const { isAdmin, version, seenVersion, posture, dismissed, onboarding } = input;
+  const knownUpgrade = Boolean(seenVersion) && seenVersion !== version;
+
+  if (onboarding) return { show: false, knownUpgrade };
+  if (!isAdmin || !version || !posture || dismissed) return { show: false, knownUpgrade };
+  // A snooze from the future means someone asked not to be asked yet. A stored
+  // value that is not a usable number is ignored rather than trusted: the
+  // failure that matters is hiding the prompt forever, not showing it once
+  // more than asked.
+  const snoozedUntil = input.snoozedUntil;
+  if (typeof snoozedUntil === 'number' && Number.isFinite(snoozedUntil)) {
+    if ((input.now ?? Date.now()) < snoozedUntil) return { show: false, knownUpgrade };
+  }
+  if (posture.summary.actionable === 0) return { show: false, knownUpgrade };
+  if (seenVersion === version) return { show: false, knownUpgrade };
+
+  return { show: true, knownUpgrade };
+}

@@ -13,12 +13,13 @@ BRIGHTNESS = "brightness"
 SET_BRIGHTNESS = "set_brightness"
 ENABLED = "enabled"
 OUTPUT = "output"
+VIRTUAL_SWITCH = "virtual_switch"
+SCHEDULE = "schedule"
 PIN = "pin"
 ID = "id"
 KIND = "kind"
 GPIO = "gpio"
 PCA = "pca"
-GPIO_MODE = "gpio_mode"
 ACTIONS = "actions"
 ACTION = "action"
 OUTPUT_OVER_MQTT = "output_over_mqtt"
@@ -87,6 +88,9 @@ TRIPLE = "triple"
 LONG = "long"
 PRESSED = "pressed"
 RELEASED = "released"
+# Longest GPIO debounce the panel accepts. Past this a press feels lost; a
+# longer value already in a config still loads, with a warning in the log.
+BOUNCE_TIME_MAX_MS = 1000
 
 
 # MQTT CONST
@@ -97,6 +101,14 @@ HOST = "host"
 USERNAME = "username"
 PASSWORD = "password"
 PORT = "port"
+
+#: The port the device's built-in reverse proxy publishes HTTPS on.
+#:
+#: Set in docker-compose.yaml as HTTPS_PORT and defaulted there too; this is
+#: the same number, for the parts of the application that need to name the
+#: proxy without reading the compose file. It lives here rather than beside the
+#: web server so that core can use it without importing the web layer.
+DEFAULT_PROXY_PORT = 8443
 ONLINE = "online"
 OFFLINE = "offline"
 TOPIC = "topic"
@@ -185,6 +197,7 @@ cover_actions = {
     "TOGGLE_OPEN": "toggle_open",
     "TOGGLE_CLOSE": "toggle_close",
     "SMART_TOGGLE": "smart_toggle",
+    "SET_POSITION": "set_cover_position",
     "TILT": "set_tilt",
     "TILT_OPEN": "tilt_open",
     "TILT_CLOSE": "tilt_close",

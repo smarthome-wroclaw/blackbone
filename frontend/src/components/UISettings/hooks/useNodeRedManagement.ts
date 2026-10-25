@@ -44,12 +44,15 @@ export const useNodeRedManagement = () => {
   const [isRestoringBackup, setIsRestoringBackup] = useState(false);
   const [isUploadingRestore, setIsUploadingRestore] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [updateSucceeded, setUpdateSucceeded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
-      const { data } = await axios.get<NodeRedStatus>('/api/nodered/status');
+      // The container check is a privileged helper call, 2-5 s on a
+      // BeagleBone - past the default timeout, which then read as "stopped".
+      const { data } = await axios.get<NodeRedStatus>('/api/nodered/status', { timeout: 30_000 });
       setStatus(data);
     } catch (err) {
       console.error('Failed to fetch Node-RED status:', err);
@@ -235,6 +238,7 @@ export const useNodeRedManagement = () => {
 
   const performUpdate = useCallback(async (version?: string) => {
     setIsUpdating(true);
+    setUpdateSucceeded(false);
     setError(null);
     try {
       const params = version ? `?target_version=${encodeURIComponent(version)}` : '';
@@ -257,6 +261,7 @@ export const useNodeRedManagement = () => {
         if (progress.status === 'success') {
           clearInterval(interval);
           setIsUpdating(false);
+          setUpdateSucceeded(true);
           await fetchStatus();
           await fetchBackups();
           await checkUpdates();
@@ -293,6 +298,7 @@ export const useNodeRedManagement = () => {
     isRestoringBackup,
     isUploadingRestore,
     isUpdating,
+    updateSucceeded,
     error,
     setError,
     fetchStatus,

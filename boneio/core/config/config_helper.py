@@ -3,8 +3,8 @@ Module to provide basic config options.
 """
 from __future__ import annotations
 
+import copy
 import logging
-from _collections_abc import dict_values
 from typing import TYPE_CHECKING, Any
 import time as _time
 
@@ -15,22 +15,36 @@ from boneio.const import (
     ALARM_CONTROL_PANEL,
     BINARY_SENSOR,
     BONEIO,
+    DEFAULT_PROXY_PORT,
+    IP,
     BUTTON,
     CLIMATE,
     COVER,
     EVENT_ENTITY,
     HOMEASSISTANT,
     LIGHT,
+    NONE,
     NUMERIC,
+    OUTPUT,
     SELECT,
     SENSOR,
     SWITCH,
     TEXT_SENSOR,
     VALVE,
 )
+from boneio.core.config.yaml_util import (
+    load_config_from_file,
+    load_yaml_file,
+    merge_board_config,
+    strip_default_values,
+)
 from boneio.core.system import get_serial_from_mac
+from boneio.exceptions import ConfigurationException
 
 _LOGGER = logging.getLogger(__name__)
+
+# Sections merge_board_config fills in from the board (pins, expanders).
+_BOARD_SECTIONS = (EVENT_ENTITY, BINARY_SENSOR, OUTPUT)
 
 
 class ConfigHelper:
@@ -45,6 +59,7 @@ class ConfigHelper:
         is_web_active: bool = False,
         web_port: int = 8090,
         proxy_port: int | None = None,
+        expose: str = "all",
         config_file_path: str | None = None,
         send_boneio_autodiscovery: bool = True,
         receive_boneio_autodiscovery: bool = True,
@@ -98,6 +113,7 @@ class ConfigHelper:
         self._device_type = device_type
         self._web_port = web_port
         self._proxy_port = proxy_port
+        self._expose = expose
         self._fetch_old_discovery = None
 
         self._autodiscovery_messages = {
@@ -133,6 +149,11 @@ class ConfigHelper:
         
         # Cloud registration instance (set from runner.py after creation)
         self._cloud_reg: Any = None
+
+    @property
+    def config_file_path(self) -> str | None:
+        """The config.yaml this application was started with."""
+        return self._config_file_path
 
     @property
     def restart_required(self) -> bool:
@@ -183,12 +204,96 @@ class ConfigHelper:
 
     @property
     def http_proto(self) -> str:
-        return "https" if self._proxy_port else "http"
+        """The scheme anything linking to this panel should use."""
+        return "https" if self._behind_proxy else "http"
+
+    @property
+    def _behind_proxy(self) -> bool:
+        """Whether the panel is reached through the reverse proxy.
+
+        Either because somebody named its port, or because the panel's own
+        port has been taken off the network and the proxy is the only way in.
+        """
+        return bool(self._proxy_port) or self._expose == "proxy"
+
+    def update_network_info(self, network_info: dict | None) -> None:
+        """Refresh the address this device publishes links to.
+
+        The snapshot taken at startup goes stale: on DHCP the lease can arrive
+        after boneIO is up, and it can change later. Home Assistant and the OLED
+        both build their link from here, so both were handing out whatever was
+        true at boot.
+
+        An update without a usable address is ignored rather than stored — a
+        link to the last known address beats a link to nothing.
+
+        Args:
+            network_info: Fresh mapping from :func:`get_network_info`.
+        """
+        if self._usable_address(network_info):
+            self._network_info = network_info
+
+    @staticmethod
+    def _usable_address(network_info: dict | None) -> str | None:
+        """The IP from a network mapping, or None when there is not one.
+
+        ``get_network_info`` reports a missing address as the string "none",
+        which is truthy — published unchecked it became ``https://none:8443``.
+
+        Args:
+            network_info: Mapping to read.
+
+        Returns:
+            The address, or None.
+        """
+        address = (network_info or {}).get(IP)
+        if not address or address == NONE:
+            return None
+        return str(address)
+
+    @property
+    def cloud_url(self) -> str | None:
+        """The name cloud registration gives this controller, on or off."""
+        if not self.serial_number:
+            return None
+        return f"https://{self.serial_number}.black.boneio.app:{DEFAULT_PROXY_PORT}"
+
+    @property
+    def configuration_url(self) -> str | None:
+        """The address anything linking to this panel should use.
+
+        Home Assistant puts this on the device page, and the panel shows it so
+        an operator can see what was published without opening Home Assistant.
+        Both read it here rather than each deciding for itself: the wording in
+        the panel drifted away from what discovery actually sends within a day
+        of being written, because it described the rule instead of asking.
+
+        Returns:
+            The URL, or None when there is no address to build one from.
+        """
+        if self._cloud_registration and self.serial_number:
+            # Registered with the cloud: a real certificate on a public name,
+            # pointing at the local address. Nothing else can beat that.
+            return self.cloud_url
+        address = self._usable_address(self._network_info)
+        if not (self._is_web_active and address):
+            return None
+        return f"{self.http_proto}://{address}:{self.web_configuration_port}"
 
     @property
     def web_configuration_port(self) -> int:
-        """Get port for HA discovery URL. Uses proxy_port if set, otherwise web_port."""
-        return self._proxy_port if self._proxy_port else self._web_port
+        """The port to put in a link to this panel.
+
+        The configured proxy port when there is one. Otherwise the panel's own
+        port — unless that port has been taken off the network, in which case
+        it answers nothing and linking to it would hand Home Assistant a dead
+        address. Then it is the port the built-in proxy serves on.
+        """
+        if self._proxy_port:
+            return self._proxy_port
+        if self._expose == "proxy":
+            return DEFAULT_PROXY_PORT
+        return self._web_port
 
     @property
     def topic_prefix(self) -> str:
@@ -327,6 +432,18 @@ class ConfigHelper:
         """Add autodiscovery message."""
         self._autodiscovery_messages[ha_type][topic] = {"topic": topic, "payload": payload}
 
+    def reserve_autodiscovery_msg(self, ha_type: str, topic: str) -> None:
+        """Claim the topic of an entity that is configured but not announced yet.
+
+        A reserved topic counts as in use, so a retained config left on it
+        from an earlier run is not removed, but it is not resent until
+        add_autodiscovery_msg gives it a payload. Reserving a topic that
+        already has one changes nothing.
+        """
+        self._autodiscovery_messages[ha_type].setdefault(
+            topic, {"topic": topic, "payload": None}
+        )
+
     @property
     def ha_types(self) -> list[str]:
         return list(self._autodiscovery_messages.keys())
@@ -396,7 +513,6 @@ class ConfigHelper:
             raise ValueError("config_file_path not set in ConfigHelper")
         
         if self._config_cache is None or force_reload:
-            from boneio.core.config.yaml_util import load_config_from_file
             _LOGGER.debug("Loading config from file: %s", self._config_file_path)
             config = load_config_from_file(self._config_file_path)
             if config is None:
@@ -434,8 +550,6 @@ class ConfigHelper:
         _t0 = _time.monotonic()
         _LOGGER.info("Fast-reloading config from: %s", self._config_file_path)
 
-        from boneio.core.config.yaml_util import load_yaml_file, merge_board_config
-
         config_yaml = load_yaml_file(self._config_file_path)
         if config_yaml is None:
             raise ValueError(f"Failed to load config from: {self._config_file_path}")
@@ -465,8 +579,33 @@ class ConfigHelper:
                 section,
             )
             return
-        self._config_cache[section] = data
+        self._config_cache[section] = self._section_as_reloaded(section, data)
         _LOGGER.debug("Updated config section '%s' in-place", section)
+
+    def _section_as_reloaded(self, section: str, data: object) -> object:
+        """What a reload from the file would hold for a section just saved.
+
+        The file gets the section with empty fields and default action values
+        dropped, and a reload merges the board's pins and expanders back into
+        inputs and outputs. Patching the cache with the data as sent left
+        inputs without a pin until the next reload.
+
+        Args:
+            section: Top-level config key.
+            data: The section as it was saved.
+
+        Returns:
+            The section the way the reload path would see it.
+        """
+        cleaned = strip_default_values(copy.deepcopy(data), {}, section)
+        boneio = self._config_cache.get(BONEIO) if self._config_cache else None
+        if section not in _BOARD_SECTIONS or not isinstance(boneio, dict):
+            return cleaned
+        try:
+            return merge_board_config({BONEIO: dict(boneio), section: cleaned})[section]
+        except ConfigurationException as err:
+            _LOGGER.warning("Section '%s' kept unmerged in the config cache: %s", section, err)
+            return cleaned
 
     def get_section(self, section_name: str, force_reload: bool = False) -> Any:
         """Get a specific configuration section.
@@ -487,9 +626,11 @@ class ConfigHelper:
 
 
     @property
-    def autodiscovery_msgs(self) -> dict_values:
-        """Get autodiscovery messages"""
-        output = {}
-        for ha_type in self._autodiscovery_messages:
-            output.update(self._autodiscovery_messages[ha_type])
-        return output.values()
+    def autodiscovery_msgs(self) -> list[dict[str, Any]]:
+        """Get autodiscovery messages, leaving out topics only reserved."""
+        return [
+            msg
+            for messages in self._autodiscovery_messages.values()
+            for msg in messages.values()
+            if msg["payload"] is not None
+        ]

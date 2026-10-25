@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -16,16 +18,21 @@ from fastapi import APIRouter, Body, HTTPException
 if TYPE_CHECKING:
     from starlette.datastructures import State
 
+from boneio.core import containers
+from boneio.core.config.secret_masking import mask_secrets, restore_secrets
 from boneio.core.config.yaml_util import (
     clear_config_cache,
     load_config_from_file,
     load_yaml_file,
     merge_board_config,
+    CustomValidator,
+    _get_schema,
     update_config_section,
-    wait_for_pending_yaml_saves,
 )
 from boneio.core.manager import Manager
 from boneio.webui.action_validation import validate_section_actions as _validate_section_actions
+from boneio.webui.bind import DEFAULT_PROXY_PORT, proxy_is_serving_cached
+from boneio.webui.input_validation import has_long_bounce_time, validate_bounce_times
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +53,24 @@ def set_app_state(app_state: State) -> None:
     """Set app state reference."""
     global _app_state
     _app_state = app_state
+
+
+#: Sends the current state of every entity to every connected panel.
+#:
+#: Injected from app.py rather than imported: the helper that builds those
+#: payloads lives beside the WebSocket endpoint, and importing it here would
+#: close a cycle (app.py imports these routers).
+_broadcast_states = None
+
+
+def set_state_broadcaster(broadcaster) -> None:
+    """Attach the callable that pushes entity states to connected panels.
+
+    Args:
+        broadcaster: Async callable taking the manager, or None.
+    """
+    global _broadcast_states
+    _broadcast_states = broadcaster
 
 
 def set_websocket_manager(ws_manager) -> None:
@@ -230,6 +255,83 @@ def _get_config_mtime(config_file: str) -> float:
     return max_mtime
 
 
+def api_shape(source_config: dict) -> dict:
+    """The config as GET /api/config serves it, from the config as loaded.
+
+    Fills in the ids the panel addresses entries by and folds legacy
+    ``actions_<type>`` keys into ``actions``. Every way into the route cache
+    goes through here, so the panel and agents get one shape whether the
+    cache was filled at start-up or rebuilt after a save.
+    """
+    config_data = dict(source_config)
+
+    if "output" in config_data and isinstance(config_data["output"], list):
+        import re
+
+        enriched: list[dict] = []
+        for output in config_data["output"]:
+            if not output.get("id"):
+                out = dict(output)
+                if out.get("boneio_output"):
+                    out["id"] = out["boneio_output"]
+                elif out.get("name"):
+                    name = out["name"].lower()
+                    name = re.sub(r"[^a-z0-9]+", "_", name)
+                    out["id"] = name.strip("_")
+                enriched.append(out)
+            else:
+                enriched.append(output)
+        config_data["output"] = enriched
+
+    if "cover" in config_data and isinstance(config_data["cover"], list):
+        enriched_covers: list[dict] = []
+        for cover in config_data["cover"]:
+            if not cover.get("id"):
+                cov = dict(cover)
+                open_relay = cov.get("open_relay", "")
+                close_relay = cov.get("close_relay", "")
+                if open_relay and close_relay:
+                    cov["id"] = f"cover_{open_relay}_{close_relay}".lower().replace(" ", "_")
+                enriched_covers.append(cov)
+            else:
+                enriched_covers.append(cover)
+        config_data["cover"] = enriched_covers
+
+    if "output_group" in config_data and isinstance(config_data["output_group"], list):
+        import re
+
+        enriched_groups: list[dict] = []
+        for group in config_data["output_group"]:
+            if not group.get("id") and group.get("name"):
+                grp = dict(group)
+                name = grp["name"].lower()
+                name = re.sub(r"[^a-z0-9]+", "_", name)
+                grp["id"] = name.strip("_")
+                enriched_groups.append(grp)
+            else:
+                enriched_groups.append(group)
+        config_data["output_group"] = enriched_groups
+
+    _EVENT_ACTION_TYPES = (
+        "single", "double", "triple", "long",
+        "double_then_long", "single_then_long", "double_then_single",
+    )
+    for section_key in ("event", "remote_inputs"):
+        if section_key in config_data and isinstance(config_data[section_key], list):
+            for entry in config_data[section_key]:
+                if not isinstance(entry, dict):
+                    continue
+                for act_type in _EVENT_ACTION_TYPES:
+                    flat_key = f"actions_{act_type}"
+                    if flat_key in entry:
+                        if "actions" not in entry or not isinstance(entry.get("actions"), dict):
+                            entry["actions"] = {}
+                        # Merge (don't overwrite) in case actions.single already exists
+                        existing = entry["actions"].get(act_type, [])
+                        entry["actions"][act_type] = existing + entry.pop(flat_key)
+    return config_data
+
+
 @router.get("/config")
 async def get_parsed_config():
     """Get parsed configuration data with !include resolved (cached with mtime check)."""
@@ -241,7 +343,9 @@ async def get_parsed_config():
 
         if _config_cache["data"] is not None and _config_cache["mtime"] >= current_mtime:
             _LOGGER.debug("Returning cached configuration (mtime unchanged)")
-            return {"config": _config_cache["data"]}
+            # Masked on the way out, always on a copy: the cache is shared with
+            # the rest of the process, which needs the real values.
+            return {"config": mask_secrets(_config_cache["data"])}
 
         start = time.time()
         try:
@@ -254,72 +358,7 @@ async def get_parsed_config():
             except Exception as merge_err:
                 _LOGGER.warning("Failed to merge board config for API response: %s", merge_err)
 
-        config_data = dict(source_config)
-
-        if "output" in config_data and isinstance(config_data["output"], list):
-            import re
-
-            enriched: list[dict] = []
-            for output in config_data["output"]:
-                if not output.get("id"):
-                    out = dict(output)
-                    if out.get("boneio_output"):
-                        out["id"] = out["boneio_output"]
-                    elif out.get("name"):
-                        name = out["name"].lower()
-                        name = re.sub(r"[^a-z0-9]+", "_", name)
-                        out["id"] = name.strip("_")
-                    enriched.append(out)
-                else:
-                    enriched.append(output)
-            config_data["output"] = enriched
-
-        if "cover" in config_data and isinstance(config_data["cover"], list):
-            enriched_covers: list[dict] = []
-            for cover in config_data["cover"]:
-                if not cover.get("id"):
-                    cov = dict(cover)
-                    open_relay = cov.get("open_relay", "")
-                    close_relay = cov.get("close_relay", "")
-                    if open_relay and close_relay:
-                        cov["id"] = f"cover_{open_relay}_{close_relay}".lower().replace(" ", "_")
-                    enriched_covers.append(cov)
-                else:
-                    enriched_covers.append(cover)
-            config_data["cover"] = enriched_covers
-
-        if "output_group" in config_data and isinstance(config_data["output_group"], list):
-            import re
-
-            enriched_groups: list[dict] = []
-            for group in config_data["output_group"]:
-                if not group.get("id") and group.get("name"):
-                    grp = dict(group)
-                    name = grp["name"].lower()
-                    name = re.sub(r"[^a-z0-9]+", "_", name)
-                    grp["id"] = name.strip("_")
-                    enriched_groups.append(grp)
-                else:
-                    enriched_groups.append(group)
-            config_data["output_group"] = enriched_groups
-
-        _EVENT_ACTION_TYPES = (
-            "single", "double", "triple", "long",
-            "double_then_long", "single_then_long", "double_then_single",
-        )
-        for section_key in ("event", "remote_inputs"):
-            if section_key in config_data and isinstance(config_data[section_key], list):
-                for entry in config_data[section_key]:
-                    if not isinstance(entry, dict):
-                        continue
-                    for act_type in _EVENT_ACTION_TYPES:
-                        flat_key = f"actions_{act_type}"
-                        if flat_key in entry:
-                            if "actions" not in entry or not isinstance(entry.get("actions"), dict):
-                                entry["actions"] = {}
-                            # Merge (don't overwrite) in case actions.single already exists
-                            existing = entry["actions"].get(act_type, [])
-                            entry["actions"][act_type] = existing + entry.pop(flat_key)
+        config_data = api_shape(source_config)
 
         elapsed = time.time() - start
 
@@ -327,7 +366,7 @@ async def get_parsed_config():
         _config_cache["mtime"] = current_mtime
 
         _LOGGER.info("Loaded and cached configuration in %.2fs (mtime: %.0f)", elapsed, current_mtime)
-        return {"config": config_data}
+        return {"config": mask_secrets(config_data)}
 
     except Exception as e:
         _LOGGER.error(f"Error loading parsed configuration: {str(e)}")
@@ -364,21 +403,393 @@ def _apply_entity_labels_to_coordinators(manager: Manager, devices_data: list) -
             _LOGGER.info("Hot-applied entity labels for coordinator %s", device_id)
 
 
+def _cloud_enabled(section: object) -> bool:
+    """Whether a ``web`` section asks for cloud registration.
+
+    Args:
+        section: A ``web`` section, or anything else.
+
+    Returns:
+        True when ``cloud.enabled`` is set.
+    """
+    if not isinstance(section, dict):
+        return False
+    cloud = section.get("cloud")
+    return bool(isinstance(cloud, dict) and cloud.get("enabled"))
+
+
+def _web_changed_apart_from_cloud(previous: object, current: object) -> bool:
+    """Whether anything outside ``cloud`` differs between two web sections.
+
+    Args:
+        previous: The section as it was.
+        current: The section as saved.
+
+    Returns:
+        True when some other setting changed, so a restart is still needed.
+    """
+    def rest(section: object) -> dict:
+        if not isinstance(section, dict):
+            return {}
+        # Both sides normalised by the validator that loads config.yaml: the
+        # previous section comes from the loaded config, defaults filled in down
+        # to ``security.map_tiles``, while the panel sends its section with the
+        # defaults stripped. Compared raw, every save looked like a change.
+        doc = CustomValidator({"web": _get_schema()["web"]}, purge_unknown=True).normalized(
+            {"web": copy.deepcopy(section)}, always_return_document=True
+        )
+        return {k: v for k, v in ((doc or {}).get("web") or {}).items() if k != "cloud"}
+
+    return rest(previous) != rest(current)
+
+
+#: The keys of the ``mqtt`` section the running client can adopt in place.
+#: Everything else there — the topic prefix, discovery, the update channel —
+#: is read into entity names and subscriptions while the application starts.
+MQTT_HOT_RELOADABLE_KEYS = frozenset({"host", "port", "username", "password"})
+
+
+def _mqtt_changed_apart_from_credentials(previous: object, current: object) -> bool:
+    """Whether anything outside the broker credentials differs.
+
+    Args:
+        previous: The section as it was.
+        current: The section as saved.
+
+    Returns:
+        True when some other setting changed, so a restart is still needed.
+    """
+    before = (
+        {k: v for k, v in previous.items() if k not in MQTT_HOT_RELOADABLE_KEYS}
+        if isinstance(previous, dict) else {}
+    )
+    after = (
+        {k: v for k, v in current.items() if k not in MQTT_HOT_RELOADABLE_KEYS}
+        if isinstance(current, dict) else {}
+    )
+    return before != after
+
+
+def _mqtt_credentials_changed(previous: object, current: object) -> bool:
+    """Whether the broker, the account or its password differs.
+
+    Args:
+        previous: The section as it was.
+        current: The section as saved.
+
+    Returns:
+        True when a reconnect would present something different.
+    """
+    before = (
+        {k: v for k, v in previous.items() if k in MQTT_HOT_RELOADABLE_KEYS}
+        if isinstance(previous, dict) else {}
+    )
+    after = (
+        {k: v for k, v in current.items() if k in MQTT_HOT_RELOADABLE_KEYS}
+        if isinstance(current, dict) else {}
+    )
+    return before != after
+
+
+async def _apply_mqtt_credentials(app_state, previous: object, current: object) -> str | None:
+    """Reconnect to the broker with what was just saved.
+
+    The credentials are read once, when the client is built, so a new password
+    used to sit in the file doing nothing until the service was restarted. That
+    is the other half of "changing the mosquitto password does not work": the
+    broker had the new password, this client kept presenting the old one.
+
+    Args:
+        app_state: The running application state.
+        previous: The ``mqtt`` section before the save.
+        current: The ``mqtt`` section being saved.
+
+    Returns:
+        What happened, or None when the credentials did not change.
+    """
+    if not _mqtt_credentials_changed(previous, current):
+        return None
+
+    try:
+        result = await app_state.manager.reload_config(reload_sections=["mqtt"])
+    except Exception as err:  # noqa: BLE001
+        # The file is written either way. Failing the request here would
+        # report a save that did happen as broken.
+        _LOGGER.warning("Could not reconnect to the broker: %s", err)
+        return "failed"
+
+    if result.get("status") == "success":
+        return "reconnecting"
+    _LOGGER.warning("Broker reconnect did not complete: %s", result)
+    return "failed"
+
+
+async def _guard_expose_change(previous: object, current: object) -> None:
+    """Refuse to take the panel off the network when nothing else serves it.
+
+    Setting ``web.expose: proxy`` is the fix for the panel being served in the
+    clear, and it is also the one setting here whose failure mode is a
+    controller answering on no port at all. It is only safe while the reverse
+    proxy is actually serving this panel — not merely listening, which it does
+    whether or not it can reach the application behind it.
+
+    So the proxy is asked, over the loopback, for something only the
+    application can answer, and the save is refused if the answer does not come
+    back. A hand-edited config.yaml still goes through: somebody at a console
+    who has decided to do this deserves to be able to.
+
+    Args:
+        previous: The ``web`` section before the save.
+        current: The ``web`` section being saved.
+
+    Raises:
+        HTTPException: If the proxy is not serving this panel.
+    """
+    was = (previous or {}).get("expose") if isinstance(previous, dict) else None
+    now = (current or {}).get("expose") if isinstance(current, dict) else None
+    if now != "proxy" or was == "proxy":
+        return
+
+    port = DEFAULT_PROXY_PORT
+    if isinstance(current, dict) and isinstance(current.get("proxy_port"), int):
+        port = current["proxy_port"]
+
+    loop = asyncio.get_running_loop()
+    serving, reason = await loop.run_in_executor(None, proxy_is_serving_cached, port)
+    if not serving:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Not moving the panel behind the proxy: {reason}. It would "
+                "leave this device reachable on no port at all."
+            ),
+        )
+
+
+#: Ports the proxy's generator falls back to (and Node-RED's). If the panel took
+#: one, the fallback would collide with it and Caddy could not bind.
+_PROXY_FALLBACK_PORTS = frozenset({8091, 8443, 1880})
+
+
+def _reserved_proxy_ports() -> set[int]:
+    """Ports the panel may not use: the proxy's fallbacks and its configured ones."""
+    ports = set(_PROXY_FALLBACK_PORTS)
+    try:
+        lines = containers.ENV_FILE.read_text().splitlines()
+    except OSError:
+        return ports
+    for line in lines:
+        name, _, value = line.removeprefix("export ").partition("=")
+        if name.strip() in ("HTTP_PORT", "HTTPS_PORT") and value.strip().isdigit():
+            ports.add(int(value.strip()))
+    return ports
+
+
+def _check_web_port_free(previous: object, data: object) -> None:
+    """Refuse moving ``web.port`` onto a port the reverse proxy needs for itself.
+
+    Only a change is refused: a device already sitting on such a port must
+    still be able to save the rest of the section.
+
+    Raises:
+        HTTPException: 422 naming the port.
+    """
+    try:
+        port = int(data["port"]) if isinstance(data, dict) else None
+    except (KeyError, TypeError, ValueError):
+        return
+    was = previous.get("port") if isinstance(previous, dict) else None
+    if port != was and port in _reserved_proxy_ports():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Invalid web configuration",
+                "errors": [f"Port {port} is used by the reverse proxy or Node-RED; choose another."],
+            },
+        )
+
+
+async def _apply_web_port_change(previous: object, current: object) -> str | None:
+    """Tell Caddy the panel's port when it moves.
+
+    The Caddyfile is generated at container start from ``WEB_PORT``, so a port
+    change that does not reach the compose project's ``.env`` leaves Caddy
+    proxying to the old one. With ``web.expose`` set to ``proxy`` — the default
+    a 1.6 image ships — the application is not listening anywhere else either,
+    so the device would answer on nothing but the loopback, the USB link and an
+    SSH tunnel.
+
+    ``up -d`` rather than ``restart``: a container's environment is fixed when
+    it is created, so a restart would keep the old value and the change would
+    appear to have been applied when it had not.
+
+    A failure here is reported, not raised. The port is already saved by this
+    point, and the caller needs to hear that the proxy is behind rather than
+    receive a 500 that suggests nothing was written at all.
+
+    Args:
+        previous: The ``web`` section before the save.
+        current: The ``web`` section after it.
+
+    Returns:
+        What happened, or None when the port did not move.
+    """
+    was = (previous or {}).get("port") if isinstance(previous, dict) else None
+    now = (current or {}).get("port") if isinstance(current, dict) else None
+    if not isinstance(now, int) or now == was:
+        return None
+
+    loop = asyncio.get_running_loop()
+    if not await loop.run_in_executor(None, containers.set_project_env, "WEB_PORT", str(now)):
+        return f"could not tell the proxy about port {now}"
+
+    # Packaged Caddy has no compose file to refresh: its unit regenerates the
+    # Caddyfile from .env on every start, so a restart is the whole change.
+    if await loop.run_in_executor(None, containers.proxy_mode) == "native":
+        outcome = await loop.run_in_executor(None, containers.restart_caddy)
+        if not outcome.ok:
+            detail = (outcome.stderr or outcome.stdout).strip()[-200:]
+            return f"the proxy did not come back up on port {now}: {detail or 'unknown reason'}"
+        return f"the proxy now forwards to port {now}"
+
+    # Refresh the live compose file from the trusted template, because a device
+    # updated from an earlier 1.6 still has the one that does not pass WEB_PORT
+    # through — and without that, .env is read and then ignored, which looks
+    # exactly like success. Whichever template is in use is re-copied, so a
+    # cloud device is not quietly switched back to the local one.
+    #
+    # The application may not write that file itself — it is root-owned because
+    # compose executes it. It names a verb and the privileged helper copies from
+    # /usr/lib/boneio/trusted, which is why this is two calls, not a file write.
+    # Which template, asked of the file and not of the configuration. A device
+    # whose cloud registration never completed has cloud enabled in config and
+    # the local template on disk, and switching it to the cloud one would hand
+    # Caddy an init script whose certificates are not there.
+    refresh = (
+        containers.apply_cloud_template
+        if await loop.run_in_executor(None, containers.cloud_template_is_live)
+        else containers.remove_cloud_template
+    )
+    outcome = await loop.run_in_executor(None, refresh)
+    if not outcome.ok:
+        return (
+            f"port {now} is saved, but the proxy still forwards to the old one: "
+            f"{outcome.error or 'the compose template could not be refreshed'}"
+        )
+
+    outcome = await loop.run_in_executor(None, containers.start_caddy)
+    if not outcome.ok:
+        return f"the proxy did not come back up on port {now}: {outcome.error or 'unknown reason'}"
+    return f"the proxy now forwards to port {now}"
+
+
+async def _apply_cloud_toggle(app_state, previous: object, current: object) -> str | None:
+    """Start or stop cloud registration to match what was just saved.
+
+    Args:
+        app_state: Application state, for the live ConfigHelper.
+        previous: The ``web`` section before the save.
+        current: The ``web`` section after it.
+
+    Returns:
+        What happened, or None when the toggle did not move.
+    """
+    was, now = _cloud_enabled(previous), _cloud_enabled(current)
+    if was == now:
+        return None
+
+    helper = getattr(getattr(app_state, "manager", None), "config_helper", None)
+    if helper is None:
+        return None
+
+    try:
+        # Imported here, not at the top: cloud registration pulls in aiohttp
+        # and the runner defers it for the same reason — a device with the
+        # feature switched off should not pay for the import. This is the only
+        # place in this module that needs it, and only when the toggle moves.
+        from boneio.core.cloud import set_enabled
+
+        return await set_enabled(helper, now)
+    except Exception as err:  # noqa: BLE001
+        # The setting is already written, so the next start will honour it.
+        # Failing the save would suggest otherwise.
+        _LOGGER.error("Could not apply the cloud registration change now: %s", err)
+        return "unavailable"
+
+
+
+# Every configuration section is a snake_case key. The route below writes
+# whatever name it is given into config.yaml, so a path that is not one — an
+# endpoint registered after it, like /config/quick-action — would otherwise be
+# stored as a section of that name instead of reaching its own handler.
+_SECTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+async def _stored_section(section: str) -> list | None:
+    """The section as the running app holds it, or None when it cannot say."""
+    try:
+        helper = _get_app_state().manager.config_helper
+        loop = asyncio.get_running_loop()
+        stored = await loop.run_in_executor(None, helper.get_section, section)
+    except Exception as err:  # noqa: BLE001 - a missing baseline only skips a check
+        _LOGGER.warning("Could not read stored %s to compare bounce times: %s", section, err)
+        return None
+    return stored if isinstance(stored, list) else []
+
+
+async def _stored_web_section() -> object:
+    """The ``web`` section as last saved: the cache, else the config itself.
+
+    Every save empties the cache until the next read, so a second save without
+    a GET in between must not take "no previous port" for a port change.
+    """
+    cached = (_config_cache["data"] or {}).get("web")
+    if cached is not None:
+        return cached
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, _get_app_state().manager.config_helper.get_section, "web"
+        )
+    except Exception as err:  # noqa: BLE001 - without a baseline the guard is stricter, not broken
+        _LOGGER.warning("Could not read stored web section: %s", err)
+        return None
+
+
 @router.put("/config/{section}")
 async def update_section_content(section: str, data: dict | list = Body(...)):
     """Update content of a configuration section."""
+    if not _SECTION_NAME.match(section):
+        raise HTTPException(status_code=404, detail=f"Not a configuration section: '{section}'")
+    # The client was shown a placeholder instead of each configured secret, and
+    # posts the whole section back. Anything still carrying the placeholder is
+    # resolved from what is stored, so saving an unrelated field cannot
+    # overwrite a password with the mask that stood in for it.
+    try:
+        current = _config_cache["data"] or {}
+        data = restore_secrets(data, current.get(section))
+    except Exception as err:  # noqa: BLE001 - a save must not fail over this
+        _LOGGER.warning("Could not resolve masked secrets for %s: %s", section, err)
+
     RESTART_REQUIRED_SECTIONS = {
         "boneio", "mqtt", "lox_udp", "web", "modbus",
         "mcp23017", "lm75", "ina219", "ina226", "mcp9808", "can",
     }
 
     if section in ("event", "binary_sensor") and isinstance(data, list):
-        errors = _validate_section_actions(section, data)
+        # A sun condition on a device with no coordinates fails open at
+        # runtime, so the action keeps firing and nothing looks broken. Save
+        # time is the only point where it is visible.
+        has_location = bool((_config_cache["data"] or {}).get("location"))
+        errors = _validate_section_actions(section, data, has_location=has_location)
+        if has_long_bounce_time(data):
+            errors += validate_bounce_times(data, await _stored_section(section))
         if errors:
             raise HTTPException(
                 status_code=422,
                 detail={"message": "Invalid action configuration", "errors": errors},
             )
+        # gpio_mode left the schema in 1.6; drop it from older configs on save.
         for entry in data:
             entry.pop("gpio_mode", None)
 
@@ -397,6 +808,13 @@ async def update_section_content(section: str, data: dict | list = Body(...)):
                 },
             )
 
+<<<<<<< ours
+=======
+    if section == "web":
+        # It reads the compose .env: off the event loop.
+        await asyncio.to_thread(_check_web_port_free, await _stored_web_section(), data)
+
+>>>>>>> theirs
     # Strip empty string values from data to prevent cerberus coercion failures
     # (e.g. bounce_time: '' instead of being omitted).
     def _strip_empty_strings(obj: dict | list) -> dict | list:
@@ -417,18 +835,23 @@ async def update_section_content(section: str, data: dict | list = Body(...)):
 
     data = _strip_empty_strings(data)
 
+<<<<<<< ours
+=======
+    # Captured before the write: the cloud toggle is acted on rather than
+    # merely stored, and afterwards there is nothing left to compare against.
+    previous_section = (_config_cache["data"] or {}).get(section)
+
+    # Before the write, and outside the try below: that one turns every
+    # exception into a 500, and this refusal has a reason worth reading.
+    if section == "web":
+        await _guard_expose_change(previous_section, data)
+
+>>>>>>> theirs
     try:
         t_route_start = time.perf_counter()
         app_state = _get_app_state()
 
-        # Wait for any pending background quick-action saves to complete
-        # before doing a full section save (prevents overwriting changes).
-        # Run in executor to avoid blocking the async event loop.
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, wait_for_pending_yaml_saves, 15.0
-        )
-
         result = await loop.run_in_executor(
             None,
             update_config_section,
@@ -447,7 +870,40 @@ async def update_section_content(section: str, data: dict | list = Body(...)):
 
         invalidate_config_cache(section=section, section_data=data)
 
-        if section in RESTART_REQUIRED_SECTIONS:
+        cloud_outcome = None
+        mqtt_outcome = None
+        if section == "mqtt":
+            mqtt_outcome = await _apply_mqtt_credentials(
+                app_state, previous_section, data
+            )
+            if mqtt_outcome:
+                result["mqtt"] = mqtt_outcome
+        if section == "web":
+            cloud_outcome = await _apply_cloud_toggle(
+                app_state, previous_section, data
+            )
+            if cloud_outcome:
+                result["cloud"] = cloud_outcome
+            proxy_outcome = await _apply_web_port_change(previous_section, data)
+            if proxy_outcome:
+                result["proxy"] = proxy_outcome
+
+        # A restart is what the other settings in this section need; the cloud
+        # toggle now takes effect where it is made. Asking for one anyway would
+        # tell somebody their device is half-configured when it is not.
+        needs_restart = section in RESTART_REQUIRED_SECTIONS and not (
+            section == "web"
+            and cloud_outcome in ("started", "stopped")
+            and not _web_changed_apart_from_cloud(previous_section, data)
+        )
+        # Same shape for the broker credentials: they are adopted where the
+        # change is made, so asking for a restart on top of that would tell
+        # somebody their device is half-configured when it is not.
+        if section == "mqtt" and mqtt_outcome == "reconnecting":
+            needs_restart = _mqtt_changed_apart_from_credentials(
+                previous_section, data
+            )
+        if needs_restart:
             manager: Manager = app_state.manager
             manager.config_helper.set_restart_required(section)
             result["restart_required"] = True
@@ -488,6 +944,23 @@ async def reload_configuration(
 
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("message", "Failed to reload configuration"))
+
+        # Send the new state to the panels that just threw the old one away.
+        #
+        # The event above tells every client to clear the sections being
+        # reloaded, and the frontend has always done so on the promise that
+        # "new states will be sent by the backend after reload". Nothing sent
+        # them: republish_all_entity_states is MQTT-only and says so, and the
+        # only other source is the burst a socket gets when it connects. So
+        # saving a section emptied Outputs and Inputs until the page was
+        # reloaded — which is what made F5 look like part of saving.
+        if _broadcast_states is not None:
+            try:
+                await _broadcast_states(manager)
+            except Exception as err:  # noqa: BLE001
+                # The configuration is already reloaded. Failing the request
+                # here would report a save that actually succeeded as broken.
+                _LOGGER.warning("Could not push new states to the panel: %s", err)
 
         return result
 

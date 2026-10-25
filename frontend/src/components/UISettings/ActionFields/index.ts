@@ -1,8 +1,19 @@
-export { validateAction, validateCondition, cleanActionFields, rgbToHex, hexToRgb } from './helpers';
+export { default as VirtualSwitchAction } from './VirtualSwitchAction';
+export { validateAction, validateCondition, cleanActionFields, applyActionUpdate, rgbToHex, hexToRgb } from './helpers';
 export type { 
   Area, 
   RemoteDevice, 
-  ActionFieldsProps,
+  ActionDef,
+  ActionInput,
+  ActionUpdate,
+  ActionCondition,
+  ActionConditionGroup,
+  ConditionType,
+  CoverActionData,
+  OutputGroupRecord,
+  OutputGroupEntity,
+  RemoteCoverEntity,
+  RemoteOutputEntity,
   BaseActionProps,
   RemoteOutputActionProps,
   RemoteCoverActionProps,

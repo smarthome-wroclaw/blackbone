@@ -20,10 +20,11 @@ dependencies = [
     "psutil==7.2.2",
     "w1thermsensor[async]==2.3.0",
     "fastapi==0.143.2",
+    "starlette>=1.3.1",
     "pydantic==2.14.1",
     "hypercorn==0.18.0",
     "websockets==17.2",
-    "python-jose[cryptography]==3.5.0",
+    "PyJWT==2.15.1",
     "python-multipart==0.0.32",
     "qrcode==8.2",
     "gpiod==2.5.0",
@@ -32,6 +33,9 @@ dependencies = [
     "aioesphomeapi>=45.0.0",
     "zeroconf>=0.149.16",
     "canopen-asyncio>=2.4.1",
+    "anyio>=4.14.2",
+    "multidict>=6.9.1",
+    "cryptography>=50.0.0; platform_system == 'Linux'",
 ]
 requires-python = ">=3.13"
 license = { text = "GNU General Public License v3.0" }
@@ -54,10 +58,17 @@ dev = [
     "setuptools>=80.9.0",
 ]
 test = [
+    # Independent implementation used only to cross-check boneio.core.utils.sun.
+    # Deliberately not a runtime dependency — see the module docstring.
+    "astral>=3.2",
     "pytest>=9.0.1",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
-    "httpx>=0.28.1",
+    # What starlette.testclient runs on. Starlette 1.x tries httpx2 first and
+    # only falls back to httpx with a deprecation warning, so plain httpx here
+    # meant every TestClient test ran on the deprecated path. Nothing in boneio
+    # imports either one directly — this exists solely for the test client.
+    "httpx2>=2.13.0",
 ]
 
 [build-system]
@@ -69,15 +80,27 @@ where = ["."]
 include = ["boneio*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.json", "*.yaml", "*.yml", "*.ttf", "*.sh"]
+"*" = ["*.json", "*.yaml", "*.yml", "*.ttf", "*.sh", "*.pem", "*.sig"]
 "boneio.webui" = ["frontend-dist/**/*"]
+# Recovery mode's own page: plain files, served when the regular UI cannot be.
+"boneio.webui.recovery" = ["static/*"]
 "boneio.migrations" = [
     "assets/**/*",
     "assets/MANIFEST.sha256",
-    "bootstrap/boneio-migrate",
-    "bootstrap/sudoers-migrate",
-    "bootstrap/install-helper.sh",
+    # Every privileged helper, its sudoers fragment and the self-heal script.
+    # A glob rather than a list: a helper missing from the wheel is a device
+    # that cannot migrate, and that is not a failure worth risking on someone
+    # remembering to add a line here.
+    "bootstrap/**/*",
+    # Signed plans and their signatures. The "*" glob above only matches files
+    # directly in a package directory, not in subdirectories, so plans/ has to
+    # be named here or the helper ships with nothing to verify.
+    "plans/**/*",
 ]
+
+[tool.setuptools.exclude-package-data]
+# bootstrap/**/* would otherwise pull in bytecode left behind by py_compile.
+"*" = ["**/__pycache__/*", "**/*.pyc"]
 
 [tool.setuptools.dynamic]
 version = {attr = "boneio.version.__version__"}

@@ -54,7 +54,25 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [isAuthRequired, setIsAuthRequired] = useState(true);
   const [username, setUsername] = useState<string | null>(null);
   const [role, setRole] = useState<Role | null>(null);
+<<<<<<< ours
   const { data: initData, isLoading: initLoading } = useAppInit();
+=======
+  const { data: initData, isLoading: initLoading, refetch: refetchInit } = useAppInit();
+
+  // Ask the backend who we are. The token carries a role claim, but decoding it
+  // client-side would mean trusting a value the client can rewrite; asking is
+  // both simpler and authoritative.
+  const refreshIdentity = useCallback(async () => {
+    try {
+      const { data } = await axios.get('/api/account/me');
+      setUsername(data.username ?? null);
+      setRole((data.role as Role) ?? null);
+    } catch {
+      setUsername(null);
+      setRole(null);
+    }
+  }, []);
+>>>>>>> theirs
 
   // Ask the backend who we are. The token carries a role claim, but decoding it
   // client-side would mean trusting a value the client can rewrite; asking is
@@ -92,13 +110,22 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   const login = async (username: string, password: string) => {
     try {
-      const response = await axios.post('/api/login', { username, password });
+      // scrypt costs ~0.9 s on a BeagleBone, more while it is busy: the 5 s
+      // default is too close to call a failure.
+      const response = await axios.post('/api/login', { username, password }, { timeout: 30_000 });
       const { token } = response.data;
       localStorage.setItem('token', token);
       // Token is automatically added by axios interceptor from localStorage
       setIsAuthenticated(true);
       setUsername(response.data.username ?? null);
       setRole((response.data.role as Role) ?? null);
+<<<<<<< ours
+=======
+      // /api/init withholds the serial number from unauthenticated callers,
+      // so the copy fetched before sign-in is missing it. Without this the
+      // header shows no serial until the 30s poll comes round.
+      void refetchInit();
+>>>>>>> theirs
     } catch (error) {
       console.error('Login error:', error);
       throw error;
@@ -110,7 +137,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setIsAuthenticated(true);
     setIsAuthRequired(true);
     void refreshIdentity();
+<<<<<<< ours
   }, [refreshIdentity]);
+=======
+    // Same reason as in login(): re-read /api/init now that it will answer
+    // with the fields reserved for a signed-in caller.
+    void refetchInit();
+  }, [refreshIdentity, refetchInit]);
+>>>>>>> theirs
 
   // A rejected token must end the session, or the UI sits in a half-signed-in
   // state: no token on the wire, every view empty, and no login prompt.

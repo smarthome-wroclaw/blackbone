@@ -1,0 +1,1 @@
+[{"action":"install_file","dst":"/etc/ssh/sshd_config.d/15-boneio-penalties.conf","expected_sha256":"21ba1ae70b036c19baf734bc3588c3194c528d447f13f5b1b954c3b190b5ba28","group":"root","mode":420,"on_change":{"action":"systemctl_reload","unit":"ssh"},"owner":"root","src":"sshd/15-boneio-penalties.conf","template_vars":{},"validate":"sshd"}]

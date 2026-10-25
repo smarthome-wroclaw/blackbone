@@ -3,10 +3,18 @@
  * Handles both array sections (ArrayTableWidget) and custom form sections.
  */
 import { useTranslation } from '@/hooks/useTranslation';
+import { useState, type ComponentProps } from 'react';
+import { FaWandMagicSparkles } from 'react-icons/fa6';
 import ArrayTableWidget from '../ArrayTableWidget';
+import PresenceSimulationWizard from '../PresenceSimulationWizard';
 import BoneIOForm from '../BoneIOForm';
+<<<<<<< ours
 import MqttProtocolForm from '../MqttProtocolForm';
 import LoxProtocolForm from '../LoxProtocolForm';
+=======
+import MqttSectionForm from '../MqttSectionForm';
+import LoxUdpSectionForm from '../LoxUdpSectionForm';
+>>>>>>> theirs
 import WebServerForm from '../WebServerForm';
 import ModbusForm from '../ModbusForm';
 import CANForm from '../CANForm';
@@ -14,26 +22,21 @@ import LoggerForm from '../LoggerForm';
 import Mcp23017Form from '../Mcp23017Form';
 import OledForm from '../OledForm';
 import { ARRAY_SECTIONS, type ArraySectionType } from '../constants/sectionDefinitions';
+import { SettingsPage, SettingsCard, NoticeCallout } from '../ui';
 import { normalizeCovers } from '../helpers/coverUtils';
-
-interface ConfigSection {
-  name: string;
-  schema: any;
-  normalizedSchema: any;
-  uiSchema: any;
-  data: Record<string, any>;
-}
+import type { ConfigSection, SettingsFormData } from '../types/section';
+import type { ConfigRecord } from '@/types/jsonSchema';
 
 interface SectionContentProps {
   activeSection: string;
   activeSectionData: ConfigSection;
-  formData: Record<string, any>;
-  originalData: Record<string, any>;
+  formData: SettingsFormData;
+  originalData: SettingsFormData;
   schemaLoaded: boolean;
   editItemName?: string;
   onEditItemOpened?: () => void;
-  onSectionChange: (sectionName: string, data: any) => void;
-  onSaveSection: (sectionName: string, data?: any) => Promise<void>;
+  onSectionChange: (sectionName: string, data: unknown) => void;
+  onSaveSection: (sectionName: string, data?: unknown) => Promise<void>;
   onLoxValidationChange?: (isValid: boolean) => void;
 }
 
@@ -43,6 +46,15 @@ interface SectionContentProps {
 function isArraySection(sectionName: string): sectionName is ArraySectionType {
   return ARRAY_SECTIONS.includes(sectionName as ArraySectionType);
 }
+
+/**
+ * Sections whose form already draws its own cards.
+ *
+ * Everything else is a flat list of fields and gets wrapped in one card here,
+ * so a schema-driven page looks like the hand-written pages next to it in the
+ * sidebar instead of like naked controls on the page background.
+ */
+const SELF_CARDED_SECTIONS = new Set(['logger', 'mcp23017', 'oled']);
 
 /**
  * Renders a loading spinner while schema is loading.
@@ -72,30 +84,62 @@ function ArraySectionContent({
   onSaveSection,
 }: Omit<SectionContentProps, 'schemaLoaded'>) {
   const { t } = useTranslation();
+  const [wizardOpen, setWizardOpen] = useState(false);
+
+  // A presence simulation is a handful of ordinary schedules, so the way in is
+  // here rather than as a section of its own: a page for it would have nothing
+  // to show once it had run.
+  const extraActions = activeSection === 'schedule' ? (
+    <>
+      <button
+        className="btn btn-outline btn-primary btn-sm gap-2 max-sm:btn-square"
+        onClick={() => setWizardOpen(true)}
+        title={t('presence.button')}
+      >
+        <FaWandMagicSparkles />
+        <span className="hidden sm:inline">{t('presence.button')}</span>
+      </button>
+      {/* Mounted only while open, so each run starts on step one with nothing
+          left over from the last. */}
+      {wizardOpen && (
+        <PresenceSimulationWizard
+          open
+          onOpenChange={setWizardOpen}
+          formData={formData}
+          onDone={() => window.location.reload()}
+        />
+      )}
+    </>
+  ) : undefined;
 
   return (
     <ArrayTableWidget
-      value={formData[activeSection] || []}
-      uiSchema={activeSectionData.uiSchema.items}
+      value={(formData[activeSection] || []) as ConfigRecord[]}
+      uiSchema={activeSectionData.uiSchema.items as ConfigRecord | undefined}
       onChange={(newData) => onSectionChange(activeSection, newData)}
       schema={activeSectionData.normalizedSchema}
-      sectionType={activeSection as 'binary_sensor' | 'event' | 'local_inputs' | 'remote_inputs' | 'output' | 'output_group' | 'cover' | 'modbus_devices' | 'areas' | 'sensor' | 'virtual_energy_sensor' | 'remote_devices' | 'template' | 'adc' | 'board_sensors' | 'other'}
+      sectionType={activeSection as 'binary_sensor' | 'event' | 'local_inputs' | 'remote_inputs' | 'output' | 'output_group' | 'cover' | 'modbus_devices' | 'areas' | 'sensor' | 'virtual_energy_sensor' | 'remote_devices' | 'template' | 'adc' | 'board_sensors' | 'virtual_switch' | 'schedule' | 'other'}
       deviceType={formData.boneio?.device_type}
-      allBinarySensors={formData.binary_sensor || (formData.local_inputs || []).filter((i: any) => i._type === 'binary_sensor')}
-      allEvents={formData.event || (formData.local_inputs || []).filter((i: any) => i._type === 'event')}
+      allBinarySensors={formData.binary_sensor || (formData.local_inputs || []).filter((i) => i._type === 'binary_sensor')}
+      allEvents={formData.event || (formData.local_inputs || []).filter((i) => i._type === 'event')}
       allOutputs={[...(formData.output || []), ...(formData.remote_outputs || [])]}
       allOutputGroups={formData.output_group || []}
       allCovers={formData.cover || []}
       allAreas={formData.areas || []}
       allSensors={[
         ...(formData.sensor || []),
-        ...(formData.lm75 || []).map((s: any) => ({ ...s, _source: 'lm75' })),
-        ...(formData.mcp9808 || []).map((s: any) => ({ ...s, _source: 'mcp9808' })),
+        ...(formData.lm75 || []).map((s) => ({ ...s, _source: 'lm75' })),
+        ...(formData.mcp9808 || []).map((s) => ({ ...s, _source: 'mcp9808' })),
       ]}
       allModbusDevices={formData.modbus_devices || []}
       allVirtualEnergySensors={formData.virtual_energy_sensor || []}
       allRemoteDevices={formData.remote_devices || []}
       allRemoteInputs={formData.remote_inputs || []}
+      allVirtualSwitches={formData.virtual_switch || []}
+      /* Only the schedules table reads this, to keep "run now" from firing a
+         draft: it runs what the controller has loaded, not what is on screen. */
+      isDirty={JSON.stringify(formData[activeSection] ?? null) !== JSON.stringify(originalData[activeSection] ?? null)}
+      extraActions={extraActions}
       savedOutputs={[...(originalData.output || []), ...(originalData.remote_outputs || [])]}
       savedOutputGroups={originalData.output_group || []}
       savedCovers={normalizeCovers(originalData.cover || [])}
@@ -118,27 +162,37 @@ function CustomFormContent({
   onSectionChange,
   onLoxValidationChange,
 }: Pick<SectionContentProps, 'activeSection' | 'formData' | 'onSectionChange' | 'onLoxValidationChange'>) {
-  const handleChange = (data: any) => onSectionChange(activeSection, data);
+  const handleChange = (data: unknown) => onSectionChange(activeSection, data);
 
   switch (activeSection) {
     case 'boneio':
       return (
         <BoneIOForm
-          data={formData[activeSection]}
+          data={formData[activeSection] as ConfigRecord}
           onChange={handleChange}
         />
       );
     case 'mqtt':
       return (
+<<<<<<< ours
         <MqttProtocolForm
           data={formData.mqtt}
+=======
+        <MqttSectionForm
+          data={formData['mqtt'] as ConfigRecord}
+>>>>>>> theirs
           onChange={(data) => onSectionChange('mqtt', data)}
         />
       );
     case 'lox_udp':
       return (
+<<<<<<< ours
         <LoxProtocolForm
           data={formData.lox_udp}
+=======
+        <LoxUdpSectionForm
+          data={formData['lox_udp'] as ConfigRecord}
+>>>>>>> theirs
           onChange={(data) => onSectionChange('lox_udp', data)}
           onValidationChange={onLoxValidationChange}
         />
@@ -146,50 +200,51 @@ function CustomFormContent({
     case 'web':
       return (
         <WebServerForm
-          data={formData[activeSection]}
+          data={formData[activeSection] as ConfigRecord}
           onChange={handleChange}
         />
       );
     case 'modbus':
       return (
         <ModbusForm
-          data={formData[activeSection]}
+          data={formData[activeSection] as ConfigRecord}
           onChange={handleChange}
         />
       );
     case 'can':
       return (
         <CANForm
-          data={formData[activeSection]}
+          data={formData[activeSection] as ConfigRecord}
           onChange={handleChange}
         />
       );
     case 'logger':
       return (
         <LoggerForm
-          data={formData[activeSection]}
+          data={formData[activeSection] as ConfigRecord}
           onChange={handleChange}
         />
       );
     case 'mcp23017':
       return (
         <Mcp23017Form
-          data={formData[activeSection] || []}
+          data={(formData[activeSection] || []) as ComponentProps<typeof Mcp23017Form>['data']}
           onChange={handleChange}
         />
       );
     case 'oled':
       return (
         <OledForm
-          data={formData[activeSection] || {}}
+          data={(formData[activeSection] || {}) as ConfigRecord}
           onChange={handleChange}
         />
       );
     default:
       return (
-        <div className="alert alert-warning">
-          <span>No form available for section: {activeSection}</span>
-        </div>
+        <NoticeCallout
+          variant="warning"
+          message={`No form available for section: ${activeSection}`}
+        />
       );
   }
 }
@@ -219,26 +274,41 @@ export default function SectionContent({
     }
 
     return (
-      <ArraySectionContent
-        activeSection={activeSection}
-        activeSectionData={activeSectionData}
-        formData={formData}
-        originalData={originalData}
-        editItemName={editItemName}
-        onEditItemOpened={onEditItemOpened}
-        onSectionChange={onSectionChange}
-        onSaveSection={onSaveSection}
-      />
+      /* Centred like every other section, on the wider of the two columns:
+         a table of thirty-two outputs earns more room than a form, but not
+         the whole pane — on a 4K panel that smeared eight columns across
+         3400px, and it put the page title 900px from where the previous
+         section had it. */
+      <SettingsPage width="wide">
+        <SettingsCard>
+          <ArraySectionContent
+            activeSection={activeSection}
+            activeSectionData={activeSectionData}
+            formData={formData}
+            originalData={originalData}
+            editItemName={editItemName}
+            onEditItemOpened={onEditItemOpened}
+            onSectionChange={onSectionChange}
+            onSaveSection={onSaveSection}
+          />
+        </SettingsCard>
+      </SettingsPage>
     );
   }
 
   // Custom form sections
-  return (
+  const form = (
     <CustomFormContent
       activeSection={activeSection}
       formData={formData}
       onSectionChange={onSectionChange}
       onLoxValidationChange={onLoxValidationChange}
     />
+  );
+
+  return (
+    <SettingsPage>
+      {SELF_CARDED_SECTIONS.has(activeSection) ? form : <SettingsCard>{form}</SettingsCard>}
+    </SettingsPage>
   );
 }

@@ -3,6 +3,34 @@
 Podstawa: raport pentestowy 1.5.0 (`Pobrane/boneio_raport_1.5.0/`), 16 ustaleń F-01…F-16.
 Zasada: każda poprawka wdrażana jako **nowa funkcja** (nie łata w ukryciu), po kolei, każde wdrożenie samodzielnie wypuszczalne w 1.6.x.
 
+<<<<<<< ours
+=======
+## Po co to naprawdę robimy: CRA
+
+Raport pentestowy jest listą zadań, ale ramą jest **Cyber Resilience Act** — rozporządzenie (UE) 2024/2847,
+które nakłada wymagania cyberbezpieczeństwa na produkty z elementami cyfrowymi sprzedawane w UE. boneIO Black
+jest takim produktem. Terminy: obowiązki raportowania aktywnie wykorzystywanych podatności obowiązują
+od **11 września 2026**, obowiązki merytoryczne (wymagania zasadnicze, deklaracja zgodności, CE) od
+**11 grudnia 2027**.
+
+Cała seria 1.6.x to **dostosowanie do tych wymagań**, a nie deklaracja zgodności — deklarację można wystawić
+dopiero wtedy, gdy praca inżynierska jest skończona i udokumentowana. Wymagania, pod które podpinają się
+kolejne wdrożenia:
+
+| Wymaganie CRA | Gdzie u nas |
+|---|---|
+| Bezpieczna **konfiguracja domyślna** | #1 kreator (brak pracy bez konta), #8 brak stałej ścieżki aplikacji do roota |
+| Brak **uniwersalnych haseł domyślnych** | #8 obraz: SSH i MQTT (F-05), hasło per urządzenie zamiast wypalonego |
+| **Kontrola dostępu** i ochrona przed nieuprawnionym dostępem | #2 RBAC, #3 twardnienie logowania, #7 CSRF |
+| **Minimalizacja powierzchni ataku** i zasada najmniejszych uprawnień | #8 F-04: helpery o zamkniętym słowniku zamiast reguł z gwiazdką, zdjęcie grupy `docker`, usunięcie endpointów zbierających hasło systemowe |
+| **Ochrona poufności** danych przechowywanych i przesyłanych | #4 maskowanie sekretów, F-10 TLS, F-11 uprawnienia `/etc/mosquitto/passwd` |
+| Dostarczanie **aktualizacji bezpieczeństwa bezpiecznym kanałem** | #8 podpisane plany migracji (Ed25519, klucz poza CI, dwie kotwice zaufania na urządzeniu) |
+| **Obsługa podatności**: przyjmowanie zgłoszeń, poprawki bez zbędnej zwłoki | proces CVE prowadzony z CERT, wydania 1.6.x |
+
+To jest też powód, dla którego każda poprawka idzie jako osobna, opisana funkcja: przy CRA liczy się nie tylko
+to, że dziura jest zamknięta, ale że da się pokazać **czym** i **kiedy** została zamknięta.
+
+>>>>>>> theirs
 ## Mapowanie wdrożeń na ustalenia
 
 | # | Wdrożenie (nowa funkcja) | Łata (findings) | Warstwa |
@@ -79,12 +107,103 @@ więc to domyślne hasło w przebraniu.
 
 **Uwaga:** F-08 zostało domknięte już w #1 dla urządzeń z kontem; otwarta zostaje tylko ścieżka urządzenia bez żadnych poświadczeń, czyli stan anonimowy opisany w #2.
 
+<<<<<<< ours
+=======
+### 4. Ochrona sekretów (F-03, część F-12)
+- `GET /api/config` zwraca **placeholder** zamiast hasła MQTT (i każdego innego). Maskowanie zawsze na kopii — parsowany config leży w cache'u współdzielonym z resztą procesu.
+- **Maskowanie samo w sobie byłoby błędem**: formularze ustawień są zasilane tą samą odpowiedzią i odsyłają całą sekcję, więc placeholder zapisany wprost nadpisałby prawdziwe hasło przy pierwszym zapisie czegokolwiek na tej stronie. `PUT` rozwiązuje więc placeholder z tego, co jest zapisane; nowa wartość (także pusta, czyli wyczyszczenie) brana jest dosłownie.
+- Placeholder celowo **nie jest rzędem kropek** — kropki ktoś mógłby wpisać jako hasło i jego wybór zostałby po cichu odrzucony.
+- Logi czyszczone z **konkretnych wartości z configu** (logi to wolny tekst, nie ma klucza do dopasowania). Od najdłuższych, sekrety krótsze niż 4 znaki pomijane. Nigdy nie rzuca wyjątkiem — nieczytelny config nie może kosztować operatora logów.
+
+### 5. Node-RED adminAuth (F-01 — RCE)
+- Node-RED **deleguje uwierzytelnianie do boneIO** zamiast trzymać drugi zestaw poświadczeń: jedna lista kont, brak drugiej implementacji hashowania, reużyta prawdziwa ścieżka logowania razem z rate-limitem z #3.
+- **Tylko admin.** Konto tylko-do-odczytu nie ma czego szukać w edytorze, którego istotą jest wykonywanie kodu.
+- **Fail-closed**: gdy boneIO jest nieosiągalne, odpowiedź brzmi „nie".
+- Nie wymaga nowej paczki — kontener ma już `host.docker.internal`, a obraz Node 22 ma wbudowany `fetch`.
+- Zweryfikowane na żywym sterowniku: admin z dobrym hasłem wpuszczony, admin ze złym odrzucony, **viewer z dobrym hasłem odrzucony**, konto nieistniejące odrzucone, martwy adres → odmowa.
+
+### 6. Ochrona SSRF (F-15)
+Jedno ustalenie, trzy osobne problemy — i wszystkie trzy trzeba było zamknąć osobno:
+- **Dowolny host** → `boneio/core/net/discovery_guard.py` przepuszcza wyłącznie adresy prywatne. Prywatnych **nie blokujemy**, bo tam żyją WLED i ESPHome — blokada zabiłaby funkcję. Odrzucane: loopback (skaner z raportu), link-local (w tym 169.254.169.254), publiczne (sterownik nie ma po co sięgać do internetu), multicast/zarezerwowane. Sprawdzane są **wszystkie** adresy z rozwiązania nazwy, nie pierwszy — inaczej nazwa wskazująca na dwa adresy przeszłaby.
+- **Dowolny port** → lista dozwolonych per protokół (WLED 80/443/8080, ESPHome 6053). Swobodny wybór portu jest tym, co czyni z odkrywania skaner. Nietypowy port: dodanie urządzenia ręcznie.
+- **Echo błędu z góry** → komunikat nigdy nie wraca do klienta, tylko do logu. To on wyciekał banner SSH („Bad status line", „Invalid preamble 0x53"). Każda odmowa brzmi identycznie.
+
+### 7. Ochrona CSRF (F-07)
+- Po #2 CSRF jest **w dużej mierze zamknięte strukturalnie**: token siedzi w nagłówku `Authorization`, nie w ciasteczku, więc formularz cross-site go nie dołączy i dostaje 401.
+- Zostawała dziura dla urządzenia bez uwierzytelniania (`allow_anonymous` / `BONEIO_DEV`) — tam PoC z rebootem działał. Domyka to `CSRFMiddleware`.
+- Sprawdzany jest **tylko `Origin`**: przeglądarka dołącza go dokładnie do żądań cross-site, a curl/skrypt/usługa nie dołączają nic i nie da się ich podstępem zmusić do działania w cudzym imieniu. Ocenianie żądań bez `Origin` zepsułoby każdą integrację, nie chroniąc nikogo.
+- Lista dozwolonych origin to **ta sama, którą zna CORS**, żeby obie nie rozjechały się co do tego, komu się ufa — dzięki temu `pnpm dev` na :5173 dalej działa.
+- Zweryfikowane **poleceniami z raportu**: `create_backup` i `reboot` z `Origin: https://evil.example` → `403`; to samo bez `Origin` → `401`, czyli normalne wymaganie tokenu.
+
+### 8a. Twardnienie kodu aplikacji (F-09, F-16)
+- **F-09 — TOCTOU w `timezone_sudoers.py`.** Nazwa pliku tymczasowego budowana z PID-u była przewidywalna, więc inne lokalne konto mogło ją odgadnąć, podstawić dowiązanie i przechwycić zapis, albo podmienić treść między `visudo -c` a instalacją. Teraz `tempfile.mkstemp()`: `O_EXCL`, tryb 0600, nazwa nie do odgadnięcia.
+- **Trzeci problem, którego raport nie wymienia:** plik lądował w `/etc/sudoers.d/` przez `cp`, a tryb 0440 ustawiał dopiero osobny `chmod`. Między nimi miał złe uprawnienia — a gdyby `chmod` zawiódł, zostałby taki na stałe, w trybie, którego `sudo` nie honoruje, więc reguła po cichu by nie działała. Zastąpione jednym `install -m 0440 -o root -g root`. Sprzątanie pliku tymczasowego przeniesione do `finally`.
+- **F-16 — `!secret` psuł migrację `v4_wled_cache`.** Loader rejestrował tylko `!include`, więc config z `!secret` rzucał „could not determine a constructor", szeroki `except` to łykał i migracja cicho nie robiła nic — **dokładnie u tych, którzy zastosowali się do zaleceń bezpieczeństwa**. Dodany catch-all na dowolny tag (nie tylko `!secret`, żeby nie powtórzyło się przy następnym), ten sam loader dla pliku dołączonego (`remote_devices.yaml` trzyma hasła urządzeń, czyli naturalne miejsce na `!secret`), i głośniejszy komunikat błędu.
+- Zapis pliku idzie **regexem po surowym tekście**, nie przez re-serializację, więc tagi przeżywają nietknięte — sprawdzone.
+- Zweryfikowane na sterowniku scenariuszem z raportu: migracja wykonana, dane wyodrębnione, `!secret` nietknięty, pola WLED usunięte.
+
+### 8b. Część obrazowa (`black_debian_images`) — domknięta
+
+To była ostatnia otwarta pozycja: „domyślne hasło SSH, domyślne MQTT, certyfikat self-signed i HTTP, uprawnienia `/etc/mosquitto/passwd`, throttling SSH". Stan w `scripts/setup_boneio.sh`:
+
+- **F-04, hasło i sudo z obrazu.** Reguła `/etc/sudoers.d/boneio-setup` z `NOPASSWD: ALL`, pisana przez `build_image_usb.sh` na czas nienadzorowanego setupu, jest usuwana przy pieczętowaniu obrazu — i tylko tam, bo cały krok jest pomijany przy `--no-cleanup`, więc urządzeniu w eksploatacji nikt nie zmienia sudo pod nogami. Wspólne hasło `Black` jest przy pieczętowaniu **blokowane** (`passwd -l`), a hasło admina z kreatora staje się hasłem SSH — raz, przez `boneio-system service-password-init`, tylko ze stanu zablokowanego, fabrycznego albo pustego (migracja 1.6.17). Wcześniej było tylko wygaszane przez `chage -d 0`, a ta roadmapa twierdziła, że „właściciel ustawia swoje przy pierwszym logowaniu” — co nie było prawdą: zmianę wymuszało na tym, kto zalogował się pierwszy, a to nie musiał być właściciel. Obraz nie dopisuje już konta do grupy `docker`.
+- **F-05, MQTT.** Trzy konta (`boneio`, `homeassistant`, `mqtt`) dostają hasła z `openssl rand`, per urządzenie. Tworzone są **tylko te, których nie ma** — wcześniejsza wersja kroku nadpisywała wszystkie trzy przy każdym uruchomieniu, cicho cofając to, co ustawił właściciel.
+- **F-10, transmisja.** Pięć wariantów configu wiezie `web: expose: proxy`, więc świeży obraz nie wystawia 8090 na LAN. Caddy przekierowuje 80 → HTTPS, liść żyje 180 dni zamiast dwunastu godzin, intermediate rok, i jest upload własnego certyfikatu.
+- **F-11, uprawnienia.** `chown root:mosquitto` + `chmod 0640` — **dwa razy**, także po rotacji hasła, bo `mosquitto_passwd` przepisuje plik i gubi tryb. To jest ta „pułapka naprawy", którą raport wytknął osobno.
+- **Throttling SSH** przeniesiony z #3: krok 1b, trzy próby na połączenie zamiast sześciu, krótsze okno, root bez logowania po SSH.
+
+### Co doszło po dev2, czego ta roadmapa nie widziała
+
+- **Grupa `docker` zdjęta** (migracja 1.6.11 + obraz). Członkostwo w niej jest równoważne rootowi, więc dopóki zostawało, reszta pracy nad F-04 była obejściem, nie naprawą. Migracja odmawia, dopóki `/usr/sbin/boneio-containers` nie jest zainstalowany i root-owned — sprawdza, że jest gdzie przenieść zarządzanie kontenerami, zamiast wierzyć kolejności w planie.
+- **Certyfikaty:** własny do wgrania, root CA do pobrania, 180 dni zamiast 12 godzin (1.6.13, 1.6.14).
+- **`web.expose`** z guardem, który sonduje proxy, zanim pozwoli zdjąć panel z sieci — jedyne ustawienie, którego awaria to sterownik nieodpowiadający na żadnym porcie.
+- **Port panelu dociera do Caddy'ego** (1.6.15). Upstream był wpisany na sztywno jako 8090, więc przy `expose: proxy` zmiana portu odcinała urządzenie od sieci.
+- **Kolejność release floor** (1.6.16). Helper porównywał sufiks pre-release jako tekst, więc `dev10 < dev9` i każde urządzenie z floor dev2–dev9 odrzucało resztę serii. Znalezione na sprzęcie, nie w testach — floor jest sprawdzany dopiero przy stosowaniu migracji.
+- **[MIGRATION_SIGNING.md](MIGRATION_SIGNING.md)** — opis mechanizmu podpisów dla kogoś, kto audytuje urządzenie, razem z tym, czego ten mechanizm świadomie nie chroni.
+- **Numery CVE usunięte z drzewa** — repo jest publiczne, a identyfikatory nie są jeszcze opublikowane. Wyjaśnienia zostały.
+
+## Dowód per ustalenie
+
+Do czego sięgnąć, gdy ktoś zapyta „czym dowodzicie, że F-XX jest zamknięte". Każdy plik testowy nazywa swoje ustalenie w docstringu, więc `grep -rn "F-10" tests/` prowadzi do dowodu.
+
+| | co zamyka | dowód |
+|---|---|---|
+| F-01 | `adminAuth` w Node-RED spięty z kontem admina | `test_nodered_admin_auth.py` |
+| F-02 | urządzenie bez konta odmawia API; role wymuszane na trasach | `test_auth_middleware.py`, `test_authz_policy.py` |
+| F-03 | maskowanie w `GET /api/config` i w logach; serial nie wychodzi anonimowo | `test_secret_masking.py`, `test_config_secret_routes.py`, `test_serial_disclosure.py`, `test_log_scrubbing.py` |
+| F-04 | podpisane plany, helpery o zamkniętym słowniku, stary helper wycofany, grupa `docker` zdjęta, reguła build-time usuwana przy pieczętowaniu | `test_migrate_helper_v2.py`, `test_signed_plans.py`, `test_system_helper.py`, `test_migration_dispatch.py`, `test_code_hardening.py`, `setup_boneio.sh` |
+| F-05 | hasła per urządzenie w obrazie; aplikacja **wykrywa** domyślne, nie zmienia go | `test_security_posture.py`, `setup_boneio.sh` |
+| F-06 | 10 prób / 5 min, równolegle po IP i po koncie; SSH w obrazie | `test_login_rate_limit.py`, `setup_boneio.sh` krok 1b |
+| F-07 | sprawdzanie `Origin` na operacjach zmieniających stan | `test_csrf.py` |
+| F-08 | token tylko dla prawdziwych poświadczeń, konto wymuszone | `test_auth_middleware.py`, `test_onboarding_routes.py` |
+| F-09 | `tempfile.mkstemp()` — `O_EXCL`, 0600; `install -m 0440` jednym krokiem | `test_timezone_sudoers.py`, `test_code_hardening.py` |
+| F-10 | `expose: proxy` domyślnie w obrazie, redirect 80→HTTPS, liść 180d, port dociera do proxy | `test_expose_guard.py`, `test_migration_consistency.py`, `test_web_port_reaches_caddy.py` |
+| F-11 | `0640 root:mosquitto`, nakładane też po rotacji | `test_mosquitto_passwd_perms.py`, `setup_boneio.sh` |
+| F-12 | każda ścieżka API wymaga roli, więc trasa dodana bez niej oblewa testy | `test_authz_policy.py` |
+| F-13 | CSP, Permissions-Policy, warunkowy HSTS, X-Frame-Options | `test_security_headers.py` |
+| F-14 | kreator ustawia poświadczenia pierwszy; nieuwierzytelnione `PUT` zniknęło | `test_onboarding_routes.py` |
+| F-15 | walidacja host/port, blokada loopback i sieci prywatnych, wymóg admina | `test_discovery_guard.py` |
+| F-16 | catch-all na dowolny tag, ten sam loader dla `!include` | `test_migration_dispatch.py` |
+
+>>>>>>> theirs
 ## Status
 - [x] 1. Onboarding — **zrobione** (gałąź `feature/onboarding-wizard`, 1.6.0.dev1)
 - [x] 2. Role admin/read-only — **zrobione** (gałąź `feature/rbac-admin-viewer`)
 - [x] 3. Twardnienie logowania — **zrobione w aplikacji** (gałąź `feature/login-hardening`); część SSH przeniesiona do #8
+<<<<<<< ours
 - [ ] 4. Ochrona sekretów
 - [ ] 5. Node-RED adminAuth
 - [ ] 6. SSRF
 - [ ] 7. CSRF
 - [ ] 8. Twardnienie kodu/systemu
+=======
+- [x] 4. Ochrona sekretów — **zrobione**
+- [x] 5. Node-RED adminAuth — **zrobione**
+- [x] 6. SSRF — **zrobione**
+- [x] 7. CSRF — **zrobione**
+- [x] 8. Twardnienie kodu/systemu — **zrobione**: aplikacja (F-09, F-16) i obraz (F-04, F-05, F-10, F-11 + SSH z #3), patrz 8b
+
+Wszystkie 16 ustaleń mają dowód nazwany po imieniu — `grep -rhoE "F-0[1-9]|F-1[0-6]" tests/` zwraca F-01…F-16.
+
+**Czego to nie znaczy.** Zamknięte znaczy „jest mechanizm i jest test, który go trzyma", nie „nie ma tu już ryzyka". Granice są wypisane w [MIGRATION_SIGNING.md](MIGRATION_SIGNING.md): urządzenie już zrootowane, `(ALL:ALL) ALL` operatora za hasłem, i furtka deweloperska, której na wysyłanym urządzeniu być nie może.
+>>>>>>> theirs

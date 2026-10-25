@@ -6,24 +6,42 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException
+
+from boneio.core.net.discovery_guard import (
+    ESPHOME_PORTS,
+    WLED_PORTS,
+    DiscoveryTargetError,
+    assert_target_allowed,
+)
 from pydantic import BaseModel
 
 from boneio.core.manager import Manager
-from boneio.core.remote.esphome import (
-    ESPHOME_API_AVAILABLE,
-    ZEROCONF_AVAILABLE,
-    discover_esphome_entities,
-    scan_esphome_devices,
-)
-from boneio.core.remote.wled import (
-    discover_wled_info,
-    scan_wled_devices,
-)
 
 if TYPE_CHECKING:
     pass
 
 _LOGGER = logging.getLogger(__name__)
+
+
+#: The discovery backends are imported on first use, not at module import.
+#: ``aioesphomeapi`` alone costs ~5s of module-level work on a BeagleBone, and
+#: ``wled`` pulls ``aiohttp`` behind it - paid at every boot by every
+#: controller, including the ones that have no remote device at all, because
+#: importing this module is what builds the web UI's routes. Nothing here is
+#: needed until somebody asks the UI to go and find a device.
+def _esphome():
+    """The ESPHome discovery backend, imported on demand."""
+    from boneio.core.remote import esphome
+
+    return esphome
+
+
+def _wled():
+    """The WLED discovery backend, imported on demand."""
+    from boneio.core.remote import wled
+
+    return wled
+
 
 router = APIRouter(prefix="/api/remote-devices", tags=["remote_devices"])
 
@@ -176,23 +194,41 @@ async def discover_esphome(request: ESPHomeDiscoverRequest):
     Raises:
         HTTPException: 400 if aioesphomeapi not installed, 500 if discovery fails.
     """
-    if not ESPHOME_API_AVAILABLE:
+    esphome = _esphome()
+    if not esphome.ESPHOME_API_AVAILABLE:
         raise HTTPException(
             status_code=400, 
             detail="aioesphomeapi not installed - ESPHome API support disabled"
         )
     
+    try:
+        assert_target_allowed(request.host, request.port, ESPHOME_PORTS)
+    except DiscoveryTargetError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
     _LOGGER.info("Discovering ESPHome entities at %s:%d", request.host, request.port)
-    
-    result = await discover_esphome_entities(
+
+    result = await esphome.discover_esphome_entities(
         host=request.host,
         port=request.port,
         password=request.password,
         encryption_key=request.encryption_key,
     )
-    
+
     if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
+        # Logged, never returned: the native-API handshake error carries the
+        # first byte of whatever answered, so "Invalid preamble 0x53" would
+        # spell out the S of an SSH banner.
+        _LOGGER.warning(
+            "ESPHome discovery failed for %s:%d: %s",
+            request.host,
+            request.port,
+            result["error"],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="No ESPHome device answered at that address.",
+        )
     
     _LOGGER.info(
         "Discovered %d switches, %d lights, %d covers, %d binary_sensors at %s",
@@ -221,7 +257,7 @@ async def scan_esphome_network(timeout: float = 3.0):
     Raises:
         HTTPException: 400 if zeroconf not installed, 500 if scan fails.
     """
-    if not ZEROCONF_AVAILABLE:
+    if not _esphome().ZEROCONF_AVAILABLE:
         raise HTTPException(
             status_code=400, 
             detail="zeroconf not installed - mDNS discovery disabled"
@@ -232,7 +268,7 @@ async def scan_esphome_network(timeout: float = 3.0):
     
     _LOGGER.info("Scanning network for ESPHome devices (timeout: %.1fs)", timeout)
     
-    result = await scan_esphome_devices(timeout=timeout)
+    result = await _esphome().scan_esphome_devices(timeout=timeout)
     
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
@@ -266,15 +302,32 @@ async def discover_wled(request: WLEDDiscoverRequest):
     Raises:
         HTTPException: 500 if discovery fails.
     """
+    try:
+        assert_target_allowed(request.host, request.port, WLED_PORTS)
+    except DiscoveryTargetError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
     _LOGGER.info("Discovering WLED segments at %s:%d", request.host, request.port)
-    
-    result = await discover_wled_info(
+
+    result = await _wled().discover_wled_info(
         host=request.host,
         port=request.port,
     )
-    
+
     if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
+        # The upstream error is logged, never returned. Handing it back would
+        # make an HTTP probe a banner grabber: when SSH answers, "Bad status
+        # line" carries its version string.
+        _LOGGER.warning(
+            "WLED discovery failed for %s:%d: %s",
+            request.host,
+            request.port,
+            result["error"],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="No WLED device answered at that address.",
+        )
     
     _LOGGER.info(
         "Discovered WLED '%s' with %d segments at %s",
@@ -301,7 +354,7 @@ async def scan_wled_network(timeout: float = 3.0):
     Raises:
         HTTPException: 400 if zeroconf not installed, 500 if scan fails.
     """
-    if not ZEROCONF_AVAILABLE:
+    if not _wled().ZEROCONF_AVAILABLE:
         raise HTTPException(
             status_code=400, 
             detail="zeroconf not installed - mDNS discovery disabled"
@@ -312,7 +365,7 @@ async def scan_wled_network(timeout: float = 3.0):
     
     _LOGGER.info("Scanning network for WLED devices (timeout: %.1fs)", timeout)
     
-    result = await scan_wled_devices(timeout=timeout)
+    result = await _wled().scan_wled_devices(timeout=timeout)
     
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
@@ -320,6 +373,20 @@ async def scan_wled_network(timeout: float = 3.0):
     _LOGGER.info("Found %d WLED device(s)", len(result.get("devices", [])))
     
     return result
+
+
+# Must stay above "/{device_id}": Starlette matches in registration order,
+# so the catch-all would otherwise bind device_id="wled_info" and 404.
+@router.get("/wled_info")
+async def get_all_wled_info() -> dict[str, dict[str, Any]]:
+    """Get cached WLED metadata for all devices.
+
+    Returns:
+        Dict mapping device_id to {effects, palettes, segments}.
+    """
+    from boneio.core.remote.wled_cache import get_all_metadata
+
+    return get_all_metadata()
 
 
 @router.get("/{device_id}")
@@ -507,18 +574,6 @@ async def get_wled_device_info(device_id: str) -> dict[str, Any]:
             detail=f"No cached WLED metadata for device '{device_id}'",
         )
     return metadata
-
-
-@router.get("/wled_info")
-async def get_all_wled_info() -> dict[str, dict[str, Any]]:
-    """Get cached WLED metadata for all devices.
-
-    Returns:
-        Dict mapping device_id to {effects, palettes, segments}.
-    """
-    from boneio.core.remote.wled_cache import get_all_metadata
-
-    return get_all_metadata()
 
 
 @router.post("/{device_id}/refresh_wled_cache")

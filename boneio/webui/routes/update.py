@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import ipaddress
 import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 from datetime import datetime
@@ -17,13 +19,27 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
+<<<<<<< ours
 from boneio.core.config.yaml_util import load_config_from_file, load_yaml_file, normalize_board_name
 from boneio.core.update_source import parse_pypi_package_versions, resolve_custom_update_target
+=======
+from boneio.core.atomic_file import write_atomically
+from boneio.core.config.yaml_util import (
+    load_config_from_file,
+    load_yaml_file,
+    normalize_board_name,
+    normalize_version,
+)
+from boneio.factory_config import OLDEST_REVISION, template_dir, type_folder
+>>>>>>> theirs
 from boneio.version import __version__
+from boneio.webui.routes.system import get_config_helper
 from boneio.webui.services.logs import is_running_as_service
 
 if TYPE_CHECKING:
     from boneio.core.manager import Manager
+
+from boneio.core import system_ops
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +57,28 @@ _GITHUB_RELEASES_CACHE: dict = {
     "fetched_at": 0.0,
 }
 _GITHUB_RELEASES_TTL = 900  # 15 minutes in seconds
+# GitHub returns 30 releases per page by default, newest *created* first. Dev
+# prereleases outnumber stable ones, so a page that small eventually drops the
+# latest stable release and stable devices are never offered an update. 100 is
+# the API maximum.
+_GITHUB_RELEASES_PER_PAGE = 100
+_fetch_lock: asyncio.Lock | None = None
+_fetch_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _github_fetch_lock() -> asyncio.Lock:
+    """The lock that makes concurrent callers share one GitHub fetch.
+
+    Made for the running loop: a lock is bound to the loop it first waits on,
+    and the application has one, but anything that starts another (tests, the
+    recovery panel) would otherwise inherit a lock it cannot use.
+    """
+    global _fetch_lock, _fetch_lock_loop
+    loop = asyncio.get_running_loop()
+    if _fetch_lock is None or _fetch_lock_loop is not loop:
+        _fetch_lock = asyncio.Lock()
+        _fetch_lock_loop = loop
+    return _fetch_lock
 
 
 def _get_cached_releases() -> list | None:
@@ -75,7 +113,9 @@ def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | Non
 
     api_url = f"https://api.github.com/repos/{repo}/releases"
     try:
-        response = requests.get(api_url, timeout=10)
+        response = requests.get(
+            api_url, params={"per_page": _GITHUB_RELEASES_PER_PAGE}, timeout=10
+        )
     except Exception as exc:
         return None, f"GitHub API request failed: {exc}"
 
@@ -93,7 +133,11 @@ def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | Non
 
 
 async def _fetch_github_releases_async(
+<<<<<<< ours
     repo: str = GITHUB_RELEASES_REPO,
+=======
+    repo: str = "boneIO-eu/app_black",
+>>>>>>> theirs
 ) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API without stalling the event loop.
 
@@ -118,7 +162,20 @@ async def _fetch_github_releases_async(
         _LOGGER.debug("Using cached GitHub releases (%d entries)", len(cached))
         return cached, None
 
+<<<<<<< ours
     return await asyncio.to_thread(_fetch_github_releases, repo)
+=======
+    # One fetch at a time. The update page asks for the update check and the
+    # version list at once, and with the cache expired each went to GitHub on
+    # its own - two downloads of the same hundred releases, about 4 s apiece
+    # on a BeagleBone, that together outlasted the panel's timeout. The second
+    # caller waits for the first and is answered from the cache it fills.
+    async with _github_fetch_lock():
+        cached = _get_cached_releases()
+        if cached is not None:
+            return cached, None
+        return await asyncio.to_thread(_fetch_github_releases, repo)
+>>>>>>> theirs
 
 
 def get_manager():
@@ -741,10 +798,48 @@ HARDWARE_SENSORS = {
     "0.7": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": True, "power_sensor": "ina219", "modbus_uart": "uart4"},
     "0.8": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": True, "power_sensor": "ina219", "modbus_uart": "uart4"},
     "1.0": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": False, "power_sensor": "ina226", "modbus_uart": "uart4"},
+    # 1.1 differs from 1.0 only by the buzzer, which touches neither the
+    # sensors nor the UART.
+    "1.1": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": False, "power_sensor": "ina226", "modbus_uart": "uart4"},
 }
 
 # Available hardware versions
 HARDWARE_VERSIONS = list(HARDWARE_SENSORS.keys())
+
+
+def _current_board_version() -> str | None:
+    """The board revision config.yaml names, if it is one a reset knows."""
+    try:
+        config = load_yaml_file(os.path.expanduser("~/boneio/config.yaml")) or {}
+        version = normalize_version(config.get("boneio", {}).get("version"))
+    except Exception:  # noqa: BLE001 — no readable config, no current version
+        return None
+    return version if version in HARDWARE_VERSIONS else None
+
+
+def _current_device_type() -> str | None:
+    """The controller type config.yaml names, as the reset lists it (``32x10``)."""
+    try:
+        config = load_yaml_file(os.path.expanduser("~/boneio/config.yaml")) or {}
+        named = normalize_board_name(str(config.get("boneio", {}).get("device_type") or ""))
+    except Exception:  # noqa: BLE001 — no readable config, no current type
+        return None
+    if not named:
+        return None
+    # 32x10a, 32x10A and 32x10 are one controller; compare as the loader does.
+    return next((t for t in DEVICE_TYPES if normalize_board_name(t) == named), None)
+
+
+def _factory_templates(device_type: str, version: str):
+    """Where a reset copies from, and whether config.yaml still needs fitting.
+
+    Revisions with templates of their own are copied as they are; older ones
+    get the oldest templates, fitted by _adjust_config_for_hardware_version.
+    """
+    own = template_dir(device_type, version)
+    if own is not None:
+        return own, False
+    return template_dir(device_type, OLDEST_REVISION), True
 
 
 @router.get("/factory_reset/hardware_versions")
@@ -758,6 +853,7 @@ async def get_hardware_versions():
     return {
         "versions": HARDWARE_VERSIONS,
         "sensors": HARDWARE_SENSORS,
+        "current": _current_board_version(),
     }
 
 
@@ -767,15 +863,16 @@ async def get_device_types():
     Get available device types for factory reset.
     
     Returns:
-        List of available device types.
+        The device types, and the one this controller is configured as, which
+        the reset dialog offers first.
     """
-    return {"device_types": DEVICE_TYPES}
+    return {"device_types": DEVICE_TYPES, "current": _current_device_type()}
 
 
 class FactoryResetRequest(BaseModel):
     """Request model for factory reset endpoint."""
     device_type: str
-    version: str = "0.8"  # Hardware version, default to latest
+    version: str | None = None  # Hardware version; None: the one config.yaml names
 
 
 class PartialResetRequest(BaseModel):
@@ -802,7 +899,7 @@ async def partial_factory_reset(request: PartialResetRequest):
     files_to_replace = request.files_to_replace
     
     # Normalize device type
-    normalized_type = normalize_board_name(device_type)
+    normalized_type = type_folder(normalize_board_name(device_type))
     
     if normalized_type not in DEVICE_TYPES:
         return {
@@ -816,15 +913,13 @@ async def partial_factory_reset(request: PartialResetRequest):
             "message": "No files selected for replacement"
         }
     
-    # Find example config directory (relative to this file: boneio/webui/routes/update.py)
-    boneio_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    example_config_dir = os.path.join(boneio_path, "example_config", normalized_type)
-    
-    if not os.path.isdir(example_config_dir):
+    templates, _ = _factory_templates(normalized_type, _current_board_version() or OLDEST_REVISION)
+    if templates is None:
         return {
             "status": "error",
-            "message": f"Example config not found for device type: {device_type}"
+            "message": f"Factory config not found for device type: {device_type}"
         }
+    example_config_dir = str(templates)
     
     # User config directory
     config_dir = os.path.expanduser("~/boneio")
@@ -990,12 +1085,84 @@ def _adjust_config_for_hardware_version(config_content: str, version: str, devic
     
     # Update boneio version in config
     config_content = re.sub(
-        r'(boneio:\s*\n\s*name:[^\n]*\n\s*)version:[^\n]*\n',
-        f'\\1version: {version}\n',
-        config_content
+        r'(^boneio:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+)version:[^\n]*\n',
+        f'\\g<1>version: {version}\n',
+        config_content,
+        flags=re.MULTILINE,
     )
     
     return config_content
+
+
+
+
+_MQTT_PASSWORD_LINE = re.compile(r"^(?P<indent>\s*)password:\s*(?P<value>.*?)\s*$", re.MULTILINE)
+_SECRET_REF = re.compile(r"^!secret\s+(?P<name>\S+)$")
+
+
+def _current_mqtt_password(config_dir: str) -> str | None:
+    """The password boneIO signs in to its broker with, before a reset.
+
+    Read from mqtt.yaml, following ``!secret`` into secrets.yaml. None when
+    there is no mqtt.yaml, it has no password, or the secret cannot be found —
+    then the reset keeps the example's value, as it always did.
+    """
+    mqtt_path = os.path.join(config_dir, "mqtt.yaml")
+    try:
+        with open(mqtt_path, encoding="utf-8") as f:
+            match = _MQTT_PASSWORD_LINE.search(f.read())
+    except OSError:
+        return None
+    if not match:
+        return None
+    ref = _SECRET_REF.match(match.group("value"))
+    if ref is None:
+        import yaml
+
+        try:
+            value = yaml.safe_load(match.group("value"))
+        except yaml.YAMLError:
+            return None
+        return str(value) if value not in (None, "") else None
+    try:
+        secrets = load_yaml_file(os.path.join(config_dir, "secrets.yaml")) or {}
+    except Exception:  # noqa: BLE001 — an unreadable secrets.yaml is "unknown"
+        return None
+    found = secrets.get(ref.group("name")) if isinstance(secrets, dict) else None
+    return str(found) if found is not None else None
+
+
+def _keep_mqtt_password(config_dir: str, password: str) -> None:
+    """Point the reset mqtt.yaml at secrets.yaml, holding the device's password.
+
+    Images draw the broker's password per device at first boot. The example
+    configs say "boneio123", so a reset that copied them as they are left boneIO
+    unable to reach its own broker. The broker account is the device's, not
+    part of the board configuration a reset restores.
+    """
+    mqtt_path = os.path.join(config_dir, "mqtt.yaml")
+    with open(mqtt_path, encoding="utf-8") as f:
+        content = f.read()
+    new_content, count = _MQTT_PASSWORD_LINE.subn(
+        lambda m: f"{m.group('indent')}password: !secret mqtt_password", content, count=1
+    )
+    if not count:
+        return
+    secrets_path = os.path.join(config_dir, "secrets.yaml")
+    try:
+        with open(secrets_path, encoding="utf-8") as f:
+            secrets_text = f.read()
+    except FileNotFoundError:
+        secrets_text = ""
+    quoted = '"' + password.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    line = f"mqtt_password: {quoted}"
+    if re.search(r"^mqtt_password:.*$", secrets_text, re.MULTILINE):
+        secrets_text = re.sub(r"^mqtt_password:.*$", lambda _m: line, secrets_text, count=1, flags=re.MULTILINE)
+    else:
+        secrets_text = (secrets_text.rstrip("\n") + "\n" if secrets_text.strip() else "") + line + "\n"
+    write_atomically(secrets_path, secrets_text, mode=0o600)
+    write_atomically(mqtt_path, new_content)
+    _LOGGER.info("Factory reset kept this device's MQTT password (in secrets.yaml)")
 
 
 @router.post("/factory_reset")
@@ -1017,7 +1184,7 @@ async def factory_reset(request: FactoryResetRequest):
         Status response.
     """
     device_type = request.device_type.lower()
-    version = request.version
+    version = request.version or _current_board_version() or OLDEST_REVISION
     
     if device_type not in DEVICE_TYPES:
         return {
@@ -1031,15 +1198,13 @@ async def factory_reset(request: FactoryResetRequest):
             "message": f"Invalid hardware version: {version}. Available: {', '.join(HARDWARE_VERSIONS)}"
         }
     
-    # Find example config directory (relative to this file: boneio/webui/routes/update.py)
-    boneio_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    example_config_dir = os.path.join(boneio_path, "example_config", device_type)
-    
-    if not os.path.isdir(example_config_dir):
+    templates, needs_fitting = _factory_templates(device_type, version)
+    if templates is None:
         return {
             "status": "error",
-            "message": f"Example config not found for device type: {device_type}"
+            "message": f"Factory config not found for device type: {device_type}"
         }
+    example_config_dir = str(templates)
     
     # User config directory
     config_dir = os.path.expanduser("~/boneio")
@@ -1055,6 +1220,9 @@ async def factory_reset(request: FactoryResetRequest):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"config_backup_{timestamp}")
         
+        # The device's broker password, which the example configs do not have.
+        mqtt_password = _current_mqtt_password(config_dir)
+
         # Copy all yaml files from config_dir to backup
         yaml_files = glob.glob(os.path.join(config_dir, "*.yaml"))
         if yaml_files:
@@ -1063,8 +1231,12 @@ async def factory_reset(request: FactoryResetRequest):
                 shutil.copy2(yaml_file, backup_path)
             _LOGGER.info(f"Configuration backup created at {backup_path}")
         
-        # Step 2: Remove old configuration files and state
+        # Step 2: Remove old configuration files and state. Not secrets.yaml:
+        # it is where the owner keeps credentials, not board configuration,
+        # and it is in the backup either way.
         for yaml_file in yaml_files:
+            if os.path.basename(yaml_file) in ("secrets.yaml", "secrets.yml"):
+                continue
             os.remove(yaml_file)
             _LOGGER.info(f"Removed old config file: {os.path.basename(yaml_file)}")
         
@@ -1089,13 +1261,17 @@ async def factory_reset(request: FactoryResetRequest):
             filename = os.path.basename(example_file)
             dest_path = os.path.join(config_dir, filename)
             
-            # For config.yaml, adjust sensors based on hardware version
-            if filename == "config.yaml":
+            # secrets.yaml stays: it holds this device's credentials, and the
+            # template's is the factory placeholder.
+            if filename == "secrets.yaml" and os.path.exists(dest_path):
+                continue
+
+            # An older revision's config.yaml: fit the sensors to it
+            if filename == "config.yaml" and needs_fitting:
                 with open(example_file) as f:
                     content = f.read()
                 adjusted_content = _adjust_config_for_hardware_version(content, version, device_type)
-                with open(dest_path, 'w') as f:
-                    f.write(adjusted_content)
+                write_atomically(dest_path, adjusted_content)
                 if content != adjusted_content:
                     adjusted_files.append(filename)
                     _LOGGER.info(f"Adjusted {filename} for hardware version {version}")
@@ -1105,6 +1281,9 @@ async def factory_reset(request: FactoryResetRequest):
             copied_files.append(filename)
             _LOGGER.info(f"Copied {filename} to {config_dir}")
         
+        if mqtt_password and os.path.exists(os.path.join(config_dir, "mqtt.yaml")):
+            _keep_mqtt_password(config_dir, mqtt_password)
+
         _LOGGER.info(f"Factory reset completed for device type: {device_type}, version: {version}")
         
         return {
@@ -1220,64 +1399,248 @@ async def restore_config_backup(request: RestoreConfigBackupRequest):
 
 @router.get("/mqtt/username")
 async def get_mqtt_username():
-    """
-    Get the MQTT username from configuration.
-    
-    Returns the username that the application uses to connect to MQTT broker.
-    This is used to warn users when changing this password.
-    
+    """Report which broker account the application actually connects with.
+
+    The panel shows the accounts of the broker installed on this controller,
+    and warns on the row belonging to boneIO itself — change that password
+    without updating the configuration and the device stops reporting.
+
+    Getting that row right means reading the running configuration, which this
+    did not do. It opened ``~/.boneio/mqtt.yaml``, a path that does not exist
+    on a real device, looked for a ``mqtt:`` key inside a file whose contents
+    *are* the mqtt section, and fell through both failures to a hard-coded
+    "boneio". The warning was therefore fixed to that row, and wrong for
+    anyone who had changed the username.
+
+    The answer also says whether the broker is the local one at all. Point
+    boneIO at the broker in Home Assistant and none of these accounts is the
+    one it uses, so the warning belongs on no row.
+
     Returns:
-        Username from mqtt.username config or 'boneio' as default
+        The configured username, the broker host, and whether that host is
+        this device.
     """
+    username = "boneio"
+    host = ""
+    known = False
+
     try:
-        # Try to read from config directory
-        config_dir = os.path.expanduser("~/.boneio")
-        mqtt_config_path = os.path.join(config_dir, "mqtt.yaml")
-        
-        if os.path.exists(mqtt_config_path):
-            config = load_config_from_file(mqtt_config_path)
-            if config:
-                mqtt_config = config.get("mqtt", {})
-                username = mqtt_config.get("username", "boneio")
-            else:
-                username = "boneio"
-        else:
-            # Fallback to default
-            username = "boneio"
-        
-        return {
-            "status": "success",
-            "username": username
-        }
-    except Exception as e:
-        _LOGGER.exception(f"Failed to get MQTT username: {e}")
-        # Return default if config reading fails
-        return {
-            "status": "success",
-            "username": "boneio"
-        }
+        config = get_config_helper().get_config()
+        mqtt = config.get("mqtt") if isinstance(config, dict) else None
+        if isinstance(mqtt, dict):
+            username = str(mqtt.get("username") or "boneio")
+            host = str(mqtt.get("host") or "")
+            known = True
+    except Exception as err:  # noqa: BLE001
+        # Never fail the panel over this: without it the passwords still
+        # change, only the warning is missing. But say so — silence here is
+        # what let the broken version survive.
+        _LOGGER.warning("Could not read the MQTT configuration: %s", err)
+
+    return {
+        "status": "success",
+        "username": username,
+        "host": host,
+        "uses_local_broker": known and is_local_broker_host(host),
+        # False means the fields above are a guess, and the panel should not
+        # claim anything about which account belongs to the application.
+        "known": known,
+    }
 
 
 class MqttPasswordChangeRequest(BaseModel):
     """Request model for MQTT password change."""
     username: str
     new_password: str
+    #: Also store the new password in this device's own configuration and
+    #: reconnect with it. Only meaningful for the account boneIO connects
+    #: with, on the broker installed here; see :func:`_adopt_broker_password`.
+    update_config: bool = False
+
+
+#: Hosts that mean "the broker installed on this controller". An empty host is
+#: the client library's own default, which is loopback. Kept in step with
+#: :func:`get_mqtt_username`, which shows the panel the same thing.
+LOCAL_BROKER_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
+
+
+def is_local_broker_host(host: str) -> bool:
+    """Whether ``mqtt.host`` names the broker installed on this controller.
+
+    Besides loopback, people often write the device's own address or name —
+    copied from the panel's address bar, or the same config.yaml used by Home
+    Assistant on another machine. Those reach the same broker, so the
+    password change has to reach the configuration as well.
+
+    No DNS lookup: a name counts only when it is this device's own hostname
+    (or that name with ``.local``). An address counts when it is loopback or
+    one this device can bind to, which is exactly "one of its own".
+
+    Args:
+        host: The configured broker host.
+
+    Returns:
+        True when the host is this device.
+    """
+    name = host.strip().lower().strip("[]")
+    if name in LOCAL_BROKER_HOSTS:
+        return True
+    own = socket.gethostname().lower()
+    if name in {own, f"{own}.local"}:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.bind((name, 0))
+    except OSError:
+        return False
+    return True
+
+
+def _store_broker_password(config_file: str, password: str) -> str:
+    """Write a new broker password where this device reads its own from.
+
+    BLOCKING: file I/O, called through an executor.
+
+    Args:
+        config_file: Path to config.yaml.
+        password: The password just set in the broker.
+
+    Returns:
+        ``"secret"`` when the password ended up in secrets.yaml — always
+        when the field already defers there (``password: !secret mqtt_pass``
+        usually means config.yaml is somewhere the password must not be), and
+        otherwise after moving a plain value there. ``"config"`` only when
+        that move failed.
+
+    Raises:
+        YamlPatchError: If the mqtt section cannot be edited, such as an
+            include naming a file that is not there.
+    """
+    from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
+    from boneio.core.config.yaml_patch import (
+        YamlPatchError,
+        move_to_secret,
+        resolve_field,
+        secret_reference,
+        set_scalar,
+        set_secret,
+    )
+
+    field = ("mqtt", "password")
+    # Held across the lookup too: where the password goes is decided from the
+    # file as it is now, and a save in between could change that.
+    with CONFIG_WRITE_LOCK:
+        # Every shipped controller has `mqtt: !include mqtt.yaml`, and that
+        # file is the per-device one the broker password exists in. A
+        # secrets.yaml beside it is the one BoneIOLoader would read from there.
+        target, _ = resolve_field(config_file, field)
+        reference = secret_reference(config_file, field)
+        if reference is not None:
+            set_secret(target.parent / "secrets.yaml", reference, password)
+            return "secret"
+        set_scalar(config_file, field, password)
+        # And out of the config again: a password written there travels with
+        # every backup, which is what migration v7 moved it away from.
+        try:
+            if move_to_secret(config_file, field, "mqtt_password"):
+                return "secret"
+        except YamlPatchError as err:
+            _LOGGER.warning("New broker password left in the config: %s", err)
+        return "config"
+
+
+async def _adopt_broker_password(manager: Manager, username: str, password: str) -> dict:
+    """Have boneIO start using a password that was just set in the broker.
+
+    The account boneIO connects with is also the account whose password the
+    panel changes, so changing it there and nowhere else takes the device off
+    its own broker until somebody edits the configuration and restarts. That
+    gap is what testers reported as the password change not working.
+
+    Only for the broker installed on this controller: with ``mqtt.host``
+    pointing somewhere else, the accounts in the local password file are not
+    the ones boneIO uses, and its configuration must not be touched.
+
+    Args:
+        manager: The running manager.
+        username: The account whose password was changed.
+        password: The new password.
+
+    Returns:
+        What happened, as ``{"status": ..., "reason": ...}``. Never raises: the
+        broker password is already changed by the time this runs, and reporting
+        that as a failure would be worse than saying what was skipped.
+    """
+    try:
+        config = manager.config_helper.get_config() or {}
+        mqtt = config.get("mqtt")
+        if not isinstance(mqtt, dict):
+            return {"status": "skipped", "reason": "no_mqtt_section"}
+
+        host = str(mqtt.get("host") or "")
+        if not is_local_broker_host(host):
+            return {"status": "skipped", "reason": "remote_broker"}
+
+        configured = str(mqtt.get("username") or "boneio")
+        if configured != username:
+            return {"status": "skipped", "reason": "other_account"}
+
+        config_file = manager.config_helper.config_file_path
+        if not config_file:
+            return {"status": "skipped", "reason": "no_config_file"}
+
+        loop = asyncio.get_running_loop()
+        written = await loop.run_in_executor(
+            None, _store_broker_password, config_file, password
+        )
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Could not store the new broker password: %s", err)
+        return {"status": "error", "reason": str(err)}
+
+    try:
+        result = await manager.reload_config(reload_sections=["mqtt"])
+    except Exception as err:  # noqa: BLE001
+        # Written but not adopted: a restart will pick it up, and saying so
+        # is better than claiming either success or failure.
+        _LOGGER.warning("Stored the new broker password but could not reconnect: %s", err)
+        return {"status": "written", "reason": str(err), "written_to": written}
+
+    if result.get("status") != "success":
+        _LOGGER.warning("Broker reconnect did not complete: %s", result)
+        return {"status": "written", "reason": "reload_failed", "written_to": written}
+
+    return {"status": "adopted", "written_to": written}
 
 
 @router.post("/mqtt/change_password")
-async def change_mqtt_password(request: MqttPasswordChangeRequest):
+async def change_mqtt_password(
+    request: MqttPasswordChangeRequest,
+    manager: Manager = Depends(get_manager),
+):
     """
     Change MQTT password for specified user.
-    
+
     Supports three users: boneio, homeassistant, mqtt
     Uses mosquitto_passwd to update password file.
-    
+
+    With ``update_config`` set, and only for the account boneIO itself
+    connects with on the broker installed here, the new password is also
+    stored in this device's configuration and adopted without a restart.
+
     WARNING: This endpoint sends passwords in plain text over HTTP.
     Use only over HTTPS or in a trusted local network.
-    
+
     Args:
-        request: Username and new password
-        
+        request: Username, new password, and whether to adopt it here.
+        manager: The running manager.
+
     Returns:
         Status response with success/error message
     """
@@ -1296,52 +1659,45 @@ async def change_mqtt_password(request: MqttPasswordChangeRequest):
             "message": "Password must be at least 8 characters long"
         }
     
-    # Path to mosquitto password file
-    passwd_file = "/etc/mosquitto/passwd"
-    
     try:
-        # Check if mosquitto_passwd command exists
-        check_cmd = subprocess.run(
-            ["which", "mosquitto_passwd"],
-            capture_output=True,
-            text=True
+        # Through the helper, which reads the password from stdin: passed as an
+        # argument (`mosquitto_passwd -b`) it would sit in the process table,
+        # readable by every local account, for as long as the command ran. The
+        # helper also puts the file back to root:mosquitto 0640 afterwards,
+        # which mosquitto_passwd does not.
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, system_ops.mqtt_password, request.username, request.new_password
         )
-        
-        if check_cmd.returncode != 0:
-            return {
-                "status": "error",
-                "message": "mosquitto_passwd command not found. Is Mosquitto installed?"
-            }
-        
-        # Use mosquitto_passwd to update password
-        # -b = batch mode (password on command line)
-        result = subprocess.run(
-            ["sudo", "mosquitto_passwd", "-b", passwd_file, request.username, request.new_password],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        _LOGGER.info(f"MQTT password changed for user: {request.username}")
-        
-        # Reload mosquitto to apply changes
-        try:
-            reload_result = subprocess.run(
-                ["sudo", "systemctl", "reload", "mosquitto"],
-                capture_output=True,
-                text=True,
-                check=True
+        if not result.ok:
+            message = result.stderr.strip() or "Failed to change the password"
+            _LOGGER.error(
+                "Failed to change MQTT password for %s: %s", request.username, message
             )
-            _LOGGER.info("Mosquitto service reloaded successfully")
-        except subprocess.CalledProcessError as e:
-            _LOGGER.warning(f"Failed to reload mosquitto service: {e.stderr}")
-            # Don't fail the whole operation if reload fails
-        
-        return {
+            return {"status": "error", "message": message}
+
+        _LOGGER.info("MQTT password changed for user: %s", request.username)
+
+        reload_result = await loop.run_in_executor(None, system_ops.mqtt_reload)
+        if not reload_result.ok:
+            # Not fatal: the password is written, the broker just has not been
+            # told yet, and it will pick it up on its next start.
+            _LOGGER.warning(
+                "Could not reload mosquitto: %s", reload_result.stderr.strip()
+            )
+
+        response = {
             "status": "success",
             "message": f"Password changed successfully for user: {request.username}"
         }
-        
+
+        if request.update_config:
+            response["config"] = await _adopt_broker_password(
+                manager, request.username, request.new_password
+            )
+
+        return response
+
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr if e.stderr else str(e)
         _LOGGER.error(f"Failed to change MQTT password for {request.username}: {error_msg}")

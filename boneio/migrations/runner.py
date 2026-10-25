@@ -22,12 +22,17 @@ import logging
 import os
 import pkgutil
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+<<<<<<< ours
+=======
+from boneio.core import system_ops
+>>>>>>> theirs
 from boneio.core.utils import overlay as overlay_util
 from boneio.migrations.actions import InstallFile, MigrationAction, render_template, sha256_of_content
 
@@ -41,6 +46,43 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 HELPER_PATH = "/usr/sbin/boneio-migrate"
+#: The protocol 2 helper, deliberately at its own path. Overwriting the only
+#: working helper during the pivot would be the one step with no way back: a
+#: syntax check cannot catch a bad openssl invocation or a missing trust anchor,
+#: and a device whose migration channel dies silently is worse than one that is
+#: merely not hardened yet.
+HELPER_V2_PATH = "/usr/sbin/boneio-migrate-v2"
+SUDOERS_HELPERS_PATH = "/etc/sudoers.d/boneio-helpers"
+HELPER_PROTOCOL = 2
+#: The installed package root, which is what the v2 helper is pointed at. It is
+#: only a hint: everything read from there is verified against the anchors
+#: pinned in /etc/boneio, because this directory is writable by the account the
+#: helper is protecting the system from.
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+#: The migration that installs v2, and the one that retires the legacy helper.
+#: Applied before everything else pending, in this order. Two reasons:
+#:
+#:  * In plain version order a device still on 1.5.x would work through its
+#:    whole backlog on the legacy helper before reaching the pivot, leaving the
+#:    escalation path open for the entire run.
+#:  * 1.6.4 hardens sshd and validates with ``sshd -t``, so it is the one
+#:    migration that can legitimately fail — and a failure stops everything
+#:    behind it. Ordered normally it would sit in front of these two and be
+#:    able to block the fix for F-04 over an unrelated sshd problem.
+#:
+#: Hoisting is safe: neither depends on an earlier migration.
+HARDENING_FIRST = ("1.6.5", "1.6.6")
+#: The one migration that may be applied by the legacy helper *after* v2 works,
+#: because it is what installs v2 and so cannot go through it.
+PIVOT_VERSIONS = frozenset({"1.6.5"})
+
+#: Migrations that use an action the legacy helper does not have, and that
+#: therefore have to wait for v2 rather than be attempted through protocol 1.
+#: Sending one to the old helper would simply be refused, and a refusal stops
+#: the whole queue — so a device whose pivot failed would never apply anything
+#: again. These are deferred instead: skipped, left pending, retried on the
+#: next start. Nothing ordered after one of these may depend on it.
+V2_ONLY_VERSIONS = frozenset({"1.6.11", "1.6.24"})
 APPLIED_DIR = Path("/var/lib/boneio/migrations.d")
 ASSETS_DIR = Path(__file__).parent / "assets"
 MANIFEST_PATH = ASSETS_DIR / "MANIFEST.sha256"
@@ -79,12 +121,15 @@ class MigrationInfo:
         module_name: Full dotted module path.
         description: Human-readable description.
         requires_root: Whether ``boneio-migrate`` helper is needed.
+        superseded_by: A later migration that redoes everything this one does,
+            so a device applying both from scratch can skip this one.
     """
 
     version: str
     module_name: str
     description: str
     requires_root: bool = True
+    superseded_by: str | None = None
 
     def version_tuple(self) -> tuple[int, ...]:
         """Return version as comparable integer tuple."""
@@ -120,13 +165,25 @@ class MigrationRunner:
         self._manifest: dict[str, str] = {}
         self._all_migrations: list[MigrationInfo] = []
         self._applied: set[str] = set()
+        self._v2_available: bool | None = None
+        # Held across the selftest, so the startup check and a status request
+        # arriving together share one run instead of each starting it.
+        self._v2_lock = threading.Lock()
+        self.hardening_pending: bool = False
+        # A skipped migration never gets its applied flag, so every status
+        # request finds it again; say so once per process, not on each poll.
+        self._skips_logged: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def startup_check(self) -> MigrationStatus:
+    def startup_check(self, progress_callback: Any | None = None) -> MigrationStatus:
         """Discover migrations, check helper, apply if possible.
+
+        Args:
+            progress_callback: Optional callable(pct, msg), called before each
+                migration is applied.
 
         Returns:
             Current :class:`MigrationStatus` after the check.
@@ -150,9 +207,16 @@ class MigrationRunner:
                 [m.version for m in pending],
             )
 
-            if not self._helper_installed():
+            # Either helper will do. Checking only the legacy path would break
+            # the device the moment 1.6.6 retires it: v2 would be installed and
+            # working, and the runner would still report "bootstrap required"
+            # and ask for a system password — undoing the point of removing the
+            # password prompts in the first place.
+            if not self._any_helper_available():
                 _LOGGER.warning(
-                    "boneio-migrate helper not found at %s. Bootstrap required — open WebUI to install.",
+                    "No migration helper found (neither %s nor %s). Bootstrap "
+                    "required — open the panel to install one.",
+                    HELPER_V2_PATH,
                     HELPER_PATH,
                 )
                 self.bootstrap_required = True
@@ -160,7 +224,7 @@ class MigrationRunner:
                 return self.status
 
             self._ensure_helper_up_to_date()
-            self._apply_pending(pending)
+            self._apply_pending(pending, progress_callback)
 
         except Exception as exc:
             _LOGGER.error("Migration startup_check failed: %s", exc, exc_info=True)
@@ -193,6 +257,8 @@ class MigrationRunner:
             self.status = MigrationStatus.OK
             return True
 
+        # Only meaningful while the legacy helper exists; it returns early
+        # once 1.6.6 has removed it.
         self._ensure_helper_up_to_date()
         return self._apply_pending(pending, progress_callback=progress_callback)
 
@@ -224,6 +290,11 @@ class MigrationRunner:
             "status": self.status.value,
             "bootstrap_required": self.bootstrap_required,
             "helper_installed": self._helper_installed(),
+            # Which protocol is in play. The UI needs to distinguish "not
+            # hardened yet" from "broken": a device applying migrations through
+            # the legacy helper still works, it just has F-04 open.
+            "helper_v2": self.helper_v2_available(),
+            "hardening_pending": self.hardening_pending,
             "pending_count": len(pending),
             "pending": [{"version": m.version, "description": m.description} for m in pending],
             "applied": applied_list,
@@ -291,6 +362,162 @@ class MigrationRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def helper_v2_available(self, recheck: bool = False) -> bool:
+        """Whether the protocol 2 helper is installed and actually works.
+
+        Presence is not enough. The pivot installs v2 but keeps the old helper,
+        and the decision to retire the old one rests on this answer, so it is
+        taken from the helper's own selftest — which verifies a known-answer
+        signature in both directions and checks that both trust anchors are
+        pinned. A helper that parses but cannot verify signatures would refuse
+        every migration, silently, on a device in a cabinet.
+
+        Args:
+            recheck: Ask again instead of reusing this startup's answer. Used
+                immediately after the pivot, so the retirement migration can go
+                through v2 in the same run.
+
+        Returns:
+            True when v2 can be relied on.
+        """
+        if self._v2_available is not None and not recheck:
+            return self._v2_available
+
+        with self._v2_lock:
+            if self._v2_available is not None and not recheck:
+                return self._v2_available
+            return self._probe_v2()
+
+    def _probe_v2(self) -> bool:
+        """Run the v2 selftest and remember the answer."""
+        if not (os.path.isfile(HELPER_V2_PATH) and os.access(HELPER_V2_PATH, os.X_OK)):
+            self._v2_available = False
+            return False
+
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", HELPER_V2_PATH, "--selftest"],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            _LOGGER.warning("Could not run the v2 helper selftest: %s", exc)
+            self._v2_available = False
+            return False
+
+        if result.returncode != 0:
+            _LOGGER.warning(
+                "boneio-migrate-v2 is installed but its selftest failed (rc=%d): %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+            self._v2_available = False
+            return False
+
+        _LOGGER.info("boneio-migrate-v2 selftest passed; using protocol %d.",
+                     HELPER_PROTOCOL)
+        self._v2_available = True
+        return True
+
+    def _apply_via_v2(self, migration: MigrationInfo) -> bool:
+        """Apply a migration through the protocol 2 helper.
+
+        The request carries a version and where to look, and nothing else. The
+        helper builds the plan from the signed release itself, which is the
+        whole point: under protocol 1 this process handed over the actions, the
+        asset digests and a command to run as root (F-04).
+
+        Args:
+            migration: Migration descriptor.
+
+        Returns:
+            True on success.
+        """
+        request = json.dumps({
+            "protocol": HELPER_PROTOCOL,
+            "version": migration.version,
+            "package_root": str(PACKAGE_ROOT),
+        })
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", HELPER_V2_PATH],
+                input=request,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            _LOGGER.error("Migration %s timed out.", migration.version)
+            return False
+        except Exception as exc:
+            _LOGGER.error("Migration %s subprocess error: %s", migration.version, exc)
+            return False
+
+        if result.returncode != 0:
+            _LOGGER.error(
+                "Migration %s refused or failed via v2 (rc=%d): %s",
+                migration.version,
+                result.returncode,
+                result.stderr.strip(),
+            )
+            self.last_error = self._reason_from_helper(result.stderr)
+            return False
+
+        self._write_applied_flag(migration)
+        self._applied.add(migration.version)
+        _LOGGER.info("Migration %s applied via v2.", migration.version)
+        return True
+
+    @staticmethod
+    def _reason_from_helper(stderr: str) -> str:
+        """The one line out of the helper's output worth showing a person.
+
+        The helper writes its refusals in full and explains them — the release
+        floor check, for instance, says which release the manifest is for and
+        which one this device has already accepted. All of that went to the
+        journal while the panel was told "Migration 1.6.15 failed", which is
+        not something anybody can act on.
+
+        The last REFUSED or ERROR line is taken rather than the whole stream,
+        because stderr also carries the helper's startup chatter, and the last
+        such line is the one that stopped the run. The log prefix is stripped:
+        a timestamp and a level tell a reader of the panel nothing.
+
+        Args:
+            stderr: Everything the helper wrote to standard error.
+
+        Returns:
+            The reason, or an empty string when there is nothing quotable.
+        """
+        interesting = [
+            line.strip()
+            for line in stderr.splitlines()
+            if "REFUSED:" in line or "[ERROR]" in line
+        ]
+        chosen = interesting[-1] if interesting else ""
+        if not chosen:
+            remaining = [line.strip() for line in stderr.splitlines() if line.strip()]
+            chosen = remaining[-1] if remaining else ""
+        # "2026-09-21 15:40:22,929 [ERROR] REFUSED: ..." -> "REFUSED: ..."
+        for marker in ("[ERROR]", "[WARNING]", "[INFO]"):
+            _, _, tail = chosen.partition(marker)
+            if tail:
+                chosen = tail.strip()
+                break
+        return chosen
+
+    def _any_helper_available(self) -> bool:
+        """Whether some helper can apply a migration.
+
+        v2 first: once the retirement migration has run, it is the only one
+        there is.
+
+        Returns:
+            True when a migration can be applied.
+        """
+        return self.helper_v2_available() or self._helper_installed()
 
     def _helper_installed(self) -> bool:
         """Return True when the helper binary exists and is executable."""
@@ -413,6 +640,7 @@ class MigrationRunner:
                 version = getattr(mod, "VERSION", None)
                 description = getattr(mod, "DESCRIPTION", module_name)
                 requires_root = getattr(mod, "REQUIRES_ROOT", True)
+                superseded_by = getattr(mod, "SUPERSEDED_BY", None)
 
                 if version is None:
                     _LOGGER.warning("Migration module %s has no VERSION, skipping.", full_name)
@@ -424,6 +652,7 @@ class MigrationRunner:
                         module_name=full_name,
                         description=description,
                         requires_root=requires_root,
+                        superseded_by=superseded_by,
                     )
                 )
             except Exception as exc:
@@ -444,8 +673,51 @@ class MigrationRunner:
         _LOGGER.debug("Applied migrations: %s", applied)
 
     def _get_pending(self) -> list[MigrationInfo]:
-        """Return migrations not yet applied."""
-        return [m for m in self._all_migrations if m.version not in self._applied]
+        """Return migrations not yet applied, and not made pointless by a later one.
+
+        A file installed by one migration and replaced by a later one is
+        written twice on a device that applies both from scratch — three times
+        by the third revision, and so on. Each write is a signature check, a
+        digest check and a validator run through the privileged helper, which
+        on a controller is seconds, and each is another step that can fail on
+        the way to a result the next step throws away.
+
+        Only whole migrations are ever skipped, never individual actions. The
+        helper reads the plan from a signed file and is given nothing but a
+        version string; letting the application say which parts to run would
+        put it back in charge of what happens as root, which is the hole this
+        protocol exists to close. Choosing not to apply something can only ever
+        do less, so it is safe here.
+
+        A migration is skipped only when the one that supersedes it is itself
+        about to run or has already run — otherwise the work would be dropped
+        rather than deferred. ``test_migration_consistency`` checks that every
+        declared supersession really does cover everything the older migration
+        did, because getting that wrong loses a change silently.
+
+        Returns:
+            The migrations to apply, in version order.
+        """
+        pending = [m for m in self._all_migrations if m.version not in self._applied]
+        known = {m.version for m in self._all_migrations}
+        pending_versions = {m.version for m in pending}
+
+        kept = []
+        for migration in pending:
+            successor = migration.superseded_by
+            if successor and successor in known and (
+                successor in pending_versions or successor in self._applied
+            ):
+                if migration.version not in self._skips_logged:
+                    self._skips_logged.add(migration.version)
+                    _LOGGER.info(
+                        "Skipping %s: %s does everything it does.",
+                        migration.version,
+                        successor,
+                    )
+                continue
+            kept.append(migration)
+        return kept
 
     def _apply_pending(
         self,
@@ -461,6 +733,7 @@ class MigrationRunner:
         Returns:
             True if all succeeded.
         """
+        pending = self._pivot_first(pending)
         total = len(pending)
         all_ok = True
 
@@ -471,10 +744,35 @@ class MigrationRunner:
             if progress_callback:
                 progress_callback(pct, msg)
 
+            if (
+                migration.version in V2_ONLY_VERSIONS
+                and not self.helper_v2_available()
+            ):
+                self.hardening_pending = True
+                _LOGGER.warning(
+                    "Deferring %s: it needs boneio-migrate-v2, which is not "
+                    "available on this device. The legacy helper would refuse "
+                    "it and a refusal stops every migration behind it. Retried "
+                    "on the next start.",
+                    migration.version,
+                )
+                continue
+
+            # Cleared per migration: a reason left over from an earlier one
+            # would be attached to this failure and read as its explanation.
+            self.last_error = None
             ok = self._apply_one(migration)
+            if ok and migration.version in PIVOT_VERSIONS:
+                # Ask again in this same run: the pivot has just installed v2,
+                # and the migration that retires the legacy helper has to go
+                # through v2 — otherwise the old helper removes itself using
+                # the very path we are trying to close.
+                self.helper_v2_available(recheck=True)
             if not ok:
                 _LOGGER.error("Migration %s failed, stopping.", migration.version)
-                self.last_error = f"Migration {migration.version} failed"
+                self.last_error = (
+                    self.last_error or f"Migration {migration.version} failed"
+                )
                 self.status = MigrationStatus.ERROR
                 all_ok = False
                 break
@@ -486,8 +784,75 @@ class MigrationRunner:
 
         return all_ok
 
+    def _pivot_first(self, pending: list[MigrationInfo]) -> list[MigrationInfo]:
+        """Put the hardening migrations at the front of the queue.
+
+        See :data:`HARDENING_FIRST` for why. Unconditional: even when v2 is
+        already present, running the pair first keeps the retirement of the
+        legacy helper from sitting behind a migration that can fail.
+
+        Args:
+            pending: Migrations in version order.
+
+        Returns:
+            The same migrations, hardening first.
+        """
+        by_version = {m.version: m for m in pending}
+        hoisted = [by_version[v] for v in HARDENING_FIRST if v in by_version]
+        if not hoisted:
+            return pending
+        rest = [m for m in pending if m.version not in HARDENING_FIRST]
+        _LOGGER.info(
+            "Applying %s before the other %d pending migration(s), so the rest "
+            "go through the signing helper and an unrelated failure cannot block "
+            "the hardening.",
+            ", ".join(m.version for m in hoisted),
+            len(rest),
+        )
+        return hoisted + rest
+
     def _apply_one(self, migration: MigrationInfo) -> bool:
-        """Apply a single migration via the helper.
+        """Apply a single migration through whichever helper is allowed.
+
+        v2 handles everything it can. The legacy helper is permitted for the
+        pivot alone, because that migration is what installs v2 and therefore
+        cannot run through it. Anything else waits: applying it through legacy
+        would mean sending a plan over stdin, which is the vulnerability.
+
+        Args:
+            migration: Migration descriptor.
+
+        Returns:
+            True on success.
+        """
+        if self.helper_v2_available():
+            return self._apply_via_v2(migration)
+
+        # No v2 yet, so the legacy helper is all there is. Refusing here would
+        # be the stricter choice and the wrong one: it would leave a device
+        # unable to migrate at all, which is worse than the state it is already
+        # in. The escalation path is open on such a device today; what closes it
+        # is the pivot, which is why the pivot is hoisted to the front rather
+        # than everything else being blocked behind it.
+        self.hardening_pending = True
+        if migration.version in PIVOT_VERSIONS:
+            _LOGGER.info(
+                "Applying the pivot %s through the legacy helper — it is what "
+                "installs the replacement, so it cannot go through it.",
+                migration.version,
+            )
+        else:
+            _LOGGER.warning(
+                "Applying %s through the legacy helper: boneio-migrate-v2 is not "
+                "available yet, so F-04 is still open on this device. "
+                "The hardening is reported as unfinished and retried on each "
+                "start.",
+                migration.version,
+            )
+        return self._apply_via_legacy(migration)
+
+    def _apply_via_legacy(self, migration: MigrationInfo) -> bool:
+        """Apply a migration through the protocol 1 helper.
 
         Args:
             migration: Migration descriptor.
@@ -601,6 +966,14 @@ class MigrationRunner:
         reported distinctly — it means uEnv.txt is wrong rather than the files
         being absent, and a reboot alone will not fix it.
 
+<<<<<<< ours
+=======
+        A copy that differs from the overlay boneIO ships (see
+        :func:`overlay_util.stale_overlay_copies`) is repaired the same way:
+        that is how a corrected overlay installed by a migration reaches the
+        directories U-Boot reads.
+
+>>>>>>> theirs
         Sets :attr:`overlay_repair_needed` when files had to be copied and
         :attr:`overlay_applied` to the kernel-reported state.
         """
@@ -612,9 +985,16 @@ class MigrationRunner:
             self.overlay_applied = overlay_util.is_boneio_overlay_applied()
 
             missing = overlay_util.missing_overlay_dirs(kernel_version)
+<<<<<<< ours
             if missing:
                 self.overlay_repair_needed = True
                 self._repair_overlay_dirs(kernel_version, missing)
+=======
+            stale = overlay_util.stale_overlay_copies()
+            if missing or stale:
+                self.overlay_repair_needed = True
+                self._repair_overlay_dirs(kernel_version, missing, stale)
+>>>>>>> theirs
             else:
                 _LOGGER.debug(
                     "Overlay files present in both destinations for %s", kernel_version
@@ -649,12 +1029,27 @@ class MigrationRunner:
         except Exception as exc:
             _LOGGER.warning("Overlay check failed: %s", exc)
 
+<<<<<<< ours
     def _repair_overlay_dirs(self, kernel_version: str, missing: list[Path]) -> None:
         """Copy boneIO overlays into the given destinations via the helper.
+=======
+    def _repair_overlay_dirs(
+        self, kernel_version: str, missing: list[Path], stale: list[Path] | None = None
+    ) -> None:
+        """Have boneio-system copy the missing or stale overlays into place.
+
+        This used to pipe an ad-hoc plan to the legacy boneio-migrate, which
+        1.6.6 removed, so on every 1.6.x controller it only logged that it
+        could not help. boneio-system decides everything itself: the overlay
+        uEnv.txt names, the files the board ships, sources under /boot/dtbs.
+        It repairs the kernel uEnv.txt boots, which is the one that matters
+        for the next boot, and never edits uEnv.txt from here.
+>>>>>>> theirs
 
         Args:
             kernel_version: Running kernel release.
             missing: Destination directories lacking boneIO overlays.
+<<<<<<< ours
         """
         _LOGGER.warning(
             "No boneIO overlays in %s — searching other kernel dirs...",
@@ -723,4 +1118,70 @@ class MigrationRunner:
                 "Failed to copy overlays (rc=%d): %s",
                 copy_result.returncode,
                 copy_result.stderr.strip(),
+=======
+            stale: Copies that differ from the overlay boneIO ships.
+        """
+        stale = stale or []
+        if missing:
+            _LOGGER.warning(
+                "No boneIO overlays in %s — asking boneio-system to repair.",
+                ", ".join(str(d) for d in missing),
+            )
+        if stale:
+            _LOGGER.warning(
+                "%s differ from the overlay boneIO ships — asking boneio-system to "
+                "replace them.",
+                ", ".join(str(c) for c in stale),
+            )
+
+        if not system_ops.helper_supports("overlay-repair"):
+            _LOGGER.error(
+                "Cannot copy overlays — the installed boneio-system has no "
+                "overlay-repair. Migration 1.6.27 installs it; check the "
+                "migrations page in the panel."
+            )
+            return
+
+        result = system_ops.overlay_repair()
+        report = result.json()
+        if report is None:
+            _LOGGER.error(
+                "Overlay repair failed (rc=%d): %s",
+                result.returncode,
+                result.stderr.strip() or "no report",
+            )
+            return
+
+        status, message = report.get("status"), report.get("message")
+        if status == "problem":
+            _LOGGER.error("Overlay repair for kernel %s failed: %s", report.get("kernel"), message)
+        elif status == "repaired":
+            _LOGGER.warning(
+                "Overlay repaired for kernel %s: %s. It takes effect on the next boot.",
+                report.get("kernel"),
+                message,
+            )
+
+        still_stale = overlay_util.stale_overlay_copies() if stale else []
+        if still_stale and status != "problem":
+            # A boneio-system older than the refresh copies only what is
+            # missing and reports "ok" for the rest.
+            _LOGGER.error(
+                "%s still differ from the overlay boneIO ships; the installed "
+                "boneio-system does not replace them (migration 1.6.31 installs "
+                "one that does).",
+                ", ".join(str(c) for c in still_stale),
+            )
+
+        still_missing = overlay_util.missing_overlay_dirs(kernel_version) if missing else []
+        if still_missing and status != "problem":
+            # Not something boneio-system repairs: uEnv.txt names no boneIO
+            # overlay, or it boots another kernel than the one running.
+            _LOGGER.warning(
+                "%s still hold no boneIO overlay; boneio-system found nothing to "
+                "copy for the overlay uEnv.txt loads (kernel %s)%s",
+                ", ".join(str(d) for d in still_missing),
+                report.get("kernel"),
+                f": {message}" if message else ".",
+>>>>>>> theirs
             )

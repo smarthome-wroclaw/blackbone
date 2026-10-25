@@ -48,6 +48,7 @@ from boneio.core.config import ConfigHelper
 from boneio.core.events import EventBus, GracefulExit
 from boneio.core.manager import Manager
 from boneio.core.messaging import MQTTClient
+from boneio.core.recovery import STABLE_AFTER_SECONDS, StartupFailures
 from boneio.core.state import StateManager
 from boneio.core.system import get_network_info
 from boneio.exceptions import RestartRequestException
@@ -57,6 +58,11 @@ from boneio.hardware.gpio.input import get_gpio_manager
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="cryptography")
 
 _LOGGER = logging.getLogger(__name__)
+
+# Longest startup waits for its entities before removing unknown discovery
+# topics: the web stack (120 s) and first page load (8 + 3 s) remote inputs
+# wait for, plus headroom for initialising the remote devices themselves.
+DISCOVERY_CLEANUP_HOLD_SECONDS = 180.0
 
 
 # Early OLED is initialized in bonecli.py before runner.
@@ -88,7 +94,11 @@ except Exception:
 
 def _warn_if_setup_required(
     oled_device: Any | None, config_file: str, web_config: dict
+<<<<<<< ours
 ) -> None:
+=======
+) -> bool:
+>>>>>>> theirs
     """Say on the OLED that the device is waiting to be set up.
 
     A device with no administrator refuses its API from 1.6 on, and the owner
@@ -117,12 +127,19 @@ def _warn_if_setup_required(
         if bool(web_config.get("auth", {}).get("allow_anonymous")) or os.environ.get(
             "BONEIO_DEV"
         ):
+<<<<<<< ours
             return
 
         store = UserStore.for_config_file(config_file)
         store.load()
         if store.is_provisioned():
             return
+=======
+            return False
+
+        if _is_provisioned(config_file):
+            return False
+>>>>>>> theirs
 
         port = web_config.get("port", 8090)
         _LOGGER.warning(
@@ -134,8 +151,98 @@ def _warn_if_setup_required(
             config_file,
         )
         _draw_startup_status(oled_device, f"SETUP REQUIRED - open :{port}")
+<<<<<<< ours
     except Exception as err:  # noqa: BLE001 - never block boot on a notice
         _LOGGER.debug("Could not report setup state: %s", err)
+=======
+        return True
+    except Exception as err:  # noqa: BLE001 - never block boot on a notice
+        _LOGGER.debug("Could not report setup state: %s", err)
+        return False
+
+
+def _is_provisioned(config_file: str) -> bool:
+    """Whether the device has an administrator account."""
+    from boneio.core.auth.store import UserStore
+
+    store = UserStore.for_config_file(config_file)
+    store.load()
+    return store.is_provisioned()
+
+
+def _show_setup_notice(manager: Any, config_file: str, port: int) -> None:
+    """Keep "Setup required" on the OLED until an administrator exists.
+
+    The boot-screen line from :func:`_warn_if_setup_required` is gone the
+    moment the configured screens start, and the display sleeps after its
+    screensaver timeout — so someone who walks up to the cabinet a quarter of
+    an hour after boot, or after an update from 1.5 left the device with no
+    account, sees a dark panel and an API that refuses them. The notice stays
+    first and awake, and goes by itself once an account is created.
+
+    Never raises — a missing display must not stop the device from booting.
+
+    Args:
+        manager: The running manager.
+        config_file: Path to the active config file.
+        port: Web panel port, for when the address is not known yet.
+    """
+    try:
+        oled = manager.display.get_oled()
+        if oled is None:
+            return
+
+        def lines() -> list[str]:
+            url = manager.config_helper.configuration_url
+            return ["Onboarding needed.", "Open in a browser:", url or f"http://<device-ip>:{port}"]
+
+        oled.show_notice(
+            "Setup required",
+            lines,
+            still_needed=lambda: not _is_provisioned(config_file),
+        )
+    except Exception as err:  # noqa: BLE001 - never block boot on a notice
+        _LOGGER.debug("Could not show the setup notice on the OLED: %s", err)
+
+# Written by the eMMC flasher on the SD card it boots in factory station mode.
+STATION_MARKER = "/var/lib/boneio/flasher-station"
+# The station's tester writes "passed" or "failed" here over SSH when it is done.
+STATION_RESULT = "/tmp/boneio-station-result"
+
+
+def _station_lines() -> list[str]:
+    try:
+        with open(STATION_RESULT) as f:
+            result = f.read().strip()
+    except OSError:
+        result = ""
+    if result == "passed":
+        return ["Test completed", "successfully"]
+    if result == "failed":
+        return ["Test FAILED", "see the station"]
+    return ["Flasher station", "mode active", "Waiting for tester"]
+
+
+def _show_station_notice(manager: Any) -> bool:
+    """On a factory station boot, keep the station's state on the OLED.
+
+    That system has no administrator and needs none, so the setup notice
+    would only mislead whoever stands at the station.
+
+    Returns:
+        Whether this is a station boot.
+    """
+    if not os.path.exists(STATION_MARKER):
+        return False
+    try:
+        oled = manager.display.get_oled()
+        if oled is not None:
+            oled.show_notice("Station mode", _station_lines, still_needed=lambda: True)
+    except Exception as err:  # noqa: BLE001 - never block boot on a notice
+        _LOGGER.debug("Could not show the station notice on the OLED: %s", err)
+    return True
+
+>>>>>>> theirs
 
 def _draw_startup_status(device: Any | None, message: str) -> None:
     """Draw a startup status message on the OLED display.
@@ -162,6 +269,9 @@ config_modules = [
     {"name": OUTPUT_GROUP, "default": []},
     {"name": TEMPLATE, "default": []},
     {"name": IRRIGATION, "default": []},
+    {"name": "location", "default": None},
+    {"name": "schedule", "default": []},
+    {"name": "virtual_switch", "default": []},
 ]
 
 
@@ -171,11 +281,37 @@ async def async_run(
     """Run BoneIO."""
     web_server = None
     tasks: set[asyncio.Task] = set()
+    startup_failures = StartupFailures(config_file)
     loop = asyncio.get_running_loop()
     event_bus = EventBus(loop=loop)
     shutdown_event = asyncio.Event()
     if debug >= 2:
         loop.set_debug(True)
+    async def _loop_watchdog() -> None:
+        """Report when something blocks the event loop.
+
+        A sleep that comes back late can only mean one thing: something
+        synchronous ran where it should not have - an import, a subprocess, a
+        long parse - and for that whole time the controller answered nothing.
+        It is otherwise invisible: the log simply has a gap, and you have to
+        guess what fell into it. Note that a worker thread is no defence when
+        the work is CPU-bound, because it holds the GIL all the same.
+        """
+        import time as _wt
+
+        interval = 0.2
+        last = _wt.monotonic()
+        while True:
+            await asyncio.sleep(interval)
+            now = _wt.monotonic()
+            drift = now - last - interval
+            if drift > 0.4:
+                _LOGGER.warning("[LOOP STALL] blocked for %.2fs", drift)
+            last = now
+
+    if debug >= 1:
+        tasks.add(asyncio.create_task(_loop_watchdog()))
+
     network_state = get_network_info()
 
     def signal_handler():
@@ -210,6 +346,7 @@ async def async_run(
         is_web_active=web_active,
         web_port=web_config.get("port", 8090),
         proxy_port=web_config.get("proxy_port"),
+        expose=web_config.get("expose", "all"),
         ha_discovery=mqtt_config.get(HA_DISCOVERY, {}).get(ENABLED, False),
         ha_discovery_prefix=mqtt_config.get(HA_DISCOVERY, {}).get(TOPIC_PREFIX, "homeassistant"),
         config_file_path=config_file,
@@ -221,6 +358,25 @@ async def async_run(
         ha_child_devices=main_config.get("ha_child_devices", False),
         ha_child_devices_naming=main_config.get("ha_child_devices_naming", "default"),
         serial_override=main_config.get("serial_override"),
+    )
+
+    # Which unit this log came from.
+    #
+    # The only identity in the log was "BoneIO <version> starting", which says
+    # nothing about the device. A log reaches support detached from whoever
+    # sent it — pasted into a ticket, dropped in a forum thread — and the
+    # serial is what ties it to a unit, its MQTT topics and its cloud
+    # subdomain. Naming it once at startup costs a line.
+    #
+    # Safe to write here: the log and the bundle are admin-only. The serial is
+    # withheld from unauthenticated API responses because those answer to
+    # anyone on the network, which this does not.
+    _LOGGER.info(
+        "Device %s (%s, hardware %s), serial %s",
+        _config_helper.name,
+        _config_helper.device_type,
+        _config_helper.version,
+        _config_helper.serial_number,
     )
 
     # Load areas configuration
@@ -244,6 +400,8 @@ async def async_run(
                 username=mqtt_config.get(USERNAME, mqttusername),
                 password=mqtt_config.get(PASSWORD, mqttpassword),
                 port=mqtt_config.get(PORT, 1883),
+                tls=mqtt_config.get("tls"),
+                config_dir=os.path.dirname(os.path.abspath(config_file)),
                 config_helper=_config_helper,
             )
             message_bus.add_bus(mqtt_bus)
@@ -321,7 +479,14 @@ async def async_run(
 
     # --- Start web server EARLY (before MQTT/discovery) for fast UI access ---
     _draw_startup_status(early_oled_device, "Starting web server...")
+<<<<<<< ours
     _warn_if_setup_required(early_oled_device, config_file, web_config)
+=======
+    if not _show_station_notice(manager) and _warn_if_setup_required(
+        early_oled_device, config_file, web_config
+    ):
+        _show_setup_notice(manager, config_file, web_config.get("port", 8090))
+>>>>>>> theirs
     if web_active:
         _LOGGER.info("Starting Web server.")
         # Lazy import WebServer only when needed (saves ~4s on startup)
@@ -337,6 +502,13 @@ async def async_run(
             logger=config.get("logger", {}),
             debug_level=debug,
             initial_config=config,  # Pre-populate cache for fast first request
+            # 'all' keeps the panel on every interface, which is what it has
+            # always done. 'proxy' takes it off the LAN and leaves it reachable
+            # over TLS through Caddy, or through an SSH tunnel — the answer to
+            # the pentest finding about the interface being served in the
+            # clear. Opt-in until it has been through a release on hardware:
+            # getting it wrong means a controller answering on nothing.
+            expose=web_config.get("expose", "all"),
         )
         web_server_task = asyncio.create_task(web_server.start_webserver())
         tasks.add(web_server_task)
@@ -372,9 +544,49 @@ async def async_run(
     # Initialize remote devices in background (configure + start connections)
     # This defers heavy module imports (aioesphomeapi, aiohttp) to background
     async def _init_remote_devices_and_inputs() -> None:
-        """Initialize remote devices, then register ESPHome binary sensor inputs."""
-        await manager.remote_devices.initialize()
-        manager.register_esphome_binary_sensors()
+        """Initialize remote devices, then register ESPHome binary sensor inputs.
+
+        Held until the web stack has finished importing. Both this and the web
+        server have several seconds of module-level work to do, and with one
+        core they only slow each other down - measured on a BeagleBone, running
+        them at once put the UI six seconds further away. Nothing waits for a
+        remote device: its entities appear when it connects, which is
+        asynchronous anyway. The wait is capped so a web server that never
+        comes up cannot strand them.
+        """
+        waited_for_web = False
+        if web_server is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(web_server.stack_imported.wait(), timeout=120)
+                waited_for_web = True
+            # And then for the UI to have been served, because importing the
+            # remote backends blocks the loop for seconds even from a worker
+            # thread - it is CPU work, so it holds the GIL - and the first page
+            # load is the worst moment for that. Capped: on a controller nobody
+            # ever opens, there is nothing to wait for.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(web_server.first_response.wait(), timeout=8)
+                # Let the page finish pulling its assets before we take the
+                # loop away from it.
+                await asyncio.sleep(3)
+        # initialize()'s own delay exists to keep these connections off the
+        # startup path. Having just waited for the web stack, that job is done -
+        # delaying again only keeps the remote entities away for longer.
+        #
+        # Caught here because this task sits in the main gather below: an
+        # exception escaping it ended the whole application, local outputs and
+        # all, and systemd restarted it into the same exception every 3s. A
+        # remote device is somebody else's hardware - it can take its own
+        # entities down, not this controller.
+        try:
+            await manager.remote_devices.initialize(delay_seconds=0.0 if waited_for_web else 10.0)
+            await manager.register_esphome_binary_sensors()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception(
+                "Remote devices failed to initialise; continuing without them"
+            )
 
     remote_task = manager.append_task(coro=_init_remote_devices_and_inputs, name="remote_devices_init")
     tasks.add(remote_task)
@@ -387,6 +599,9 @@ async def async_run(
     tasks.add(message_bus_task)
     message_bus_task.add_done_callback(tasks.discard)
 
+    # Set once the initial discovery is out, or has failed to go out.
+    discovery_published = asyncio.Event()
+
     # Publish discovery after message bus is started (non-blocking)
     async def _delayed_discovery() -> None:
         """Wait for MQTT connection and publish discovery in background."""
@@ -395,7 +610,10 @@ async def async_run(
             _draw_startup_status(early_oled_device, "Publishing discovery...")
             await manager.set_startup_status("ha_discovery", "Publishing HA Discovery...")
             _LOGGER.info("Publishing device discovery information")
-            await manager.publish_discovery()
+            try:
+                await manager.publish_discovery()
+            finally:
+                discovery_published.set()
             _draw_startup_status(early_oled_device, "Ready")
             # Brief pause so user sees "Ready" before handoff stops drawing
             await asyncio.sleep(1)
@@ -406,10 +624,32 @@ async def async_run(
             _LOGGER.error("Error during delayed discovery: %s", e)
             await manager.mark_startup_complete()
 
+    async def _release_discovery_cleanup() -> None:
+        """Let MQTT remove unknown discovery entities once all are registered.
+
+        The broker replays every retained config the moment we subscribe,
+        before most entities are in the cache, and removing one that is only
+        late makes it drop out of Home Assistant until it is published again.
+        Remote inputs are the last to register, after the web stack is up, so
+        wait for them too - capped, because a stale entity left in Home
+        Assistant a little longer costs less than cleanup that never starts.
+        """
+        published = asyncio.create_task(discovery_published.wait())
+        try:
+            await asyncio.wait(
+                {published, remote_task}, timeout=DISCOVERY_CLEANUP_HOLD_SECONDS
+            )
+        finally:
+            published.cancel()
+        mqtt_bus.release_discovery_cleanup()
+
     if has_mqtt:
         discovery_task = asyncio.create_task(_delayed_discovery())
         tasks.add(discovery_task)
         discovery_task.add_done_callback(tasks.discard)
+        cleanup_task = asyncio.create_task(_release_discovery_cleanup())
+        tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(tasks.discard)
     else:
         # No MQTT — mark startup complete immediately
         _draw_startup_status(early_oled_device, "Ready")
@@ -434,6 +674,33 @@ async def async_run(
             _LOGGER.info("Cloud registration started for %s (IP: %s)", serial, local_ip)
         else:
             _LOGGER.warning("Cloud registration enabled but missing serial or IP")
+
+    # A start that stays up this long has proven itself: forget the crashes
+    # before it, so an occasional one weeks apart never adds up to recovery
+    # mode. Not in the main gather - it has nothing to wait for afterwards.
+    async def _forgive_earlier_crashes() -> None:
+        await asyncio.sleep(STABLE_AFTER_SECONDS)
+        if startup_failures.count:
+            _LOGGER.info("Running for %ds; clearing the startup crash count", STABLE_AFTER_SECONDS)
+            startup_failures.clear()
+
+    stable_task = asyncio.create_task(_forgive_earlier_crashes())
+
+    # An update restarts boneIO, not the controller, so a Node-RED settings
+    # file installed by it is not what the running editor read. Not in the
+    # main gather either: it finishes after a look or two.
+    from boneio.const import DEFAULT_PROXY_PORT
+    from boneio.core.nodered_guard import ensure_admin_auth
+
+    nodered_task = asyncio.create_task(
+        ensure_admin_auth(_config_helper.proxy_port or DEFAULT_PROXY_PORT)
+    )
+
+    # Moves Caddy to the package by itself once the controller has settled.
+    # Like the two above, outside the main gather: it ends on its own.
+    from boneio.core import proxy_switch
+
+    proxy_switch_task = asyncio.create_task(proxy_switch.run())
 
     try:
         # Convert tasks set to list for main gather
@@ -475,15 +742,20 @@ async def async_run(
         _LOGGER.info("Restart or graceful exit requested")
         raise
     except Exception as e:
-        _LOGGER.error(f"Unexpected error: {type(e).__name__} - {e}")
+        _LOGGER.error(f"Unexpected error: {type(e).__name__} - {e}", exc_info=True)
         _draw_crash(e)
+        startup_failures.record(e)
         return 1
     except BaseException as e:
-        _LOGGER.error(f"Unexpected BaseException: {type(e).__name__} - {e}")
+        _LOGGER.error(f"Unexpected BaseException: {type(e).__name__} - {e}", exc_info=True)
         _draw_crash(e)
+        startup_failures.record(e)
         return 1
     finally:
         _LOGGER.info("Cleaning up resources...")
+        stable_task.cancel()
+        nodered_task.cancel()
+        proxy_switch_task.cancel()
 
         # Cancel pending deferred state saves and write final state synchronously.
         # This MUST happen before event_bus.stop() which may trigger sigterm

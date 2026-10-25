@@ -1,23 +1,34 @@
 import { useState, useCallback, useEffect } from 'react';
-import {
-  FaCheck,
-  FaExclamationTriangle,
-  FaSpinner,
-} from 'react-icons/fa';
-import SettingsCard from '../components/SettingsCard';
+import { FaGlobe } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
 import axios from '@/api/axios';
+import type { AxiosError } from 'axios';
+import {
+  SettingsPage,
+  SettingsCard,
+  StatusTile,
+  FormField,
+  NoticeCallout,
+  useSectionSave,
+} from '../ui';
+
+type ApiError = AxiosError<{ detail?: string }>;
+
+/**
+ * A DNS label, the rule boneio-system applies before it runs hostnamectl.
+ * Checked here as well so the operator hears why before anything is sent.
+ */
+const HOSTNAME_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
 
 /**
  * Section for viewing and changing the device hostname.
  */
 export default function HostnameSection() {
   const { t } = useTranslation();
-  const [showHostnameSection, setShowHostnameSection] = useState(false);
   const [currentHostname, setCurrentHostname] = useState<string>('');
   const [newHostname, setNewHostname] = useState<string>('');
   const [isChangingHostname, setIsChangingHostname] = useState(false);
-  const [hostnameResult, setHostnameResult] = useState<{ status: string; message: string } | null>(null);
+  const [hostnameResult, setHostnameResult] = useState<{ status: 'success' | 'error'; message: string } | null>(null);
 
   const fetchHostname = useCallback(async () => {
     try {
@@ -34,12 +45,20 @@ export default function HostnameSection() {
   }, [fetchHostname]);
 
   const changeHostname = async () => {
-    if (!newHostname.trim()) {
+    // Hostnames are case-insensitive; the backend lower-cases too.
+    const hostname = newHostname.trim().toLowerCase();
+
+    if (!hostname) {
       setHostnameResult({ status: 'error', message: t('settings.hostname_empty') });
       return;
     }
 
-    if (newHostname === currentHostname) {
+    if (!HOSTNAME_RE.test(hostname)) {
+      setHostnameResult({ status: 'error', message: t('settings.hostname_invalid') });
+      return;
+    }
+
+    if (hostname === currentHostname) {
       setHostnameResult({ status: 'error', message: t('settings.hostname_unchanged') });
       return;
     }
@@ -48,97 +67,77 @@ export default function HostnameSection() {
     setHostnameResult(null);
 
     try {
-      const { data } = await axios.post('/api/hostname', { hostname: newHostname });
+      const { data } = await axios.post('/api/hostname', { hostname });
       setCurrentHostname(data.hostname);
+      setNewHostname(data.hostname);
       setHostnameResult({ status: 'success', message: t('settings.hostname_changed') });
-    } catch (err: any) {
-      setHostnameResult({ status: 'error', message: err.message || t('settings.hostname_change_failed') });
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      const message = apiErr?.response?.data?.detail || t('settings.hostname_change_failed');
+      setHostnameResult({ status: 'error', message });
     } finally {
       setIsChangingHostname(false);
     }
   };
 
-  return (
-    <SettingsCard
-      icon={
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          className="h-6 w-6"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-          />
-        </svg>
-      }
-      title={t('settings.hostname_title')}
-      description={t('settings.hostname_description')}
-      toggleButtonText={t('settings.show_hostname_section')}
-      toggleButtonTextExpanded={t('common.close')}
-      isExpanded={showHostnameSection}
-      onToggle={() => setShowHostnameSection(!showHostnameSection)}
-      expandableContent={
-        <div className="space-y-4">
-          <div>
-            <label className="label">
-              <span className="label-text">{t('settings.current_hostname')}</span>
-            </label>
-            <input
-              type="text"
-              className="input input-bordered w-full"
-              value={currentHostname}
-              disabled
-            />
-          </div>
+  useSectionSave(
+    {
+      dirty: newHostname.trim() !== '' && newHostname !== currentHostname,
+      saving: isChangingHostname,
+      label: t('settings.change_hostname'),
+    },
+    () => void changeHostname(),
+  );
 
-          <div>
-            <label className="label">
-              <span className="label-text">{t('settings.new_hostname')}</span>
-            </label>
+  return (
+    <SettingsPage>
+      {/* No card header: the page header above already names this page, and
+          repeating it inside the only card on it is noise. */}
+      {/* No footer either: the save is registered with the shell and drawn in
+          the action bar at the bottom of the pane, like every other section. */}
+      <SettingsCard>
+        <div className="space-y-4">
+          {/* Current hostname displayed as a clean status tile */}
+          <StatusTile
+            icon={<FaGlobe />}
+            label={t('settings.current_hostname')}
+            value={currentHostname || '—'}
+            suffix={currentHostname ? '.local' : undefined}
+            badge={
+              currentHostname ? (
+                <span className="badge badge-success badge-sm font-normal gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-success-content/70"></span>
+                  mDNS
+                </span>
+              ) : undefined
+            }
+          />
+
+          {/* New hostname input. Capped: the page is wide enough for two
+              columns of fields and a 63-character name does not need all of
+              it — a text box the width of the window reads as "paste an essay
+              here". */}
+          <FormField label={t('settings.new_hostname')} className="max-w-md">
             <input
               type="text"
-              className="input input-bordered w-full"
+              className="input input-bordered w-full font-mono"
               value={newHostname}
               onChange={e => setNewHostname(e.target.value)}
               placeholder={t('settings.hostname_placeholder')}
               disabled={isChangingHostname}
             />
-            <label className="label whitespace-normal">
-              <span className="label-text-alt wrap-break-word">{t('settings.hostname_hint')}</span>
-            </label>
-          </div>
+          </FormField>
+
+          <p className="text-xs opacity-60 max-w-md">{t('settings.hostname_hint')}</p>
 
           {hostnameResult && (
-            <div className={`alert ${hostnameResult.status === 'success' ? 'alert-success' : 'alert-error'}`}>
-              {hostnameResult.status === 'success' ? <FaCheck /> : <FaExclamationTriangle />}
-              <span>{hostnameResult.message}</span>
-            </div>
+            <NoticeCallout
+              variant={hostnameResult.status}
+              message={hostnameResult.message}
+            />
           )}
-
-          <button
-            className="btn btn-primary"
-            onClick={changeHostname}
-            disabled={isChangingHostname || !newHostname.trim() || newHostname === currentHostname}
-          >
-            {isChangingHostname ? (
-              <>
-                <FaSpinner className="animate-spin" />
-                {t('settings.changing_hostname')}
-              </>
-            ) : (
-              <>
-                <FaCheck />
-                {t('settings.change_hostname')}
-              </>
-            )}
-          </button>
         </div>
-      }
-    />
+      </SettingsCard>
+    </SettingsPage>
   );
 }

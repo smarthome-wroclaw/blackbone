@@ -8,12 +8,20 @@ from fastapi.testclient import TestClient
 
 from boneio.webui.security_headers import (
     HSTS_MAX_AGE,
+<<<<<<< ours
+=======
+    MAP_TILE_SOURCES,
+>>>>>>> theirs
     apply_security_headers,
     build_csp,
 )
 
 
+<<<<<<< ours
 def _app(frame_ancestors=None):
+=======
+def _app(frame_ancestors=None, map_tiles=False):
+>>>>>>> theirs
     app = FastAPI()
 
     @app.get("/api/anything")
@@ -23,7 +31,11 @@ def _app(frame_ancestors=None):
     @app.middleware("http")
     async def headers(request, call_next):
         response = await call_next(request)
+<<<<<<< ours
         apply_security_headers(request, response, frame_ancestors)
+=======
+        apply_security_headers(request, response, frame_ancestors, map_tiles)
+>>>>>>> theirs
         return response
 
     return TestClient(app)
@@ -82,15 +94,54 @@ def test_csp_still_allows_what_the_panel_needs():
     assert "'unsafe-inline'" in csp
 
 
+<<<<<<< ours
 def test_frame_ancestors_is_omitted_by_default():
     """Turning it on blindly would break whatever embeds the panel today."""
     assert "frame-ancestors" not in build_csp()
+=======
+def test_csp_does_not_let_scripts_evaluate_strings():
+    # Nothing in the build needs it; an injected script would.
+    assert "unsafe-eval" not in build_csp()
+
+
+def test_inline_scripts_are_not_pinned_by_hash_or_nonce():
+    # Either would make the browser ignore 'unsafe-inline', and the Home
+    # Assistant add-on's injected base path would stop running.
+    script_src = next(d for d in build_csp().split("; ") if d.startswith("script-src"))
+    assert "'sha256-" not in script_src
+    assert "'nonce-" not in script_src
+
+
+def test_frame_ancestors_defaults_to_self():
+    """An unconfigured device refuses framing by any other site.
+
+    'self' is also what the boneIO Black Home Assistant add-on needs: its
+    nginx proxies each device, so the framed document is served on Home
+    Assistant's own origin and the page framing it is the same origin.
+    """
+    assert "frame-ancestors 'self'" in build_csp()
+    assert "frame-ancestors 'self'" in build_csp(None)
+>>>>>>> theirs
 
 
 def test_frame_ancestors_is_included_when_configured():
     assert "frame-ancestors 'self'" in build_csp("'self'")
 
 
+<<<<<<< ours
+=======
+def test_an_extra_origin_is_added_not_replaced():
+    """A dashboard framing the device directly names its own origin too."""
+    csp = build_csp("'self' https://ha.local:8123")
+    assert "frame-ancestors 'self' https://ha.local:8123" in csp
+
+
+def test_the_restriction_can_be_lifted_deliberately():
+    """`*` is the documented way out, so 'unset' need not mean 'unprotected'."""
+    assert "frame-ancestors *" in build_csp("*")
+
+
+>>>>>>> theirs
 def test_frame_ancestors_reaches_the_response():
     headers = _headers(_app("'self' https://ha.local:8123"))
     assert "frame-ancestors 'self' https://ha.local:8123" in headers["Content-Security-Policy"]
@@ -119,3 +170,52 @@ def test_hsts_max_age_is_short_enough_to_recover_from():
     off — and fall back to self-signed on the same hostname. A year-long pin
     would leave the owner unable to click through; a day expires."""
     assert HSTS_MAX_AGE <= 86400
+<<<<<<< ours
+=======
+
+
+# ------------------------------------------------------------------ map tiles
+#
+# The location picker can show an OpenStreetMap map, which needs a third-party
+# host in img-src. An image URL is an outbound channel, so that is a real
+# loosening and has to stay off unless someone asks for it.
+
+
+def _directive(policy: str, name: str) -> str:
+    return next(d for d in policy.split("; ") if d.startswith(f"{name} "))
+
+
+def test_no_third_party_images_by_default():
+    assert _directive(build_csp(), "img-src") == "img-src 'self' data: blob:"
+
+
+def test_the_tile_servers_are_added_only_when_asked_for():
+    directive = _directive(build_csp(map_tiles=True), "img-src")
+    assert directive.startswith("img-src 'self' data: blob:")
+    for source in MAP_TILE_SOURCES:
+        assert source in directive
+
+
+def test_enabling_the_map_loosens_nothing_else():
+    """Only img-src moves. If this ever fails, something widened a directive
+    that has nothing to do with showing a map."""
+    off = dict(d.split(" ", 1) for d in build_csp().split("; "))
+    on = dict(d.split(" ", 1) for d in build_csp(map_tiles=True).split("; "))
+    assert set(off) == set(on)
+    assert {k for k in off if off[k] != on[k]} == {"img-src"}
+
+
+def test_the_map_setting_reaches_the_response():
+    assert "openstreetmap" not in _headers(_app())["Content-Security-Policy"]
+    assert "openstreetmap" in _headers(_app(map_tiles=True))["Content-Security-Policy"]
+
+
+def test_the_controllers_own_cloud_name_is_reachable_from_the_page():
+    """The onboarding wizard fetches the cloud name to see that it answers;
+    without it in connect-src the browser blocks that and the wizard times out
+    on a switch that worked. Only this controller's name, never a wildcard."""
+    url = "https://blk239bb2.black.boneio.app:8443"
+    connect = next(d for d in build_csp(cloud_url=url).split("; ") if d.startswith("connect-src"))
+    assert connect == f"connect-src 'self' ws: wss: {url}"
+    assert "black.boneio.app" not in build_csp()
+>>>>>>> theirs

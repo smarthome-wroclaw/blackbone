@@ -23,10 +23,21 @@ from boneio.const import (
 from boneio.core.events import EventBus
 from boneio.core.messaging import BasicMqtt
 from boneio.core.utils import TimePeriod
+from boneio.core.utils.timeperiod import ensure_time_period
 from boneio.models import CoverState, PositionDict, SavedPositionDict
 from boneio.models.events import CoverEvent
 
 _LOGGER = logging.getLogger(__name__)
+# How often a moving cover recomputes its position. The relay is not switched
+# off on this grid — the last wait is cut short to end exactly at the target.
+MOVE_POLL_INTERVAL = 0.05  # s
+# Extra relay time on a movement ending fully open or closed, as a percent of
+# open_time/close_time. Time-based position drifts; running into the motor's
+# own endstop brings it back to a known 0% / 100%.
+DEFAULT_ENDSTOP_OVERRUN = 10  # %
+# Pause before energising the opposite relay, so a capacitor motor comes to
+# rest before it is driven the other way.
+DEFAULT_DIRECTION_CHANGE_WAIT_MS = 500
 
 
 class BaseCoverABC(ABC):
@@ -161,6 +172,9 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         event_bus: EventBus,
         position: float = 100.0,
         name: str | None = None,
+        actuator_activation_duration: TimePeriod | None = None,
+        endstop_overrun: int = DEFAULT_ENDSTOP_OVERRUN,
+        direction_change_wait_time: TimePeriod | None = None,
         **kwargs,
     ) -> None:
         # Use provided name or fall back to id
@@ -186,6 +200,21 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         self._event_bus = event_bus
         self._open_time = open_time.total_milliseconds
         self._close_time = close_time.total_milliseconds
+        # Time from energising the relay until the motor actually moves. Some
+        # drives (Somfy J4 WT) ignore orders shorter than ~200ms, so a short
+        # tilt step would never happen without it.
+        self._actuator_activation_ms = (
+            actuator_activation_duration.total_milliseconds if actuator_activation_duration is not None else 0.0
+        )
+        self._endstop_overrun = float(endstop_overrun)
+        self._direction_change_wait_ms = (
+            direction_change_wait_time.total_milliseconds
+            if direction_change_wait_time is not None
+            else DEFAULT_DIRECTION_CHANGE_WAIT_MS
+        )
+        # (relay, monotonic time) of the last relay this cover switched off —
+        # a reversal waits out direction_change_wait_time from that moment.
+        self._last_relay_off: tuple[BasicOutput, float] | None = None
         self._position = position
         self._initial_position: float = position
         self._current_operation = IDLE
@@ -217,6 +246,112 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         with suppress(RuntimeError):
             self._loop.call_soon_threadsafe(self._loop.call_later, 0.5, self.send_state, self.state, self.json_position)
 
+    def _drive_relay(self, relay: BasicOutput, travel_ms: float, apply_movement: Callable[[float], None]) -> None:
+        """Hold ``relay`` on until the cover has travelled ``travel_ms``, or until stopped.
+
+        Runs in the movement thread. The motor is assumed to stand still for
+        the first ``actuator_activation_duration`` after the relay closes, so
+        the relay stays on for that long *plus* ``travel_ms``.
+
+        When the other relay was switched off less than
+        ``direction_change_wait_time`` ago, it first waits out the rest of that
+        time. A stop during the wait leaves the relay untouched.
+
+        ``apply_movement`` gets how long the motor has really been moving (ms)
+        and updates the position from it. It is called on every poll and once
+        more after the relay has dropped, timed at the turn-off — so a stop
+        between polls, or the I2C write itself, is not lost from the position.
+
+        Args:
+            relay: The open or close relay to drive.
+            travel_ms: Motor movement time needed to reach the target.
+            apply_movement: Callback converting moving time to position.
+        """
+        activation_ms = self._actuator_activation_ms
+        deadline_ms = activation_ms + travel_ms
+
+        if self._last_relay_off is not None and self._last_relay_off[0] is not relay:
+            since_off_ms = (time.monotonic() - self._last_relay_off[1]) * 1000
+            wait_ms = self._direction_change_wait_ms - since_off_ms
+            if wait_ms > 0:
+                _LOGGER.debug("Cover %s reverses direction, waiting %dms first", self._id, wait_ms)
+                if self._stop_event.wait(wait_ms / 1000):
+                    return
+
+        relay.turn_on()
+        # Send relay state to WebSocket (not MQTT - that's handled by output_type check)
+        with suppress(RuntimeError):
+            self._loop.call_soon_threadsafe(lambda r=relay: asyncio.ensure_future(r.async_send_state()))
+        # Both timestamps are taken after the relay write returns, so the I2C
+        # latency of turn_on and turn_off cancels out.
+        start_time = time.monotonic()
+
+        while True:
+            current_time = time.monotonic()
+            elapsed_ms = (current_time - start_time) * 1000
+            if elapsed_ms >= deadline_ms:
+                break
+            apply_movement(max(0.0, elapsed_ms - activation_ms))
+            self._last_timestamp = time.time()  # Wall clock for display
+            if current_time - self._last_update_time >= 1:
+                with suppress(RuntimeError):
+                    self._loop.call_soon_threadsafe(lambda: self.send_state(self.state, self.json_position))
+                self._last_update_time = current_time
+            # Waiting on the event instead of sleeping lets stop() cut in at once.
+            if self._stop_event.wait(min(deadline_ms - elapsed_ms, MOVE_POLL_INTERVAL * 1000) / 1000):
+                break
+
+        relay.turn_off()
+        off_time = time.monotonic()
+        self._last_relay_off = (relay, off_time)
+        elapsed_ms = (off_time - start_time) * 1000
+        apply_movement(max(0.0, elapsed_ms - activation_ms))
+        self._last_timestamp = time.time()
+        with suppress(RuntimeError):
+            self._loop.call_soon_threadsafe(lambda r=relay: asyncio.ensure_future(r.async_send_state()))
+
+    def _endstop_overrun_ms(self, duration: float, start: float, end: float) -> float:
+        """Relay time to add so a movement ending at 0% or 100% hits the endstop.
+
+        Only a movement that really travels to an end gets it: an already
+        closed cover is not driven into its endstop again.
+
+        Args:
+            duration: Full 0-100% time of this direction, in ms.
+            start: Position the movement starts from.
+            end: Position the movement ends at.
+        """
+        if end not in (0, 100) or abs(end - start) <= 0:
+            return 0.0
+        return duration * self._endstop_overrun / 100.0
+
+    def _is_fully_open(self) -> bool:
+        """Whether open() has nothing left to do."""
+        return self._position >= 100
+
+    def _is_fully_closed(self) -> bool:
+        """Whether close() has nothing left to do."""
+        return self._position <= 0
+
+    def update_config_times(self, config: dict) -> None:
+        """Update timing shared by all cover platforms.
+
+        Args:
+            config: Cover configuration; time values as TimePeriod or strings.
+        """
+        if "open_time" in config:
+            self._open_time = ensure_time_period(config["open_time"]).total_milliseconds
+        if "close_time" in config:
+            self._close_time = ensure_time_period(config["close_time"]).total_milliseconds
+        # Optional field: a removed value means "no activation delay" again.
+        activation = config.get("actuator_activation_duration")
+        self._actuator_activation_ms = ensure_time_period(activation).total_milliseconds if activation else 0.0
+        self._endstop_overrun = float(config.get("endstop_overrun", DEFAULT_ENDSTOP_OVERRUN))
+        wait = config.get("direction_change_wait_time")
+        self._direction_change_wait_ms = (
+            ensure_time_period(wait).total_milliseconds if wait is not None else DEFAULT_DIRECTION_CHANGE_WAIT_MS
+        )
+
     async def on_exit(self) -> None:
         """Stop on exit."""
         await self.stop(on_exit=True)
@@ -242,10 +377,30 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         stopped = False
         if self._movement_thread and self._movement_thread.is_alive():
             self._stop_event.set()
+<<<<<<< ours
             self._movement_thread.join(timeout=0.5)
             self._open_relay.turn_off()
             self._close_relay.turn_off()
             stopped = True
+=======
+
+            # Halting is three blocking operations: waiting for the movement
+            # thread to notice the stop event, and two relay writes that go out
+            # over I2C behind a bus lock shared with every other device. Run
+            # inline they were the *event loop's* wait — up to half a second of
+            # frozen loop on every cover stop, and a cover stop is the first
+            # thing `toggle`, `toggle_open` and `toggle_close` do, so an
+            # ordinary button press paid it. Nothing reads GPIO while the loop
+            # is stopped. Order is unchanged: join first, then de-energise.
+            thread = self._movement_thread
+
+            def _halt() -> None:
+                thread.join(timeout=0.5)
+                self._open_relay.turn_off()
+                self._close_relay.turn_off()
+
+            await asyncio.get_running_loop().run_in_executor(None, _halt)
+>>>>>>> theirs
             # Send relay states to WebSocket (not MQTT - that's handled by output_type check)
             with suppress(RuntimeError):
                 asyncio.create_task(self._open_relay.async_send_state())
@@ -270,7 +425,7 @@ class BaseCover(BaseCoverABC, BasicMqtt):
                     await self._stop_relay.async_send_state()
 
     async def open(self) -> None:
-        if self._position >= 100:
+        if self._is_fully_open():
             return
         estimated_time_s = (100 - self._position) / 100 * self._open_time / 1000
         _LOGGER.info(
@@ -285,7 +440,7 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         self._message_bus.send_message(topic=f"{self._send_topic}/state", payload=OPENING)
 
     async def close(self) -> None:
-        if self._position <= 0:
+        if self._is_fully_closed():
             return
         estimated_time_s = self._position / 100 * self._close_time / 1000
         _LOGGER.info(
@@ -429,6 +584,7 @@ class BaseCover(BaseCoverABC, BasicMqtt):
             kind=self.kind,
             timestamp=self._last_timestamp,
             current_operation=self._current_operation,
+            area=getattr(self, "area", None),
             **json_position,
         )
         self._event_bus.trigger_event(CoverEvent(entity_id=self.id, state=event))

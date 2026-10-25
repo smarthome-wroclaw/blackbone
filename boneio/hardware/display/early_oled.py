@@ -14,6 +14,7 @@ to avoid reinitializing the I2C bus.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import textwrap
 from typing import Any
@@ -207,6 +208,11 @@ def draw_crash(exception: BaseException, device: Any | None = None) -> None:
     This function ALWAYS works, even after handoff() — crashes must be
     visible to the user regardless of which component owns the screen.
 
+    It also marks the display to survive the exit. Every caller returns 1
+    straight after drawing, and luma's atexit hook would otherwise blank
+    the panel a moment later - the message was up for about a second, then
+    the cabinet showed a black screen until systemd's next start.
+
     Args:
         exception: The exception that caused the crash.
         device: Optional device override; uses singleton if not provided.
@@ -222,8 +228,73 @@ def draw_crash(exception: BaseException, device: Any | None = None) -> None:
             detail=exc_msg,
             device=device,
         )
+        keep_on_exit(device)
     finally:
         _taken_over = was_taken_over
+
+
+def draw_recovery(title: str, message: str, url: str | None = None, device: Any | None = None) -> None:
+    """Draw the recovery-mode notice, and keep the display awake for it.
+
+    Recovery mode is the one state in which this screen is the only thing
+    telling somebody in front of the cabinet what is going on, so this works
+    after handoff() like draw_crash does, and turns the panel back on in case
+    it was left off. The URL gets a line of its own rather than going through
+    the word wrap: at 7 pt an address with its port fits the width, and a
+    wrap would break it in the middle.
+
+    Args:
+        title: Short title, in the big font.
+        message: Text, wrapped to the lines left above the URL.
+        url: Address of the web panel, or None when there is none.
+        device: Optional device override; uses singleton if not provided.
+    """
+    dev = device or _early_device
+    if dev is None:
+        return
+    try:
+        from luma.core.render import canvas
+
+        fonts = _get_fonts()
+        if fonts is None:
+            return
+
+        lines = textwrap.wrap(message, width=25)[: 3 if url else 4]
+        if url:
+            lines.append(url)
+
+        # The normal display manager blanks the screen after its sleep
+        # timeout; a device left that way would show this on a dark panel.
+        with contextlib.suppress(Exception):
+            dev.show()
+
+        with canvas(dev) as draw:
+            draw.polygon([(64, 1), (54, 14), (74, 14)], outline=1)
+            draw.text((61, 3), "!", font=fonts["small"], fill=1)
+            draw.text((3, 17), title, font=fonts["big"], fill=1)
+            y = 32
+            for line in lines:
+                draw.text((3, y), line, font=fonts["extraSmall"], fill=1)
+                y += 9
+    except Exception as err:
+        _LOGGER.debug("Failed to draw recovery notice on OLED: %s", err)
+
+
+def keep_on_exit(device: Any | None = None) -> None:
+    """Leave whatever is on the display there when the process exits.
+
+    luma registers an atexit hook that switches the panel off and clears it
+    unless the device is marked ``persist``. Right for a clean shutdown, but
+    a message drawn just before a deliberate exit - one systemd will follow
+    with another start - would otherwise vanish with the process and leave
+    the cabinet with a black screen instead of the reason.
+
+    Args:
+        device: Optional device override; uses singleton if not provided.
+    """
+    dev = device or _early_device
+    if dev is not None:
+        dev.persist = True
 
 
 def clear_display(device: Any | None = None) -> None:

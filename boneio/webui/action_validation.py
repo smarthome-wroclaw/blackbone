@@ -16,6 +16,10 @@ ACTION_ALLOWED_FIELDS: dict[str, set[str]] = {
     "output": {"boneio_output", "action_output"},
     "cover": {"boneio_cover", "action_cover", "data", "restore_tilt"},
     "mqtt": {"topic", "action_mqtt_msg"},
+    # Sets a flag that conditions read. Offered by the input editor since
+    # virtual switches landed, but missing here, so saving an input that used
+    # it was refused as an unknown action type.
+    "virtual_switch": {"boneio_virtual_switch", "action_output"},
     "output_over_mqtt": {"boneio_id", "boneio_output", "action_output", "action_mqtt_msg"},
     "cover_over_mqtt": {"boneio_id", "boneio_cover", "action_cover", "action_mqtt_msg"},
     "remote_output": {
@@ -166,16 +170,87 @@ def _check_condition_self_reference(
     return None
 
 
-def validate_section_actions(section: str, data: list) -> list[str]:
+def _check_sun_condition(action: dict, has_location: bool | None) -> str | None:
+    """Check a sun condition's shape, and that the device knows where it is.
+
+    A sun condition without a ``location:`` section is the worst kind of
+    misconfiguration: at runtime it fails open, so the action keeps firing and
+    the operator sees a feature that appears to work and never actually gates
+    anything. Catching it at save time is the only place it is obvious.
+
+    Args:
+        action: The action dict to check.
+        has_location: Whether the config has coordinates. None skips that part
+            of the check (the caller could not tell).
+
+    Returns:
+        An error message, or None when the conditions are fine.
+    """
+    from boneio.core.utils.sun import ANCHOR_NAMES, PHASE_NAMES
+
+    for cond in _get_conditions_from_action(action):
+        if cond.get("type") != "sun":
+            continue
+
+        if has_location is False:
+            return (
+                "This action has a sun condition, but no location is "
+                "configured. Set the coordinates in Settings → Device → "
+                "Location first, or the condition will never block anything."
+            )
+
+        window = [key for key in ("after", "before") if cond.get(key)]
+        phase = cond.get("phase")
+        elevation = [key for key in ("above", "below") if cond.get(key) is not None]
+        modes = [bool(window), bool(phase), bool(elevation)]
+
+        if sum(modes) == 0:
+            return (
+                "Sun condition is empty: choose a window (after/before), a "
+                "phase, or an elevation range."
+            )
+        if sum(modes) > 1:
+            return (
+                "Sun condition mixes a window, a phase and/or an elevation "
+                "range. Use one of them."
+            )
+
+        for key in ("after", "before"):
+            anchor = cond.get(key)
+            if anchor and anchor not in ANCHOR_NAMES:
+                return f"Unknown sun anchor '{anchor}' in '{key}'."
+
+        if phase and phase not in PHASE_NAMES:
+            return f"Unknown sun phase '{phase}'."
+
+        above, below = cond.get("above"), cond.get("below")
+        # A non-number is the schema's to report; compared here it would raise.
+        numbers = all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (above, below))
+        if numbers and above >= below:
+            return (
+                f"Sun elevation range is inverted: 'above' ({above}) must be "
+                f"lower than 'below' ({below})."
+            )
+
+    return None
+
+
+def validate_section_actions(
+    section: str, data: list, has_location: bool | None = None
+) -> list[str]:
     """Sanitize and validate all action objects in an event or binary_sensor section.
 
     First cleans stale fields from each action (e.g. ``data`` left over from
     a previous cover action type).  Then validates remaining fields.
-    Also checks for self-referencing conditions in binary_sensor entities.
+    Also checks for self-referencing conditions in binary_sensor entities,
+    and for sun conditions on a device with no configured location.
 
     Args:
         section: Config section name ('event' or 'binary_sensor').
         data: List of entity dicts from the section.
+        has_location: Whether the config has a ``location:`` section, so sun
+            conditions can be rejected before they reach a device that cannot
+            evaluate them. None means the caller could not tell.
 
     Returns:
         List of error message strings (empty if all valid).
@@ -204,5 +279,8 @@ def validate_section_actions(section: str, data: list) -> list[str]:
                 self_ref = _check_condition_self_reference(entity, action, section)
                 if self_ref:
                     errors.append(f"Entity '{name}', {click_type}[{idx}]: {self_ref}")
+                sun_err = _check_sun_condition(action, has_location)
+                if sun_err:
+                    errors.append(f"Entity '{name}', {click_type}[{idx}]: {sun_err}")
     return errors
 

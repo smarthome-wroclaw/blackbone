@@ -7,7 +7,18 @@
 # filesystem — the things a laptop harness can only fake.
 #
 # Phases (safe by default):
+<<<<<<< ours
 #   deploy   rsync app_black to the controller (editable install, no reinstall)
+=======
+#   deploy   rsync app_black to the controller (editable install, no reinstall).
+#            Reports it when the venv has drifted from pyproject.toml.
+#   deps     reinstall the dependencies there, so the device runs the versions
+#            the project declares rather than whatever pip last resolved on it
+#   verify   ask the live service whether it still works: the socket delivers
+#            entities, migrations are applied, nothing failed to initialise.
+#            Needs DEV_USER and DEV_PASSWORD for anything behind a token; a
+#            viewer account is enough. Read-only.
+>>>>>>> theirs
 #   harness  run the isolated web-UI harness in the device venv on a spare port
 #            and assert the auth/onboarding behaviour over HTTP. Does NOT touch
 #            the production service, config.yaml or the hardware.
@@ -36,19 +47,34 @@
 #   REMOTE=boneio@192.168.50.220
 #   REMOTE_APP=app_black                       (path under the remote home)
 #   SERVICE_CONFIG=/home/boneio/boneio/config.yaml
+<<<<<<< ours
 #   VENV=/home/boneio/venv
 #   HARNESS_PORT=8099
 #   SERVICE_PORT=8090
+=======
+#   VENV=/home/boneio/boneio/venv
+#   HARNESS_PORT=8099
+#   SERVICE_PORT=8090
+#   PROXY_PORT=8443                            (Caddy, for web.expose: proxy)
+>>>>>>> theirs
 #
 set -uo pipefail
 
 REMOTE="${REMOTE:-boneio@192.168.50.220}"
 REMOTE_HOST="${REMOTE##*@}"
 REMOTE_APP="${REMOTE_APP:-app_black}"
+<<<<<<< ours
 VENV="${VENV:-/home/boneio/venv}"
 SERVICE_CONFIG="${SERVICE_CONFIG:-/home/boneio/boneio/config.yaml}"
 HARNESS_PORT="${HARNESS_PORT:-8099}"
 SERVICE_PORT="${SERVICE_PORT:-8090}"
+=======
+VENV="${VENV:-/home/boneio/boneio/venv}"
+SERVICE_CONFIG="${SERVICE_CONFIG:-/home/boneio/boneio/config.yaml}"
+HARNESS_PORT="${HARNESS_PORT:-8099}"
+SERVICE_PORT="${SERVICE_PORT:-8090}"
+PROXY_PORT="${PROXY_PORT:-8443}"
+>>>>>>> theirs
 HARNESS_DIR="/tmp/boneio_webui_harness_$$"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,6 +128,147 @@ phase_deploy() {
   local ver
   ver=$("${SSH[@]}" "$REMOTE" "$VENV/bin/python -c 'from boneio.version import __version__;print(__version__)'" 2>/dev/null | tr -d '\r')
   info "editable boneio now resolves to version: ${ver:-unknown}"
+<<<<<<< ours
+=======
+
+  # Reported, not fixed: installing packages is a slow, network-bound thing to
+  # do behind a command somebody ran to copy code. `deps` does it on request.
+  local drift
+  drift=$(_drift_report)
+  if [ -n "$drift" ]; then
+    info "the device venv has drifted from pyproject.toml — run: $0 deps"
+    printf '%s\n' "$drift" | sed 's/^/      /'
+  fi
+}
+
+# Which declared dependencies the device does not actually have.
+#
+# rsync copies code, not packages, so an editable install drifts: the venv
+# keeps whatever pip last resolved there, however old. That is how a fastapi
+# upgrade came to be tested against a combination no device would ever get —
+# the laptop had moved on and the controller had not.
+_drift_report() {
+  "${SSH[@]}" "$REMOTE" "$VENV/bin/pip list --format=freeze" 2>/dev/null \
+    | python3 -c '
+import re, sys, tomllib
+from packaging.version import Version
+
+def norm(name):  # PEP 503 — luma.core and luma-core are the same package
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+with open(sys.argv[1], "rb") as handle:
+    declared = tomllib.load(handle)["project"]["dependencies"]
+
+pins = {}
+for req in declared:
+    m = re.match(r"^([A-Za-z0-9_.\-\[\]]+?)(\[[^\]]+\])?\s*([=><!~]+)\s*([0-9][^;,\s]*)", req)
+    if m:
+        pins[norm(m.group(1))] = (m.group(3), m.group(4))
+
+have = {}
+for line in sys.stdin:
+    if "==" in line:
+        name, version = line.strip().split("==", 1)
+        have[norm(name)] = version
+
+for name, (op, want) in sorted(pins.items()):
+    got = have.get(name)
+    if got is None:
+        print(f"{name} missing (wants {op}{want})")
+        continue
+    try:
+        ok = Version(got) == Version(want) if op == "==" else Version(got) >= Version(want)
+    except Exception:
+        ok = True
+    if not ok:
+        print(f"{name} {got} (wants {op}{want})")
+' "$REPO_ROOT/pyproject.toml" 2>/dev/null
+}
+
+phase_deps() {
+  section "deps"
+  info "bringing the device venv in line with pyproject.toml"
+  if "${SSH[@]}" "$REMOTE" "cd $REMOTE_APP && $VENV/bin/pip install -e . 2>&1 | tail -3"; then
+    ok "pip install -e . completed"
+  else
+    bad "pip install -e . failed"
+  fi
+  local left
+  left=$(_drift_report)
+  if [ -z "$left" ]; then ok "every declared dependency matches"; else bad "still adrift: $left"; fi
+}
+
+# The real service, over the API a browser uses.
+#
+# The harness below builds a small application out of the auth middleware
+# alone, because the real one needs hardware and a Manager. That is why it was
+# green through a socket that refused every connection, a migration chain
+# stopped six short, and a panel with no entities in it: none of those are
+# reachable without the real application running on a real device.
+# Where the panel answers from here: its own port, or — with web.expose: proxy,
+# the default since the PWA, where boneIO listens on localhost only — Caddy's.
+# Empty while neither does.
+_service_base() {
+  local base
+  for base in "http://$REMOTE_HOST:$SERVICE_PORT" "https://$REMOTE_HOST:$PROXY_PORT"; do
+    if curl -kfsS -o /dev/null --max-time 5 "$base/api/init" 2>/dev/null; then
+      echo "$base"
+      return
+    fi
+  done
+}
+
+phase_verify() {
+  local base
+  base="$(_service_base)"
+  section "verify → the live service at ${base:-$REMOTE_HOST (not answering)}"
+  local args=("$REMOTE_HOST" --port "$SERVICE_PORT")
+  [ "${base%%:*}" = https ] && args=("$REMOTE_HOST" --port "$PROXY_PORT" --tls)
+  [ -n "${DEV_USER:-}" ] && args+=(--user "$DEV_USER")
+  if [ -z "${DEV_PASSWORD:-}" ]; then
+    info "DEV_USER/DEV_PASSWORD unset — the socket and migration checks will be skipped"
+  fi
+  local py
+  py="$(_verify_python)" || {
+    bad "no interpreter here can run verify_device.py — see above"
+    return
+  }
+  if "$py" "$REPO_ROOT/scripts/verify_device.py" "${args[@]}"; then
+    ok "the live service answers for everything asked of it"
+  else
+    bad "the live service failed a check (see above)"
+  fi
+}
+
+# An interpreter that can actually run the checker.
+#
+# This used to be a bare `python3`, which meant whatever pyenv resolved from
+# .python-version — a bare interpreter with no project installed. It worked for
+# months because that particular one happened to have `requests` left in it
+# from something else, and broke the day the environment was rebuilt clean. A
+# dev-loop check whose own dependencies are satisfied by accident is not a
+# check you can trust to tell you the device is fine.
+#
+# So: ask each candidate whether it can import what the checker needs, and say
+# which one was chosen rather than leaving it to be guessed.
+_verify_python() {
+  local candidates=("$REPO_ROOT/.venv/bin/python")
+  [ -n "${VIRTUAL_ENV:-}" ] && candidates+=("$VIRTUAL_ENV/bin/python")
+  candidates+=(python3)
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ] || continue
+    if "$candidate" -c 'import requests, websockets' >/dev/null 2>&1; then
+      # stderr, because this function's stdout is the chosen path.
+      info "checker running under $candidate" >&2
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  bad "verify_device.py needs requests and websockets. Tried: ${candidates[*]}" >&2
+  bad "install them into one of those, e.g. pip install -e . in this repo" >&2
+  return 1
+>>>>>>> theirs
 }
 
 phase_harness() {
@@ -186,11 +353,19 @@ chk "login role is admin"  "admin" "$(curl -fsS --max-time 15 -X POST "$BASE/api
 # --- roles: a viewer operates, an admin configures --------------------
 vcode=$(code -X POST "$BASE/api/accounts" -H "Authorization: Bearer $tok" \
   -H 'Content-Type: application/json' \
+<<<<<<< ours
   -d '{"username":"gosc","password":"haslo-goscia","role":"viewer"}')
 chk "admin creates a viewer account" "201" "$vcode"
 
 vtok=$(curl -fsS --max-time 30 -X POST "$BASE/api/login" -H 'Content-Type: application/json' \
   -d '{"username":"gosc","password":"haslo-goscia"}' | field token)
+=======
+  -d '{"username":"gosc","password":"ZupelnieInneHaslo-42","role":"viewer"}')
+chk "admin creates a viewer account" "201" "$vcode"
+
+vtok=$(curl -fsS --max-time 30 -X POST "$BASE/api/login" -H 'Content-Type: application/json' \
+  -d '{"username":"gosc","password":"ZupelnieInneHaslo-42"}' | field token)
+>>>>>>> theirs
 [ -n "$vtok" ] && emit PASS "viewer can sign in" || emit FAIL "viewer could not sign in"
 VH="Authorization: Bearer $vtok"
 
@@ -204,10 +379,81 @@ chk "viewer may NOT create an account" "403" \
      -d '{"username":"wlasny","password":"dobre-haslo","role":"admin"}')"
 chk "viewer MAY change their own password" "200" \
   "$(code -X PUT "$BASE/api/account/password" -H "$VH" -H 'Content-Type: application/json' \
+<<<<<<< ours
      -d '{"current_password":"haslo-goscia","new_password":"nowe-haslo-123"}')"
 chk "admin may restart" "200" \
   "$(code -X POST "$BASE/api/restart" -H "Authorization: Bearer $tok")"
 
+=======
+     -d '{"current_password":"ZupelnieInneHaslo-42","new_password":"nowe-haslo-123"}')"
+chk "admin may restart" "200" \
+  "$(code -X POST "$BASE/api/restart" -H "Authorization: Bearer $tok")"
+
+# --- a password change signs the other sessions out --------------------
+# The viewer changed their password just above, so the token it signed in
+# with is dead now, on the device's real store and middleware.
+chk "the viewer's old token is revoked by that change" "401" "$(code -H "$VH" "$BASE/api/harness/protected")"
+chk "  ...with a session_revoked code" "session_revoked" \
+  "$(curl -s --max-time 15 -H "$VH" "$BASE/api/harness/protected" | field code)"
+vtok2=$(curl -fsS --max-time 30 -X POST "$BASE/api/login" -H 'Content-Type: application/json' \
+  -d '{"username":"gosc","password":"nowe-haslo-123"}' | field token)
+chk "the new password signs in" "200" "$(code -H "Authorization: Bearer $vtok2" "$BASE/api/harness/protected")"
+
+# --- the dangerous requests want the password again --------------------
+# A token for the same admin, but as if the password had been typed 15
+# minutes ago — minted with the harness's own secret, since waiting out
+# REAUTH_WINDOW is not an option.
+stale=$("$VENV/bin/python" -c '
+import time
+from boneio.webui.middleware.auth import create_token, set_jwt_secret
+set_jwt_secret("harness-jwt-secret")
+print(create_token({"sub": "pawel", "role": "admin", "ver": 0, "auth_time": int(time.time()) - 900}))')
+SH="Authorization: Bearer $stale"
+NEWV='{"username":"trzeci","password":"ZielonyKot-777","role":"viewer"}'
+chk "a stale token may still read" "200" "$(code -H "$SH" "$BASE/api/accounts")"
+chk "a stale token is asked for the password to add an account" "403" \
+  "$(code -X POST "$BASE/api/accounts" -H "$SH" -H 'Content-Type: application/json' -d "$NEWV")"
+chk "  ...with a reauth_required code" "reauth_required" \
+  "$(curl -s --max-time 15 -X POST "$BASE/api/accounts" -H "$SH" -H 'Content-Type: application/json' -d "$NEWV" | field code)"
+wrong=$(curl -s --max-time 30 -w '\n%{http_code}' -X POST "$BASE/api/auth/confirm" -H "$SH" \
+  -H 'Content-Type: application/json' -d '{"password":"zle"}')
+chk "a wrong password is refused, not a sign-out" "403" "$(printf '%s' "$wrong" | tail -1)"
+chk "  ...with a reauth_failed code" "reauth_failed" "$(printf '%s' "$wrong" | sed '$d' | field code)"
+t0=$(date +%s.%N)
+fresh=$(curl -fsS --max-time 30 -X POST "$BASE/api/auth/confirm" -H "$SH" \
+  -H 'Content-Type: application/json' -d '{"password":"dobre-haslo-123"}' | field token)
+t1=$(date +%s.%N)
+[ -n "$fresh" ] && emit PASS "the right password returns a fresh token" || emit FAIL "confirm returned no token"
+emit INFO "password confirmation on this controller: $(awk "BEGIN{printf \"%.0f ms\",($t1-$t0)*1000}")"
+chk "the fresh token adds the account" "201" \
+  "$(code -X POST "$BASE/api/accounts" -H "Authorization: Bearer $fresh" -H 'Content-Type: application/json' -d "$NEWV")"
+chk "an admin reset signs that account out" "200" \
+  "$(code -X PUT "$BASE/api/accounts/gosc/password" -H "Authorization: Bearer $fresh" \
+     -H 'Content-Type: application/json' -d '{"password":"od-admina-456"}')"
+chk "  ...so the viewer's latest token is dead too" "401" \
+  "$(code -H "Authorization: Bearer $vtok2" "$BASE/api/harness/protected")"
+
+# --- a session that keeps guessing is signed out, and only that one ----
+tokA=$(curl -fsS --max-time 30 -X POST "$BASE/api/login" -H 'Content-Type: application/json' \
+  -d '{"username":"pawel","password":"dobre-haslo-123"}' | field token)
+tokB=$(curl -fsS --max-time 30 -X POST "$BASE/api/login" -H 'Content-Type: application/json' \
+  -d '{"username":"pawel","password":"dobre-haslo-123"}' | field token)
+left=""
+for _ in 1 2 3 4; do
+  left=$(curl -s --max-time 30 -X POST "$BASE/api/auth/confirm" -H "Authorization: Bearer $tokA" \
+    -H 'Content-Type: application/json' -d '{"password":"zle"}' | field attempts_left)
+done
+chk "four wrong passwords leave one try" "1" "$left"
+last=$(curl -s --max-time 30 -w '\n%{http_code}' -X POST "$BASE/api/auth/confirm" -H "Authorization: Bearer $tokA" \
+  -H 'Content-Type: application/json' -d '{"password":"zle"}')
+chk "the fifth signs the session out" "401" "$(printf '%s' "$last" | tail -1)"
+chk "  ...with a session_locked code" "session_locked" "$(printf '%s' "$last" | sed '$d' | field code)"
+chk "that session stays signed out" "401" "$(code -H "Authorization: Bearer $tokA" "$BASE/api/harness/protected")"
+chk "the account's other session carries on" "200" "$(code -H "Authorization: Bearer $tokB" "$BASE/api/harness/protected")"
+chk "the sign-out is in users.json" "1" \
+  "$(python3 -c "import json;print(sum(len(u.get('revoked_sessions',{})) for u in json.load(open('$DIR/users.json'))['users']))")"
+
+>>>>>>> theirs
 # users.json on the device's own filesystem
 chk "users.json is 0600" "600" "$(stat -c %a "$DIR/users.json" 2>/dev/null)"
 # grep -c always prints a count for an existing file (0 when no match) and
@@ -247,7 +493,11 @@ REMOTE_DEPS
   }
   # The auth/authz suites. Listed by directory glob rather than by file so a
   # new test in these areas is picked up without editing this script.
+<<<<<<< ours
   local target="tests/unit/core/test_auth_*.py tests/unit/core/test_setup_required_notice.py tests/unit/webui/test_auth*.py tests/unit/webui/test_account*.py tests/unit/webui/test_onboarding_*.py"
+=======
+  local target="tests/unit/core/test_auth_*.py tests/unit/core/test_setup_required_notice.py tests/unit/webui/test_auth*.py tests/unit/webui/test_account*.py tests/unit/webui/test_onboarding_*.py tests/unit/webui/test_reauth.py tests/unit/webui/test_session_revocation.py tests/unit/webui/test_session_lockout.py tests/unit/webui/test_security_events.py tests/unit/webui/test_trusted_proxy.py"
+>>>>>>> theirs
   if [ "${FULL:-0}" = "1" ]; then target="tests"; info "running the FULL suite (slow on a BBB)"; fi
   local out
   out=$("${SSH[@]}" "$REMOTE" "cd $REMOTE_APP && $VENV/bin/python -m pytest $target -q 2>&1" )
@@ -264,6 +514,7 @@ phase_live() {
   info "this interrupts the running device for a few seconds"
   "${SSH[@]}" "$REMOTE" "sudo -n /usr/bin/systemctl restart boneio" \
     && ok "restart issued" || { bad "restart failed"; return; }
+<<<<<<< ours
   local base="http://$REMOTE_HOST:$SERVICE_PORT" up=""
   # A cold start on a BBB imports a lot before the real server replaces the
   # loading screen; allow for that plus a slow first .pyc pass after an rsync.
@@ -273,6 +524,19 @@ phase_live() {
   done
   if [ -z "$up" ]; then
     bad "service did not answer on $base after restart"
+=======
+  local base="" up=""
+  # A cold start on a BBB imports a lot before the real server replaces the
+  # loading screen; allow for that plus a slow first .pyc pass after an rsync.
+  # The first start of new code also applies its migrations, a few seconds each.
+  for _ in $(seq 1 120); do
+    base="$(_service_base)"
+    if [ -n "$base" ]; then up=1; break; fi
+    sleep 1
+  done
+  if [ -z "$up" ]; then
+    bad "service did not answer on :$SERVICE_PORT or :$PROXY_PORT after restart"
+>>>>>>> theirs
     # Print why, instead of leaving the reader to go and look. A crash loop is
     # the usual cause and the traceback says so in one line.
     info "restart count: $("${SSH[@]}" "$REMOTE" 'systemctl show boneio -p NRestarts --value' 2>/dev/null | tr -d '\r')"
@@ -284,9 +548,15 @@ phase_live() {
   fi
   ok "service is back up"
   local ver auth need
+<<<<<<< ours
   ver=$(curl -fsS "$base/api/init" | _json version)
   auth=$(curl -fsS "$base/api/init" | _json auth_required)
   need=$(curl -fsS "$base/api/init" | _json needs_onboarding)
+=======
+  ver=$(curl -kfsS "$base/api/init" | _json version)
+  auth=$(curl -kfsS "$base/api/init" | _json auth_required)
+  need=$(curl -kfsS "$base/api/init" | _json needs_onboarding)
+>>>>>>> theirs
   info "live /api/init → version=$ver auth_required=$auth needs_onboarding=$need"
   case "$ver" in
     1.6.*) ok "running the 1.6 line" ;;
@@ -296,7 +566,14 @@ phase_live() {
 
 phase_smoke() {
   section "smoke → live /api/init"
+<<<<<<< ours
   curl -fsS "http://$REMOTE_HOST:$SERVICE_PORT/api/init" | sed 's/^/      /' || bad "no response"
+=======
+  local base
+  base="$(_service_base)"
+  [ -n "$base" ] || { bad "no response on :$SERVICE_PORT or :$PROXY_PORT"; return; }
+  curl -kfsS "$base/api/init" | sed 's/^/      /' || bad "no response"
+>>>>>>> theirs
   echo
 }
 
@@ -316,7 +593,11 @@ for a in "$@"; do
   case "$a" in
     --full) FULL=1 ;;
     --with-frontend) WITH_FRONTEND=1 ;;
+<<<<<<< ours
     deploy|harness|pytest|live|smoke|all) PHASES+=("$a") ;;
+=======
+    deploy|deps|harness|verify|pytest|live|smoke|all) PHASES+=("$a") ;;
+>>>>>>> theirs
     *) echo "unknown argument: $a" >&2; exit 2 ;;
   esac
 done
@@ -327,9 +608,17 @@ for p in "${PHASES[@]}"; do
   case "$p" in
     all)     phase_deploy; phase_harness; phase_pytest ;;
     deploy)  phase_deploy ;;
+<<<<<<< ours
     harness) phase_harness ;;
     pytest)  phase_pytest ;;
     live)    phase_live ;;
+=======
+    deps)    phase_deps ;;
+    harness) phase_harness ;;
+    verify)  phase_verify ;;
+    pytest)  phase_pytest ;;
+    live)    phase_live; phase_verify ;;
+>>>>>>> theirs
     smoke)   phase_smoke ;;
   esac
 done

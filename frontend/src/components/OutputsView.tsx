@@ -1,26 +1,57 @@
 import { useState, useContext, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from '@/api/axios';
-import { WebSocketContext } from '../App';
+import { WebSocketContext } from '@/contexts/WebSocketContext';
 import ViewToggle from './ViewToggle';
-import { isOutputEvent, isCoverEvent, isGroupEvent, CoverState, OutputState } from '../hooks/useWebSocket';
+import { isOutputEvent, isCoverEvent, isGroupEvent, CoverState, GroupState, OutputState } from '../hooks/useWebSocket';
 import EntityCard from './EntityCard';
 import type { EntityData } from './EntityCard';
-import { EntityGrid, ENTITY_GRID_CLASS } from './EntityGrid';
+import { EntityGrid, EntityPanel, ENTITY_GRID_CLASS, ENTITY_LIST_CLASS } from './EntityGrid';
+import GroupByAreaToggle from './GroupByAreaToggle';
+import { useGroupByArea } from '@/hooks/useGroupByArea';
+import { useAreas } from '@/hooks/useAreas';
+import { groupByArea } from '@/utils/groupByArea';
 import CoverItem from './CoverItem';
 import { useTranslation } from '../hooks/useTranslation';
+import { useAuth } from '../hooks/useAuth';
 import { FaExclamationTriangle, FaSortAmountDown, FaSortAlphaDown, FaClock, FaCog, FaWifi } from 'react-icons/fa';
 import { HiSignal } from 'react-icons/hi2';
 import MqttReferenceSheet from '@/components/MqttReferenceSheet';
 import { cn } from '@/lib/utils';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { MdBlinds, MdBlindsClosed } from 'react-icons/md';
+import EntityInfoCard, { type EntityCardMenuItem } from './entityCard/EntityInfoCard';
+import { OutputCardBody } from './entityCard/bodies';
+import { historyFormatters } from './entityCard/format';
+import { getIconAndOnColor } from './EntityCard';
+import { historyKey } from '@/utils/entityHistory';
 
 import type { OutputCategory, SortMode } from '@/types/outputs';
+
+/** One entry of `/api/remote-devices/all`, as far as this view reads it. */
+interface RemoteDeviceStatus {
+  id: string;
+  name: string;
+  protocol?: string;
+  outputs?: Array<{ id: string; name: string; state: string; type?: string }>;
+  covers?: Array<{
+    id: string;
+    name: string;
+    state: string;
+    position?: number;
+    kind?: string;
+    tilt?: number;
+    current_operation?: string;
+  }>;
+}
+
+/** One tile of the by-area view: the three kinds share a room's panel. */
+type AreaTile =
+  | { kind: 'output'; output: OutputState; stateOnly: boolean }
+  | { kind: 'group'; group: GroupState }
+  | { kind: 'cover'; cover: CoverState };
+
+/** Tile order inside an area: the same order the category sections use. */
+const AREA_TILE_CATEGORIES: OutputCategory[] = ['light', 'switch', 'virtual_switch', 'valve'];
 
 /**
  * Categorize output by its type
@@ -28,6 +59,7 @@ import type { OutputCategory, SortMode } from '@/types/outputs';
 function categorizeOutput(type: string | undefined): OutputCategory {
   const typeStr = (type || '').toLowerCase();
   
+  if (typeStr === 'virtual_switch') return 'virtual_switch';
   if (typeStr === 'light') return 'light';
   if (typeStr === 'valve') return 'valve';
   if (typeStr === 'cover' || typeStr === 'none') return 'state_only';
@@ -37,6 +69,7 @@ function categorizeOutput(type: string | undefined): OutputCategory {
 
 export default function OutputsView({error}: {error: string | null}) {
   const { t } = useTranslation();
+  const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const [outputError, setError] = useState<string | null>(null);
   const { outputs, covers, groups } = useContext(WebSocketContext);
@@ -50,12 +83,16 @@ export default function OutputsView({error}: {error: string | null}) {
     const saved = localStorage.getItem('outputSortMode');
     return (saved as SortMode) || 'name';
   });
+  const areas = useAreas();
+  const [groupedByArea, setGroupedByArea] = useGroupByArea('outputGroupByArea', areas.length > 0);
   const [recentlyChanged, setRecentlyChanged] = useState<Set<string>>(new Set());
   const prevOutputsRef = useRef<Map<string, { state: string; timestamp: number }>>(new Map());
   const isInitializedRef = useRef(false);
 
   // Fetch hardware errors count
   useEffect(() => {
+    // The route is admin-only, so a read-only account neither asks nor sees it.
+    if (!isAdmin) return;
     const fetchHardwareErrors = async () => {
       try {
         const { data } = await axios.get('/api/hardware/errors');
@@ -69,7 +106,7 @@ export default function OutputsView({error}: {error: string | null}) {
     // Poll every 30 seconds
     const interval = setInterval(fetchHardwareErrors, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isAdmin]);
 
   // Get translated category labels
   const getCategoryLabel = (category: OutputCategory): string => {
@@ -80,6 +117,7 @@ export default function OutputsView({error}: {error: string | null}) {
       cover: t('outputs.categories.covers'),
       group: t('outputs.categories.groups'),
       state_only: t('outputs.categories.state_only'),
+      virtual_switch: t('outputs.categories.virtual_switches'),
     };
     return labels[category];
   };
@@ -96,7 +134,7 @@ export default function OutputsView({error}: {error: string | null}) {
   };
 
   // Fetch remote devices
-  const [remoteDevices, setRemoteDevices] = useState<any[]>([]);
+  const [remoteDevices, setRemoteDevices] = useState<RemoteDeviceStatus[]>([]);
 
   useEffect(() => {
     const fetchRemoteDevices = async () => {
@@ -121,7 +159,7 @@ export default function OutputsView({error}: {error: string | null}) {
     // Add remote device outputs (only CAN devices — legacy approach)
     remoteDevices.forEach(device => {
       if (device.protocol === 'can' && device.outputs) {
-        device.outputs.forEach((out: any) => {
+        device.outputs.forEach((out) => {
           allOutputs.push({
             id: `remote_${device.id}_${out.id}`,
             name: `${device.name} - ${out.name}`,
@@ -149,6 +187,7 @@ export default function OutputsView({error}: {error: string | null}) {
       cover: [],
       group: [],
       state_only: [],
+      virtual_switch: [],
     };
     
     localOutputs.forEach(output => {
@@ -179,7 +218,7 @@ export default function OutputsView({error}: {error: string | null}) {
     const allCovers = covers.filter(isCoverEvent).map(c => c.state as CoverState);
     remoteDevices.forEach(device => {
       if (device.protocol === 'can' && device.covers) {
-        device.covers.forEach((cov: any) => {
+        device.covers.forEach((cov) => {
           allCovers.push({
             id: `remote_${device.id}_${cov.id}`,
             name: `${device.name} - ${cov.name}`,
@@ -206,40 +245,47 @@ export default function OutputsView({error}: {error: string | null}) {
     localStorage.setItem('outputSortMode', mode);
   };
 
-  // Long press dialog state
-  const [longPressDialog, setLongPressDialog] = useState<{ 
-    open: boolean; 
-    output: OutputState | CoverState | null;
+  // Long-press card. Only which entity it is about: the entity itself is
+  // looked up on every render, so the card follows it live.
+  const [card, setCard] = useState<{
+    open: boolean;
+    id: string | null;
     type: 'output' | 'output_group' | 'cover' | 'remote_outputs';
   }>({
     open: false,
-    output: null,
+    id: null,
     type: 'output'
   });
 
   const handleLongPress = useCallback((output: EntityData) => {
-    setLongPressDialog({ open: true, output: output as OutputState, type: 'output' });
+    setCard({ open: true, id: output.id, type: 'output' });
   }, []);
 
   const handleGroupLongPress = useCallback((output: EntityData) => {
-    setLongPressDialog({ open: true, output: output as OutputState, type: 'output_group' });
+    setCard({ open: true, id: output.id, type: 'output_group' });
   }, []);
 
   const handleCoverLongPress = useCallback((cover: CoverState) => {
-    setLongPressDialog({ open: true, output: cover, type: 'cover' });
+    setCard({ open: true, id: cover.id, type: 'cover' });
   }, []);
 
   const handleRemoteOutputLongPress = useCallback((output: EntityData) => {
-    setLongPressDialog({ open: true, output: output as OutputState, type: 'remote_outputs' });
+    setCard({ open: true, id: output.id, type: 'remote_outputs' });
   }, []);
 
+  const closeCard = useCallback(() => setCard(prev => ({ ...prev, open: false })), []);
+
   const handleGoToSettings = useCallback(() => {
-    if (!longPressDialog.output) return;
-    const outputId = longPressDialog.output.id;
-    const section = longPressDialog.type;
-    navigate(`/settings/${section}?edit=${encodeURIComponent(outputId)}`);
-    setLongPressDialog({ open: false, output: null, type: 'output' });
-  }, [longPressDialog.output, longPressDialog.type, navigate]);
+    if (!card.id) return;
+    // A virtual switch is drawn and long-pressed as an output, but it is
+    // configured in a section of its own.
+    const section = card.type === 'output'
+      && categorizedOutputs.virtual_switch.some(o => o.id === card.id)
+      ? 'virtual_switch'
+      : card.type;
+    navigate(`/settings/${section}?edit=${encodeURIComponent(card.id)}`);
+    closeCard();
+  }, [card.id, card.type, categorizedOutputs, navigate, closeCard]);
 
   // MQTT Reference dialog state
   const [mqttRef, setMqttRef] = useState<{
@@ -249,16 +295,16 @@ export default function OutputsView({error}: {error: string | null}) {
     entityName: string;
   }>({ open: false, entityType: '', entityId: '', entityName: '' });
 
-  const handleOpenMqttRef = useCallback(() => {
-    if (!longPressDialog.output) return;
+  const handleOpenMqttRef = useCallback((name: string) => {
+    if (!card.id) return;
     setMqttRef({
       open: true,
-      entityType: longPressDialog.type,
-      entityId: longPressDialog.output.id,
-      entityName: longPressDialog.output.name,
+      entityType: card.type,
+      entityId: card.id,
+      entityName: name,
     });
-    setLongPressDialog({ open: false, output: null, type: 'output' });
-  }, [longPressDialog.output, longPressDialog.type]);
+    closeCard();
+  }, [card.id, card.type, closeCard]);
 
   // Track recently changed outputs for highlight effect
   useEffect(() => {
@@ -312,6 +358,14 @@ export default function OutputsView({error}: {error: string | null}) {
         await axios.post(`/api/remote-devices/${deviceId}/output/${outputId}/action`, {
           action: 'TOGGLE'
         });
+        setError(null);
+        return;
+      }
+
+      // A virtual switch has no relay and no interlock, so it takes its own
+      // endpoint rather than pretending to be an output that happens to work.
+      if (type === 'virtual_switch') {
+        await axios.post(`/api/virtual_switch/${id}/toggle`);
         setError(null);
         return;
       }
@@ -382,6 +436,77 @@ export default function OutputsView({error}: {error: string | null}) {
 
 
 
+  const areaNames = useMemo(() => new Map(areas.map((a) => [a.id, a.name])), [areas]);
+  const areaLabelOf = (area: string | null | undefined) =>
+    groupedByArea ? null : (area ? areaNames.get(area) || area : undefined);
+
+  const renderOutputCard = (output: OutputState, isStateOnly = false) => (
+    <EntityCard
+      key={output.id}
+      output={output}
+      onToggle={isStateOnly ? undefined : toggleOutput}
+      onDurationChange={handleDurationChange}
+      onBrightnessChange={handleBrightnessChange}
+      isGrid={isGrid}
+      error={error}
+      stateOnly={isStateOnly}
+      isHighlighted={recentlyChanged.has(output.id)}
+      onLongPress={handleLongPress}
+      areaLabel={areaLabelOf(output.area)}
+    />
+  );
+
+  const renderGroupCard = (group: GroupState) => (
+    <EntityCard
+      key={group.id}
+      output={{
+        id: group.id,
+        name: group.name,
+        state: group.state,
+        type: group.type,
+        timestamp: group.timestamp,
+        area: null,
+        interlock_groups: []
+      }}
+      onToggle={toggleGroup}
+      isGrid={isGrid}
+      error={error}
+      isGroup={true}
+      onLongPress={handleGroupLongPress}
+      areaLabel={areaLabelOf(group.area)}
+    />
+  );
+
+  const renderCoverCard = (cover: CoverState) => (
+    <CoverItem
+      key={cover.id}
+      cover={cover}
+      action={actionCover}
+      isGrid={isGrid}
+      error={error}
+      onLongPress={handleCoverLongPress}
+    />
+  );
+
+  // Everything local, room by room. Remote (CAN) outputs carry no area and
+  // keep their own panel either way.
+  const areaGroups = useMemo(() => {
+    if (!groupedByArea) return [];
+    const tiles: AreaTile[] = [
+      ...AREA_TILE_CATEGORIES.flatMap((category) =>
+        categorizedOutputs[category].map((output): AreaTile => ({ kind: 'output', output, stateOnly: false })),
+      ),
+      ...validGroups.map((group): AreaTile => ({ kind: 'group', group })),
+      ...stateOnlyOutputs.map((output): AreaTile => ({ kind: 'output', output, stateOnly: true })),
+      ...validCovers.map((cover): AreaTile => ({ kind: 'cover', cover })),
+    ];
+    return groupByArea(
+      tiles,
+      (tile) => (tile.kind === 'output' ? tile.output.area : tile.kind === 'group' ? tile.group.area : tile.cover.area),
+      areas,
+    );
+  }, [groupedByArea, categorizedOutputs, validGroups, stateOnlyOutputs, validCovers, areas]);
+
   /**
    * Render a section with outputs
    */
@@ -395,37 +520,104 @@ export default function OutputsView({error}: {error: string | null}) {
     
     return (
       <div key={category}>
-        <div className="divider">{getCategoryLabel(category)}</div>
-        <EntityGrid isGrid={isGrid}>
-          {items.map((output) => (
-            <EntityCard 
-              key={output.id}
-              output={output}
-              onToggle={isStateOnly ? undefined : onToggle}
-              onDurationChange={handleDurationChange}
-              onBrightnessChange={handleBrightnessChange}
-              isGrid={isGrid}
-              error={error}
-              stateOnly={isStateOnly}
-              isHighlighted={recentlyChanged.has(output.id)}
-              onLongPress={handleLongPress}
-            />
-          ))}
+        <EntityGrid isGrid={isGrid} title={getCategoryLabel(category)}>
+          {items.map((output) => renderOutputCard(output, isStateOnly || !onToggle))}
         </EntityGrid>
       </div>
     );
   };
 
+  /**
+   * The long-press card for whatever `card` points at, drawn from the same
+   * lists the tiles are, so it moves when the tile does.
+   */
+  const renderCard = () => {
+    if (!card.id) return null;
+    const allOutputs = [...Object.values(categorizedOutputs).flat(), ...remoteOutputs];
+
+    const menu: EntityCardMenuItem[] = [];
+    const addMenu = (name: string) => {
+      menu.push({
+        key: 'mqtt',
+        label: t('mqtt_reference.button'),
+        icon: <HiSignal />,
+        onSelect: () => handleOpenMqttRef(name),
+      });
+      // Hidden for a read-only account: the route refuses it, and a
+      // button that leads to "administrators only" is a button that
+      // should not have been offered.
+      if (isAdmin) {
+        menu.push({ key: 'settings', label: t('outputs.go_to_settings'), icon: <FaCog />, onSelect: handleGoToSettings });
+      }
+    };
+
+    if (card.type === 'cover') {
+      const cover = validCovers.find(c => c.id === card.id);
+      if (!cover) return null;
+      addMenu(cover.name);
+      const CoverIcon = cover.state === 'open' ? MdBlinds : MdBlindsClosed;
+      return (
+        <EntityInfoCard
+          open={card.open}
+          onOpenChange={(open) => !open && closeCard()}
+          icon={<CoverIcon className={cover.state === 'open' ? 'text-yellow-400' : 'text-base-content/40'} />}
+          title={cover.name}
+          subtitle={[cover.id, cover.area].filter(Boolean).join(' · ')}
+          menu={menu}
+          historyKey={historyKey('cover', cover.id)}
+          formatValue={historyFormatters.cover(t)}
+        >
+          <CoverItem cover={cover} action={actionCover} isGrid error={error} embedded />
+        </EntityInfoCard>
+      );
+    }
+
+    const isGroup = card.type === 'output_group';
+    const output: EntityData | undefined = isGroup
+      ? validGroups
+        .filter(g => g.id === card.id)
+        .map(g => ({ id: g.id, name: g.name, state: g.state, type: g.type, timestamp: g.timestamp, area: null, interlock_groups: [] }))[0]
+      : allOutputs.find(o => o.id === card.id);
+    if (!output) return null;
+    addMenu(output.name);
+    const { Icon, onColor } = getIconAndOnColor(output.type, isGroup);
+    const stateOnly = !isGroup && categorizeOutput(output.type) === 'state_only';
+    return (
+      <EntityInfoCard
+        open={card.open}
+        onOpenChange={(open) => !open && closeCard()}
+        icon={<Icon className={output.state === 'ON' ? onColor : 'text-base-content/40'} />}
+        title={output.name}
+        subtitle={[output.id, output.area].filter(Boolean).join(' · ')}
+        menu={menu}
+        historyKey={historyKey(isGroup ? 'group' : 'output', output.id)}
+        formatValue={historyFormatters.output(t)}
+      >
+        <OutputCardBody
+          output={output}
+          onToggle={isGroup ? toggleGroup : toggleOutput}
+          onDurationChange={handleDurationChange}
+          onBrightnessChange={handleBrightnessChange}
+          error={error}
+          stateOnly={stateOnly}
+        />
+      </EntityInfoCard>
+    );
+  };
+
   return (
     <div className="container mx-auto p-4">
-      <div className="card bg-base-200 shadow-xl">
-        <div className="card-body">
+      {/* No panel around the list any more. The page is a tinted field and
+          the entities are the cards on it — one surface less to look
+          through, and the same rule the settings screens follow. */}
+      <div>
+        <div className="flex flex-col gap-2">
           <div className="flex justify-between items-center mb-4">
-            <h2 className="card-title">{t('outputs.title')}</h2>
+            <h2 className="text-xl font-bold tracking-tight">{t('outputs.title')}</h2>
             <div className="flex items-center gap-2">
               {/* Sort dropdown */}
               <div className="dropdown dropdown-end">
-                <label tabIndex={0} className="btn btn-sm btn-ghost gap-1">
+                <label tabIndex={0} className="btn btn-sm gap-1">
                   {sortMode === 'recent' ? <FaClock /> : <FaSortAlphaDown />}
                   <span className="hidden sm:inline">{t(`outputs.sort_${sortMode}`)}</span>
                   <FaSortAmountDown className="w-3 h-3" />
@@ -449,15 +641,48 @@ export default function OutputsView({error}: {error: string | null}) {
                   </li>
                 </ul>
               </div>
+              {areas.length > 0 && (
+                <GroupByAreaToggle active={groupedByArea} onToggle={setGroupedByArea} />
+              )}
               <ViewToggle isGrid={isGrid} onToggle={handleViewToggle} />
             </div>
           </div>
 
+          {groupedByArea && areaGroups.map((group) => {
+            const tiles = group.items.filter((tile) => tile.kind !== 'cover');
+            const areaCovers = group.items.flatMap((tile) => (tile.kind === 'cover' ? [tile.cover] : []));
+            return (
+              <EntityPanel key={group.id ?? ''} title={group.name ?? t('common.without_area')}>
+                {tiles.length > 0 && (
+                  <div className={isGrid ? ENTITY_GRID_CLASS : ENTITY_LIST_CLASS}>
+                    {tiles.map((tile) =>
+                      tile.kind === 'group'
+                        ? renderGroupCard(tile.group)
+                        : tile.kind === 'output'
+                          ? renderOutputCard(tile.output, tile.stateOnly)
+                          : null,
+                    )}
+                  </div>
+                )}
+                {areaCovers.length > 0 && (
+                  <div className={cn(isGrid ? cn(ENTITY_GRID_CLASS, 'grid-cols-1') : ENTITY_LIST_CLASS, tiles.length > 0 && 'mt-4')}>
+                    {areaCovers.map(renderCoverCard)}
+                  </div>
+                )}
+              </EntityPanel>
+            );
+          })}
+
+          {!groupedByArea && (<>
           {/* Lights */}
           {renderOutputSection('light', categorizedOutputs.light, toggleOutput)}
 
           {/* Switches */}
           {renderOutputSection('switch', categorizedOutputs.switch, toggleOutput)}
+
+          {/* Modes and flags. After the relays: they are what the relays are
+              conditioned on, not another thing the board drives. */}
+          {renderOutputSection('virtual_switch', categorizedOutputs.virtual_switch, toggleOutput)}
 
           {/* Valves */}
           {renderOutputSection('valve', categorizedOutputs.valve, toggleOutput)}
@@ -465,18 +690,12 @@ export default function OutputsView({error}: {error: string | null}) {
           {/* Covers */}
           {validCovers.length > 0 && (
             <>
-              <div className="divider">{getCategoryLabel('cover')}</div>
-              <EntityGrid isGrid={isGrid} gridClassName={cn(ENTITY_GRID_CLASS, "grid-cols-1")}>
-                {validCovers.map((cover) => (
-                  <CoverItem 
-                    key={cover.id}
-                    cover={cover}
-                    action={actionCover}
-                    isGrid={isGrid}
-                    error={error}
-                    onLongPress={handleCoverLongPress}
-                  />
-                ))}
+              <EntityGrid
+                isGrid={isGrid}
+                title={getCategoryLabel('cover')}
+                gridClassName={cn(ENTITY_GRID_CLASS, "grid-cols-1")}
+              >
+                {validCovers.map(renderCoverCard)}
               </EntityGrid>
             </>
           )}
@@ -484,44 +703,28 @@ export default function OutputsView({error}: {error: string | null}) {
           {/* Groups */}
           {validGroups.length > 0 && (
             <>
-              <div className="divider">{getCategoryLabel('group')}</div>
-              <EntityGrid isGrid={isGrid}>
-                {validGroups.map((group) => (
-                  <EntityCard 
-                    key={group.id}
-                    output={{
-                      id: group.id,
-                      name: group.name,
-                      state: group.state,
-                      type: group.type,
-                      timestamp: group.timestamp,
-                      area: null,
-                      interlock_groups: []
-                    }}
-                    onToggle={toggleGroup}
-                    isGrid={isGrid}
-                    error={error}
-                    isGroup={true}
-                    onLongPress={handleGroupLongPress}
-                  />
-                ))}
+              <EntityGrid isGrid={isGrid} title={getCategoryLabel('group')}>
+                {validGroups.map(renderGroupCard)}
               </EntityGrid>
             </>
           )}
 
           {/* State Only (cover or none type outputs - no controls) */}
           {renderOutputSection('state_only', stateOnlyOutputs, toggleOutput, true)}
+          </>)}
 
           {/* Remote Outputs */}
           {remoteOutputs.length > 0 && (
             <>
-              <div className="divider">
-                <span className="flex items-center gap-2">
-                  <FaWifi className="text-primary" />
-                  {t('sections.remote_outputs')}
-                </span>
-              </div>
-              <EntityGrid isGrid={isGrid}>
+              <EntityGrid
+                isGrid={isGrid}
+                title={
+                  <>
+                    <FaWifi className="text-primary" />
+                    {t('sections.remote_outputs')}
+                  </>
+                }
+              >
                 {remoteOutputs.map((output) => (
                   <EntityCard
                     key={output.id}
@@ -544,7 +747,7 @@ export default function OutputsView({error}: {error: string | null}) {
       {outputError && <div className='toast'><div className="alert alert-error">{outputError}</div></div>}
       
       {/* Hardware Errors Toast */}
-      {hardwareErrorsCount > 0 && (
+      {isAdmin && hardwareErrorsCount > 0 && (
         <div className="toast toast-top toast-center z-50">
           <div className="alert alert-error shadow-lg">
             <FaExclamationTriangle />
@@ -554,46 +757,15 @@ export default function OutputsView({error}: {error: string | null}) {
                 {hardwareErrorsCount} {t('outputs.hardware_errors_found')}
               </div>
             </div>
-            <a href="/system" className="btn btn-sm btn-outline">
+            <button className="btn btn-sm btn-outline" onClick={() => navigate('/settings/hardware_errors')}>
               {t('outputs.view_details')}
-            </a>
+            </button>
           </div>
         </div>
       )}
 
-      {/* Long press dialog - choose action */}
-      <Dialog open={longPressDialog.open} onOpenChange={(open) => setLongPressDialog({ open, output: open ? longPressDialog.output : null, type: longPressDialog.type })}>
-        <DialogContent
-          className="bg-base-100 p-0 gap-0 sm:max-w-sm"
-        >
-          <DialogHeader className="px-5 pt-4 pb-0 sm:pt-5">
-            <DialogTitle className="text-center">
-              {longPressDialog.output?.name}
-            </DialogTitle>
-            <p className="text-xs text-base-content/50 text-center">
-              {longPressDialog.output?.id}
-            </p>
-          </DialogHeader>
-          <div className="px-5 py-4 space-y-2">
-            {/* MQTT Reference button */}
-            <button
-              className="btn btn-primary btn-block gap-2 h-14 text-base"
-              onClick={handleOpenMqttRef}
-            >
-              <HiSignal className="w-5 h-5" />
-              {t('mqtt_reference.button')}
-            </button>
-            {/* Go to settings button */}
-            <button
-              className="btn btn-ghost btn-block gap-2 h-12"
-              onClick={handleGoToSettings}
-            >
-              <FaCog className="w-4 h-4" />
-              {t('outputs.go_to_settings')}
-            </button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* Long-press card: live state, controls, recent events; the rest behind ⋮ */}
+      {renderCard()}
 
       {/* MQTT Reference Sheet */}
       <MqttReferenceSheet

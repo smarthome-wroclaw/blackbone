@@ -97,11 +97,16 @@ class EventBus:
             "output": {},
             "cover": {},
             "modbus_device": {},
+            "modbus_status": {},
             "modbus_temperature": {},
             "sensor": {},
             "host": {},
             "group": {},
             "inputs_reloaded": {},
+            # The web UI listens for schedule status. Without the key, adding
+            # that listener raised KeyError and the WebSocket handler died
+            # right after its first state dump.
+            "schedule": {},
         }
         self._listener_id_index = {}
         self._worker_task = None
@@ -114,6 +119,10 @@ class EventBus:
         )
         self._shutting_down = False
         self._monitor_task = None
+        # What the dispatcher is currently awaiting, for the stall check below.
+        self._dispatch_started_at: float | None = None
+        self._dispatch_listener: str = ""
+        self._dispatch_warned = False
 
     async def start(self):
         """
@@ -138,6 +147,26 @@ class EventBus:
                 raise
             try:
                 await self._handle_event(event)
+            except asyncio.CancelledError:
+                # Only a cancellation aimed at this worker ends it. A listener
+                # can raise CancelledError without this task being cancelled at
+                # all — a websocket send whose connection task is torn down
+                # underneath it does exactly that. CancelledError is a
+                # BaseException, so it used to travel straight through the
+                # handler below and out of this coroutine, killing the worker
+                # silently: no traceback, because a task that ends this way is
+                # merely "cancelled". Nothing restarts it and nothing watches
+                # it, so from that moment every input, output, cover and sensor
+                # event was queued and never delivered, and the controller had
+                # to be restarted to take a button press again.
+                if self._shutting_down:
+                    # `finally` below still runs and marks the item done.
+                    raise
+                _LOGGER.error(
+                    "Listener for %s raised CancelledError; the event bus is "
+                    "continuing.",
+                    type(event).__name__,
+                )
             except Exception as exc:
                 _LOGGER.error(f"Error handling event: {exc}")
             finally:
@@ -172,7 +201,9 @@ class EventBus:
             all_listeners.update(entity_listeners)
         
         # Execute all listeners
-        for listener in all_listeners.values():
+        for listener_id, listener in all_listeners.items():
+            self._dispatch_started_at = time.monotonic()
+            self._dispatch_listener = f"{listener_id} ({event_type})"
             try:
                 
                 result = listener.target(event)
@@ -181,8 +212,18 @@ class EventBus:
                     await result
                 elif result is not None:
                     _LOGGER.warning(f"Listener returned non-coroutine: {type(result)}")
+            except asyncio.CancelledError:
+                # Contain it here so one listener cannot take the others down
+                # with it, and re-raise while shutting down so cancellation
+                # still works. See _event_worker for what this used to cost.
+                if self._shutting_down:
+                    raise
+                _LOGGER.error("Listener cancelled mid-dispatch; skipping it.")
             except Exception as exc:
                 _LOGGER.error(f"Listener error: {exc}")
+            finally:
+                self._dispatch_started_at = None
+                self._dispatch_warned = False
 
     def trigger_event(self, event: Event) -> None:
         """
@@ -217,8 +258,38 @@ class EventBus:
                 _LOGGER.info("Event bus worker cancelled.")
         _LOGGER.info("Shutdown EventBus gracefully.")
 
+    # A listener awaiting longer than this is not slow, it is stuck.
+    _DISPATCH_STALL_SECONDS = 20.0
+
+    def _check_dispatch_stall(self) -> None:
+        """Say so, once, when the dispatcher has stopped moving.
+
+        Every input, output, cover and sensor event goes through one worker
+        task. When a listener stops returning — a websocket write to a peer
+        that is no longer routable is the way this has actually happened — the
+        queue behind it stops being served and the device goes quiet: clicks
+        are still detected and logged, and nothing they were supposed to do
+        happens. Without this line there is nothing in the journal to say why,
+        which is exactly how it was found the hard way.
+        """
+        started = self._dispatch_started_at
+        if started is None or self._dispatch_warned:
+            return
+        waited = time.monotonic() - started
+        if waited < self._DISPATCH_STALL_SECONDS:
+            return
+        self._dispatch_warned = True
+        _LOGGER.error(
+            "Event bus has been waiting %.0fs on listener '%s'. Nothing queued "
+            "behind it is being delivered — inputs, outputs, covers and sensors "
+            "are all stalled until it returns.",
+            waited,
+            self._dispatch_listener,
+        )
+
     def _run_second_event(self, time):
         """Run event every second."""
+        self._check_dispatch_stall()
         for key, listener in self._every_second_listeners.items():
             if listener.target:
                 self._every_second_listeners[key].add_handle(
@@ -302,8 +373,14 @@ class EventBus:
         return listener_job
 
     def remove_event_listener(self, event_type: str | None = None, entity_id: str | None = None, listener_id: str | None = None) -> None:
-        """Remove event listener. Can remove by event_type, listener_id, or both."""
-        if listener_id and listener_id in self._listener_id_index:
+        """Remove event listener. Can remove by event_type, listener_id, or both.
+
+        A ``listener_id`` the bus does not know removes nothing; it never
+        widens to every listener of ``event_type``.
+        """
+        if listener_id:
+            if listener_id not in self._listener_id_index:
+                return
             # Remove by listener_id
             for evt_type, ent_id in self._listener_id_index[listener_id]:
                 if event_type and evt_type != event_type:

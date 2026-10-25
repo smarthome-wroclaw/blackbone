@@ -1,13 +1,15 @@
 import { useState } from 'react';
 import {
-  FaCheck,
-  FaExclamationTriangle,
   FaSpinner,
   FaPowerOff,
   FaRedo,
 } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
 import axios from '@/api/axios';
+import type { AxiosError } from 'axios';
+import { SettingsPage, SettingsCard, FormActions, NoticeCallout } from '../ui';
+
+type ApiError = AxiosError<{ detail?: string }>;
 
 /**
  * Section for rebooting and shutting down the device.
@@ -26,8 +28,9 @@ export default function DeviceControlSection() {
     try {
       const { data } = await axios.post('/api/reboot');
       setRebootResult({ status: 'success', message: data.message || t('settings.device_rebooting') });
-    } catch (err: any) {
-      setRebootResult({ status: 'error', message: err.message || t('settings.reboot_failed') });
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      setRebootResult({ status: 'error', message: apiErr.message || t('settings.reboot_failed') });
       setIsRebooting(false);
     }
   };
@@ -39,27 +42,24 @@ export default function DeviceControlSection() {
     try {
       const { data } = await axios.post('/api/shutdown');
       setShutdownResult({ status: 'success', message: data.message || t('settings.device_shutting_down') });
-    } catch (err: any) {
-      setShutdownResult({ status: 'error', message: err.message || t('settings.shutdown_failed') });
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      setShutdownResult({ status: 'error', message: apiErr.message || t('settings.shutdown_failed') });
       setIsShuttingDown(false);
     }
   };
 
   return (
-    <>
-      {/* Reboot Device Section */}
-      <div className="card bg-base-200">
-        <div className="card-body">
-          <h3 className="card-title">
-            <FaRedo />
-            {t('settings.reboot_device')}
-          </h3>
-          <p className="text-sm opacity-70 mb-4">
-            {t('settings.reboot_description')}
-          </p>
-          <div className="card-actions">
+    <SettingsPage>
+      {/* Reboot */}
+      <SettingsCard
+        icon={<FaRedo />}
+        title={t('settings.reboot_device')}
+        description={t('settings.reboot_description')}
+        footer={
+          <FormActions>
             <button
-              className="btn btn-warning"
+              className="btn btn-warning btn-sm gap-2"
               onClick={rebootDevice}
               disabled={isRebooting}
             >
@@ -75,37 +75,30 @@ export default function DeviceControlSection() {
                 </>
               )}
             </button>
-          </div>
+          </FormActions>
+        }
+      >
+        <div className="space-y-3">
+          <NoticeCallout variant="warning" message={t('settings.reboot_warning')} />
           {rebootResult && (
-            <div
-              className={`alert ${rebootResult.status === 'success' ? 'alert-success' : 'alert-error'} mt-4`}
-            >
-              {rebootResult.status === 'success' ? <FaCheck /> : <FaExclamationTriangle />}
-              <span>{rebootResult.message}</span>
-            </div>
+            <NoticeCallout
+              variant={rebootResult.status === 'success' ? 'success' : 'error'}
+              message={rebootResult.message}
+            />
           )}
-          <div className="alert alert-error mt-4">
-            <FaExclamationTriangle />
-            <div className="text-sm">
-              <p>{t('settings.reboot_warning')}</p>
-            </div>
-          </div>
         </div>
-      </div>
+      </SettingsCard>
 
-      {/* Shutdown Device Section */}
-      <div className="card bg-base-200">
-        <div className="card-body">
-          <h3 className="card-title">
-            <FaPowerOff />
-            {t('settings.shutdown_device')}
-          </h3>
-          <p className="text-sm opacity-70 mb-4">
-            {t('settings.shutdown_description')}
-          </p>
-          <div className="card-actions">
+      {/* Shutdown */}
+      <SettingsCard
+        variant="danger"
+        icon={<FaPowerOff />}
+        title={t('settings.shutdown_device')}
+        description={t('settings.shutdown_description')}
+        footer={
+          <FormActions>
             <button
-              className="btn btn-error"
+              className="btn btn-error btn-sm gap-2"
               onClick={shutdownDevice}
               disabled={isShuttingDown}
             >
@@ -121,23 +114,19 @@ export default function DeviceControlSection() {
                 </>
               )}
             </button>
-          </div>
+          </FormActions>
+        }
+      >
+        <div className="space-y-3">
+          <NoticeCallout variant="error" message={t('settings.shutdown_warning')} />
           {shutdownResult && (
-            <div
-              className={`alert ${shutdownResult.status === 'success' ? 'alert-success' : 'alert-error'} mt-4`}
-            >
-              {shutdownResult.status === 'success' ? <FaCheck /> : <FaExclamationTriangle />}
-              <span>{shutdownResult.message}</span>
-            </div>
+            <NoticeCallout
+              variant={shutdownResult.status === 'success' ? 'success' : 'error'}
+              message={shutdownResult.message}
+            />
           )}
-          <div className="alert alert-warning mt-4">
-            <FaExclamationTriangle />
-            <div className="text-sm">
-              <p>{t('settings.shutdown_warning')}</p>
-            </div>
-          </div>
         </div>
-      </div>
-    </>
+      </SettingsCard>
+    </SettingsPage>
   );
 }

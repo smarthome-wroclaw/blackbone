@@ -27,6 +27,14 @@ class CompositeMessageBus(MessageBus):
         """Add a new bus to the composite."""
         self._buses.append(bus)
 
+    @property
+    def buses(self) -> list[MessageBus]:
+        """The buses this one delegates to.
+
+        A copy: adding one goes through :meth:`add_bus`.
+        """
+        return list(self._buses)
+
     def send_message(
         self,
         topic: str,
@@ -74,19 +82,31 @@ class CompositeMessageBus(MessageBus):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def subscribe_and_listen(self, topic: str, callback: Callable[[str, str], Awaitable[None]]) -> None:
+    async def subscribe_and_listen(
+        self,
+        topic: str,
+        callback: Callable[..., Awaitable[None]],
+        *,
+        retain_aware: bool = False,
+    ) -> None:
         """Subscribe to a topic and listen for messages on all buses."""
         for bus in self._buses:
-            await bus.subscribe_and_listen(topic, callback)
+            await bus.subscribe_and_listen(topic, callback, retain_aware=retain_aware)
 
     async def unsubscribe_and_stop_listen(self, topic: str) -> None:
         """Unsubscribe from a topic and stop listening on all buses."""
         for bus in self._buses:
             await bus.unsubscribe_and_stop_listen(topic)
 
+<<<<<<< ours
     async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
         """Collect matching topics from buses that support discovery."""
         results = await asyncio.gather(
             *(bus.discover_topics(topic_filter, timeout) for bus in self._buses)
         )
         return sorted({topic for bus_topics in results for topic in bus_topics})
+=======
+    async def wait_until_subscribed(self) -> None:
+        """Wait for every bus: one being up says nothing about another."""
+        await asyncio.gather(*(bus.wait_until_subscribed() for bus in self._buses))
+>>>>>>> theirs

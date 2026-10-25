@@ -186,8 +186,13 @@ class InputManager:
             if config:
                 self._event_pins = config.get(EVENT_ENTITY, [])
                 self._binary_pins = config.get(BINARY_SENSOR, [])
-                self._manager._config_helper.clear_autodiscovery_type(ha_type=EVENT_ENTITY)
-                self._manager._config_helper.clear_autodiscovery_type(ha_type=BINARY_SENSOR)
+                # The discovery cache is left alone: an input whose HA fields
+                # did not change is not re-published, so its entry must stay.
+                # The MQTT client deletes any discovery topic it receives that
+                # is not in the cache — including the echo of our own publish —
+                # and the cache is shared with entities that are not inputs
+                # (security events, the OLED button). Removed and hidden inputs
+                # take their own entries out.
 
         # Configure event buttons
         for gpio in self._event_pins:
@@ -262,10 +267,12 @@ class InputManager:
                 new_device_class = gpio.get(DEVICE_CLASS)
                 old_mqtt_sequences = existing_input.mqtt_sequences if hasattr(existing_input, "mqtt_sequences") else {}
                 new_mqtt_sequences = gpio.get("mqtt_sequences", {})
+                was_shown = getattr(existing_input, "show_in_ha", True)
                 ha_fields_changed = (
                     (old_name != name) or (old_area != area)
                     or (old_device_class != new_device_class)
                     or (old_mqtt_sequences != new_mqtt_sequences)
+                    or not was_shown
                 )
 
                 # Update actions (always - this is internal to the controller)
@@ -277,6 +284,7 @@ class InputManager:
 
                 # Store area on input
                 existing_input.area = area
+                existing_input.show_in_ha = gpio.get(SHOW_HA, True)
 
                 # Update device_class from new config
                 existing_input._device_class = gpio.get(DEVICE_CLASS)
@@ -296,11 +304,15 @@ class InputManager:
                     enable_triple_click=gpio.get("enable_triple_click"),
                     long_press_mqtt_mode=gpio.get("long_press_mqtt_mode"),
                     max_long_press_duration=gpio.get("max_long_press_duration"),
+                    bounce_time=gpio.get("bounce_time"),
                 )
 
                 # Re-send HA discovery only if HA-relevant fields changed (name, area, mqtt_sequences)
                 # Actions are internal to the controller and don't need HA update
-                if ha_fields_changed and gpio.get(SHOW_HA, True):
+                if not gpio.get(SHOW_HA, True):
+                    if was_shown:
+                        self._unpublish_input_ha_discovery(EVENT_ENTITY, input_id)
+                elif ha_fields_changed:
                     _LOGGER.debug(f"HA-relevant fields changed for {input_id}, re-sending discovery")
                     self._publish_input_ha_discovery(
                         ha_type=EVENT_ENTITY,
@@ -326,6 +338,7 @@ class InputManager:
 
             # Store area on input
             input_device.area = area
+            input_device.show_in_ha = gpio.get(SHOW_HA, True)
 
             # Register with Home Assistant
             if gpio.get(SHOW_HA, True):
@@ -392,9 +405,11 @@ class InputManager:
                 old_area = getattr(existing_input, "area", None)
                 old_device_class = getattr(existing_input, "_device_class", None)
                 new_device_class = gpio.get(DEVICE_CLASS)
+                was_shown = getattr(existing_input, "show_in_ha", True)
                 ha_fields_changed = (
                     (old_name != name) or (old_area != area)
                     or (old_device_class != new_device_class)
+                    or not was_shown
                 )
 
                 # Update actions (always - this is internal to the controller)
@@ -406,13 +421,25 @@ class InputManager:
 
                 # Store area on input
                 existing_input.area = area
+                existing_input.show_in_ha = gpio.get(SHOW_HA, True)
 
                 # Update device_class from new config
                 existing_input._device_class = gpio.get(DEVICE_CLASS)
 
+                # Apply polarity live — 'inverted' is baked into the detector at
+                # construction, so without this the change only took effect after
+                # an application restart.
+                inverted_changed = existing_input.update_inverted(gpio.get("inverted", False))
+
+                # Same story for the debounce window.
+                existing_input.update_bounce_time(gpio.get("bounce_time"))
+
                 # Re-send HA discovery only if HA-relevant fields changed (name, area)
                 # Actions are internal to the controller and don't need HA update
-                if ha_fields_changed and gpio.get(SHOW_HA, True):
+                if not gpio.get(SHOW_HA, True):
+                    if was_shown:
+                        self._unpublish_input_ha_discovery(BINARY_SENSOR, input_id)
+                elif ha_fields_changed:
                     _LOGGER.debug(f"HA-relevant fields changed for {input_id}, re-sending discovery")
                     self._publish_input_ha_discovery(
                         ha_type=BINARY_SENSOR,
@@ -422,9 +449,11 @@ class InputManager:
                         area=area,
                     )
 
-                # Send current state if initial_send is enabled (so user doesn't need to restart)
-                if gpio.get("initial_send", False):
-                    _LOGGER.debug(f"Sending current state for {input_id} after reload (initial_send=True)")
+                # Publish the current state when polarity flipped (the reported
+                # state is now the opposite one) or when initial_send asks for it,
+                # so the user doesn't need to restart.
+                if inverted_changed or gpio.get("initial_send", False):
+                    _LOGGER.debug(f"Sending current state for {input_id} after reload")
                     existing_input.send_current_state()
 
                 return existing_input
@@ -442,6 +471,7 @@ class InputManager:
 
             # Store area on input
             input_device.area = area
+            input_device.show_in_ha = gpio.get(SHOW_HA, True)
 
             # Register with Home Assistant
             if gpio.get(SHOW_HA, True):
@@ -547,8 +577,15 @@ class InputManager:
                     continue
                 new_input_map[input_id] = {"pin": pin, "area": gpio.get("area"), "ha_type": ha_type}
 
-        # Find inputs to remove (in current config but not in new config)
-        current_input_ids = set(self._inputs.keys())
+        # Find inputs to remove (in current config but not in new config).
+        # Only the inputs these two sections own: remote inputs and the OLED
+        # button share the map but come from elsewhere, and dropping them here
+        # took their HA entities away on the first reload after start.
+        current_input_ids = {
+            input_id
+            for input_id, device in self._inputs.items()
+            if input_id != "oled_button" and not isinstance(device, RemoteInputBase)
+        }
         new_input_ids = set(new_input_map.keys())
 
         inputs_to_remove = current_input_ids - new_input_ids
@@ -589,7 +626,8 @@ class InputManager:
                 _LOGGER.info("Removed input %s (type_changed=%s)", input_id, input_id in inputs_type_changed)
 
         # Check for area changes on remaining inputs
-        for input_id, input_device in self._inputs.items():
+        for input_id in current_input_ids - inputs_to_remove - inputs_type_changed:
+            input_device = self._inputs[input_id]
             old_area = getattr(input_device, "area", None)
             new_area = new_input_map.get(input_id, {}).get("area")
 
@@ -612,6 +650,20 @@ class InputManager:
         # Broadcast all input states to WebSocket clients
         # Global listeners will receive these events for all inputs (including new ones)
         self._broadcast_all_input_states()
+
+    def resend_binary_sensor_states(self) -> None:
+        """Publish the pin state of every GPIO binary sensor, MQTT only.
+
+        Called on each MQTT connect. The topics are retained, and nothing else
+        corrects the broker's copy when an input changed while boneIO was off.
+        Actions do not run: these are ``publish_only`` events.
+        """
+        for input_ in self._inputs.values():
+            if isinstance(input_, GpioInputBinarySensor):
+                try:
+                    input_.send_current_state_when_ready()
+                except Exception as e:
+                    _LOGGER.debug("Error resending binary sensor state %s: %s", input_.id, e)
 
     def _broadcast_all_input_states(self) -> None:
         """Broadcast current state of all inputs via WebSocket.
@@ -755,9 +807,14 @@ class InputManager:
         elif input_type == INPUT_SENSOR:
             payload = str(click_type)  # "pressed" or "released"
 
+            # Retained: a float switch can hold one position for weeks, and
+            # without the broker's copy HA shows `unknown` after every restart
+            # until the input moves. Events above stay unretained — a click
+            # replayed on subscribe would be a click that never happened.
             self._manager.send_message(
                 topic=topic,
                 payload=payload,
+                retain=True,
             )
             _LOGGER.debug("Published binary sensor state to MQTT: topic=%s, payload=%s", topic, payload)
 
@@ -919,6 +976,8 @@ class InputManager:
         but can be called manually if needed.
         """
         for pin, input_device in self._inputs.items():
+            if not getattr(input_device, "show_in_ha", True):
+                continue
             try:
                 input_id = input_device.id if hasattr(input_device, "id") else pin
                 input_name = input_device.name if hasattr(input_device, "name") else input_id
@@ -1045,3 +1104,16 @@ class InputManager:
             ha_type=ha_type,
             payload=payload,
         )
+
+    def _unpublish_input_ha_discovery(self, ha_type: str, input_id: str) -> None:
+        """Take an input out of Home Assistant and out of the discovery cache.
+
+        Args:
+            ha_type: HA entity type the input was published as.
+            input_id: Unique input identifier.
+        """
+        config_helper = self._manager._config_helper
+        topic = f"{config_helper.ha_discovery_prefix}/{ha_type}/{config_helper.serial_number}/{input_id}/config"
+        _LOGGER.info("Input %s hidden from HA, removing discovery %s", input_id, topic)
+        self._manager.send_message(topic=topic, payload=None, retain=True)
+        config_helper.remove_autodiscovery_msg(ha_type, topic)

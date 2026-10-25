@@ -12,7 +12,7 @@ import { createContext, useContext, useMemo, ReactNode } from 'react';
 import { useAppInit } from './AppInitContext';
 
 /** Board versions that support CAN bus (0.5+) */
-const CAN_SUPPORTED_VERSIONS = ['0.5', '0.6', '0.7', '0.8', '1.0'];
+const CAN_SUPPORTED_VERSIONS = ['0.5', '0.6', '0.7', '0.8', '1.0', '1.1'];
 
 /** Max inputs per board version */
 const MAX_INPUTS: Record<string, number> = {
@@ -24,6 +24,7 @@ const MAX_INPUTS: Record<string, number> = {
   '0.7': 49,
   '0.8': 49,
   '1.0': 49,
+  '1.1': 49,
 };
 
 interface ConfigContextType {
@@ -31,6 +32,10 @@ interface ConfigContextType {
   hasBoneioSection: boolean;
   /** Whether the 'irrigation' section exists and has entries */
   hasIrrigationSection: boolean;
+  /** Whether there is anything to show on the Templates page */
+  hasTemplates: boolean;
+  /** Whether coordinates are configured — everything sun-related needs them */
+  hasLocation: boolean;
   /** Whether the config is still loading */
   isLoading: boolean;
   /** Hardware board version (e.g., '0.7') or null if not set */
@@ -64,6 +69,8 @@ export function ConfigProvider({ children }: ConfigProviderProps) {
     return {
       hasBoneioSection: initData?.has_boneio ?? false,
       hasIrrigationSection: initData?.has_irrigation ?? false,
+      hasTemplates: initData?.has_templates ?? initData?.has_irrigation ?? false,
+      hasLocation: initData?.has_location ?? false,
       isLoading,
       boardVersion,
       canSupported: boardVersion ? CAN_SUPPORTED_VERSIONS.includes(boardVersion) : true,

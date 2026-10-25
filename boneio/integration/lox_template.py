@@ -14,14 +14,23 @@ and use the correct element names, attributes, and structure required by Lox Con
 
 from __future__ import annotations
 
+<<<<<<< ours
 import io
 import logging
 import re
+=======
+import ipaddress
+import logging
+import socket
+>>>>>>> theirs
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
+
+from boneio.const import NONE
+from boneio.core.messaging.lox import modbus_lox_availability_key, modbus_lox_key
 
 if TYPE_CHECKING:
     from boneio.core.manager.manager import Manager
@@ -245,6 +254,7 @@ def generate_lox_templates(manager: Manager) -> dict[str, str]:
             vi_cmd.set("Unit", "")
             vi_cmd.set("HintText", "")
 
+<<<<<<< ours
     # --- MQTT bridge devices ---
     # Each parent topic is represented as one VirtualInUdp device in Lox,
     # while its concrete topics become virtual inputs on that device.
@@ -284,6 +294,34 @@ def lox_template_archive_name(serial: str) -> str:
     """Return a safe ZIP filename for a BoneIO device."""
     return f"boneio_{_safe_filename_part(serial or 'boneio')}_lox_templates.zip"
 
+=======
+    # --- Modbus device readings and availability ---
+    # Check patterns carry no leading backslash: the key starts with the
+    # device id, and a backslash before a letter can hit a Loxone escape.
+    for entry in _modbus_status_entries(manager):
+        if entry["kind"] == "text":
+            continue
+        vi_cmd = ET.SubElement(vin, "VirtualInUdpCmd")
+        vi_cmd.set("Title", entry["title"])
+        vi_cmd.set("Comment", "")
+        vi_cmd.set("Address", boneio_ip)
+        vi_cmd.set("Check", f"{entry['key']}=\\v")
+        vi_cmd.set("Signed", "true")
+        vi_cmd.set("Analog", "true" if entry["analog"] else "false")
+        vi_cmd.set("SourceValLow", "0")
+        vi_cmd.set("DestValLow", "0")
+        vi_cmd.set("SourceValHigh", "100")
+        vi_cmd.set("DestValHigh", "100")
+        vi_cmd.set("DefVal", "0")
+        vi_cmd.set("MinVal", "-1000000" if entry["analog"] else "0")
+        vi_cmd.set("MaxVal", "1000000" if entry["analog"] else "1")
+        vi_cmd.set("Unit", f"<v.1> {entry['unit']}" if entry["unit"] else "")
+        vi_cmd.set("HintText", "")
+
+    # Generate XML with declaration — two separate documents
+    vout_str = _element_to_xml(vout)
+    vin_str = _element_to_xml(vin)
+>>>>>>> theirs
 
 def generate_lox_template(manager: Manager) -> str:
     """Return the legacy concatenated representation for internal callers.
@@ -443,6 +481,7 @@ def generate_lox_summary(manager: Manager) -> dict[str, Any]:
             "format": f"{cover_id}=0..100",
         })
 
+<<<<<<< ours
     lox_config = _get_lox_config(manager)
     mqtt_devices: defaultdict[str, list[dict[str, str]]] = defaultdict(list)
     for mapping in lox_config.get("mqtt_bridge", []):
@@ -460,6 +499,25 @@ def generate_lox_summary(manager: Manager) -> dict[str, Any]:
         }
         mqtt_devices[prefix].append(mqtt_input)
         status_messages.append(mqtt_input)
+=======
+    # Modbus devices (status only — no commands over Lox UDP)
+    modbus_entries = _modbus_status_entries(manager)
+    for entry in modbus_entries:
+        if entry["kind"] == "availability":
+            value_format = "1|0"
+        elif entry["kind"] == "text":
+            value_format = "<text>"
+        elif entry["analog"]:
+            value_format = "<number>"
+        else:
+            value_format = "1|0"
+        status_messages.append({
+            "entity": entry["key"],
+            "name": entry["title"],
+            "type": "modbus",
+            "format": f"{entry['key']}={value_format}",
+        })
+>>>>>>> theirs
 
     return {
         "device_name": device_name,
@@ -467,6 +525,7 @@ def generate_lox_summary(manager: Manager) -> dict[str, Any]:
         "output_count": len(outputs),
         "cover_count": len(covers),
         "group_count": len(output_groups),
+        "modbus_value_count": sum(1 for e in modbus_entries if e["kind"] != "availability"),
         "commands": commands,
         "status_messages": status_messages,
         "mqtt_devices": [
@@ -474,6 +533,57 @@ def generate_lox_summary(manager: Manager) -> dict[str, Any]:
             for prefix, inputs in sorted(mqtt_devices.items())
         ],
     }
+
+
+def _modbus_status_entries(manager: Manager) -> list[dict[str, Any]]:
+    """List every Modbus reading BoneIO forwards to the Miniserver.
+
+    Each entry: key (what goes before "=" on the wire), title, kind
+    ("availability" | "binary" | "text" | "numeric"), analog, unit.
+    Text entries (text sensors, selects) are listed in the summary but
+    left out of the XML template, since \\v cannot parse them.
+    """
+    from boneio.modbus.entities.derived.select import ModbusDerivedSelect
+    from boneio.modbus.entities.derived.switch import ModbusDerivedSwitch
+    from boneio.modbus.entities.derived.text import ModbusDerivedTextSensor
+    from boneio.modbus.entities.sensor.binary import ModbusBinarySensor
+    from boneio.modbus.entities.sensor.text import ModbusTextSensor
+    from boneio.modbus.entities.writeable.binary import ModbusBinaryWriteableEntityDiscrete
+
+    text_types = (ModbusTextSensor, ModbusDerivedTextSensor, ModbusDerivedSelect)
+    binary_types = (ModbusBinarySensor, ModbusBinaryWriteableEntityDiscrete, ModbusDerivedSwitch)
+
+    modbus_manager = getattr(manager, "modbus", None)
+    if modbus_manager is None:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for device_id, coordinator in modbus_manager.get_all_coordinators().items():
+        device_name = getattr(coordinator, "name", device_id)
+        entries.append({
+            "key": modbus_lox_availability_key(device_id),
+            "title": f"{device_name} Online",
+            "kind": "availability",
+            "analog": False,
+            "unit": "",
+        })
+        groups = [*coordinator.get_all_entities(), *coordinator.get_all_additional_entities()]
+        for group in groups:
+            for entity in group.values():
+                if isinstance(entity, text_types):
+                    kind = "text"
+                elif isinstance(entity, binary_types):
+                    kind = "binary"
+                else:
+                    kind = "numeric"
+                entries.append({
+                    "key": modbus_lox_key(device_id, entity.decoded_name),
+                    "title": f"{device_name} {entity.display_name}",
+                    "kind": kind,
+                    "analog": kind == "numeric",
+                    "unit": (getattr(entity, "unit_of_measurement", None) or "") if kind == "numeric" else "",
+                })
+    return entries
 
 
 def _get_lox_config(manager: Manager) -> dict[str, Any]:
@@ -490,7 +600,11 @@ def _get_lox_config(manager: Manager) -> dict[str, Any]:
         lox = config.get("lox_udp", {})
         network_info = getattr(manager.config_helper, "network_info", {}) or {}
         return {
+<<<<<<< ours
             "boneio_ip": lox.get("boneio_host") or network_info.get("ip") or "0.0.0.0",
+=======
+            "boneio_ip": _boneio_ip(lox.get("host")),
+>>>>>>> theirs
             "send_port": lox.get("send_port", 4444),
             "listen_port": lox.get("listen_port", 4445),
             "mqtt_bridge": lox.get("mqtt_bridge", []),
@@ -498,8 +612,39 @@ def _get_lox_config(manager: Manager) -> dict[str, Any]:
     except Exception as e:
         _LOGGER.warning("Could not read lox_udp config: %s", e)
         return {
-            "boneio_ip": "0.0.0.0",
+            "boneio_ip": _boneio_ip(None),
             "send_port": 4444,
             "listen_port": 4445,
             "mqtt_bridge": [],
         }
+
+
+def _boneio_ip(miniserver_host: str | None) -> str:
+    """Return this boneIO's own IPv4 address, as the Miniserver sees it.
+
+    lox_udp.host is the Miniserver, not boneIO: the template needs the
+    other end. Preferred is the source address the kernel picks for a
+    route to the Miniserver (a connected UDP socket sends nothing), which
+    is right even with both Ethernet and Wi-Fi up. A hostname is not
+    resolved here — a DNS lookup would block the event loop — so it falls
+    back to the Ethernet address.
+    """
+    if miniserver_host:
+        try:
+            ipaddress.IPv4Address(miniserver_host)
+        except ValueError:
+            pass
+        else:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect((miniserver_host, 1))
+                    return sock.getsockname()[0]
+            except OSError as e:
+                _LOGGER.debug("No route to Miniserver %s: %s", miniserver_host, e)
+
+    from boneio.core.system.monitor import get_network_info
+
+    ip = get_network_info().get("ip")
+    if ip and ip != NONE:
+        return ip
+    return "0.0.0.0"

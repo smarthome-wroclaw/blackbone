@@ -28,7 +28,11 @@ from boneio.webui.routes.auth import router as auth_router
 def store(tmp_path):
     store = UserStore(tmp_path / USERS_FILENAME)
     store.load()
+<<<<<<< ours
     set_jwt_secret("test-secret-for-rate-limit")
+=======
+    set_jwt_secret("test-secret-for-rate-limit--------------")
+>>>>>>> theirs
     set_auth_config({})
     set_allow_anonymous(False)
     set_user_store(store)
@@ -123,7 +127,11 @@ def test_throttling_one_account_does_not_reveal_whether_it_exists(client):
 def test_one_account_being_throttled_leaves_another_usable(client, store):
     """An attacker grinding one name must not lock the rest of the household
     out — that would be a denial of service on the owner."""
+<<<<<<< ours
     store.add_user("gosc", "haslo-goscia", Role.VIEWER)
+=======
+    store.add_user("gosc", "poufne-haslo", Role.VIEWER)
+>>>>>>> theirs
 
     for _ in range(LOGIN_MAX_ATTEMPTS):
         _attempt(client, username="pawel")
@@ -131,7 +139,11 @@ def test_one_account_being_throttled_leaves_another_usable(client, store):
 
     # Same client IP, different account: the per-IP bucket is shared, so this
     # documents the deliberate trade — see test_ip_bucket_is_shared below.
+<<<<<<< ours
     assert _attempt(client, username="gosc", password="haslo-goscia").status_code == 429
+=======
+    assert _attempt(client, username="gosc", password="poufne-haslo").status_code == 429
+>>>>>>> theirs
 
 
 def test_ip_bucket_is_shared_on_purpose(client):

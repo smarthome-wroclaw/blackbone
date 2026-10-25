@@ -1,30 +1,221 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import axios from '@/api/axios';
 import { fetchConfig } from '@/api/configCache';
+import { enrichRemoteDevicesWithWled } from '@/hooks/useActionEditorData';
+import { fetchSchema } from '@/api/schemaCache';
+import { buildLocalInputsSchema, withFilteredInputs } from './helpers/inputSchema';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+<<<<<<< ours
 import * as yaml from 'js-yaml';
 import { YAML_DUMP_SCHEMA } from '@/utils/yamlSchema';
+=======
+>>>>>>> theirs
 import {
   convertFormDataToOriginalTypes,
   convertTimeperiodToMilliseconds,
   stripHiddenAndDefaults,
-  convertMillisecondsToTimeperiod,
 } from '@/components/UISettings/helpers/configSchemaUtils';
 import {
-  RELOAD_SECTIONS,
-  RESTART_SECTIONS,
   ALL_SECTIONS,
+  ARRAY_SECTIONS,
   COMPOSITE_SECTIONS,
 } from '@/components/UISettings/constants/sectionDefinitions';
+import { STANDALONE_SECTIONS } from '@/components/UISettings/constants/standaloneSections';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useConfig } from '@/contexts/ConfigContext';
 import { SectionContent, SettingsSidebar, SectionHeader } from './components';
+<<<<<<< ours
 import AccountsView from '../AccountsView';
+=======
+import {
+  SettingsActionBar,
+  SectionSaveContext,
+  SectionColumnContext,
+  type SectionSaveRegistration,
+  type SettingsPageWidth,
+} from './ui';
+import { cn } from '@/lib/utils';
+>>>>>>> theirs
 import { useOverlayCheck } from './hooks/useOverlayCheck';
 import OverlayChangeDialog from './components/OverlayChangeDialog';
+import type { ConfigSection, SettingsFormData } from './types/section';
+import { isRecord, type ConfigRecord, type JsonSchema } from '@/types/jsonSchema';
 
 /** Lazy-loaded binding matrix component (tool section, not schema-driven). */
 const BindingMatrix = lazy(() => import('./BindingMatrix'));
+
+/**
+ * Filter enum options to show only lowercase variants
+ * while keeping all variants in the schema for validation
+ */
+const filterEnumOptions = (enumValues: string[]): string[] => {
+  if (!enumValues || enumValues.length === 0) return enumValues;
+
+  // Group values by their lowercase version
+  const groups: { [key: string]: string[] } = {};
+  enumValues.forEach(value => {
+    const lowerValue = value.toLowerCase();
+    if (!groups[lowerValue]) {
+      groups[lowerValue] = [];
+    }
+    groups[lowerValue].push(value);
+  });
+
+  // For each group, prefer lowercase variant
+  const filtered: string[] = [];
+  Object.values(groups).forEach(group => {
+    if (group.length === 1) {
+      // Only one variant, keep it
+      filtered.push(group[0]);
+    } else {
+      // Multiple variants, prefer lowercase
+      const lowerCase = group.find(v => v === v.toLowerCase());
+
+      if (lowerCase) {
+        filtered.push(lowerCase);
+      } else {
+        // Fallback to first variant
+        filtered.push(group[0]);
+      }
+    }
+  });
+
+  return filtered;
+};
+
+/**
+ * Rewrite one section's schema into what the form renderer expects.
+ *
+ * Module scope, not a closure inside the component: it reads nothing but its
+ * argument, and out here its results can be cached across mounts. It walks the
+ * whole subtree allocating a new object per node, which for forty sections of
+ * a 434 KB schema is most of the second that entering Settings used to cost.
+ */
+const normalizeSchema = (schema: JsonSchema): JsonSchema => {
+  const normalizeProperty = (prop: JsonSchema): JsonSchema => {
+    if (!prop || typeof prop !== 'object') return prop;
+
+    const normalized = { ...prop };
+
+    // Handle oneOf with x-yaml-boolean - normalize to simple boolean
+    if (normalized.oneOf && Array.isArray(normalized.oneOf)) {
+      // Check if this is a boolean field with string alternatives
+      const hasBooleanType = normalized.oneOf.some(option => option.type === 'boolean');
+      const hasYamlBooleanString = normalized.oneOf.some(
+        option => option.type === 'string' && option['x-yaml-boolean'] === true
+      );
+
+      if (hasBooleanType && hasYamlBooleanString) {
+        // Convert to simple boolean type
+        // Found: hasBooleanType says one is there.
+        const booleanOption = normalized.oneOf.find(option => option.type === 'boolean')!;
+        normalized.type = 'boolean';
+        if (booleanOption.default !== undefined) {
+          normalized.default = booleanOption.default;
+        }
+        // Keep title and description from the original
+        delete normalized.oneOf;
+      }
+    }
+
+    // Handle enum with mixed string/number types - normalize to consistent type
+    if (normalized.enum && Array.isArray(normalized.enum) && normalized.type === 'string') {
+      // Check if enum contains numbers that should be strings
+      const hasNumbers = normalized.enum.some(val => typeof val === 'number');
+      const hasStrings = normalized.enum.some(val => typeof val === 'string');
+
+      if (hasNumbers && hasStrings) {
+        // Convert all enum values to strings to match the string type
+        normalized.enum = normalized.enum.map(val => String(val));
+      } else if (hasNumbers && !hasStrings) {
+        // If all enum values are numbers but type is string, convert to strings
+        normalized.enum = normalized.enum.map(val => String(val));
+      }
+    }
+
+    // Handle type arrays - convert to single type if possible
+    if (Array.isArray(normalized.type)) {
+      if (normalized.type.length === 1) {
+        normalized.type = normalized.type[0];
+      } else {
+        // Take the first non-null type, but prefer structural types
+        const validTypes = normalized.type.filter(t => t && t !== 'null');
+        if (validTypes.length > 0) {
+          // Prefer object types for complex structures
+          if (validTypes.includes('object')) {
+            normalized.type = 'object';
+          } else if (validTypes.includes('integer')) {
+            normalized.type = 'integer';
+          } else if (validTypes.includes('array')) {
+            normalized.type = 'array';
+          } else if (validTypes.includes('string') && validTypes.includes('number')) {
+            // For mixed string/number, prefer string for form inputs
+            normalized.type = 'string';
+          } else {
+            normalized.type = validTypes[0];
+          }
+        } else {
+          normalized.type = 'string';
+        }
+      }
+    }
+
+    // Handle x-timeperiod fields - convert to number type for form display
+    if (normalized['x-timeperiod'] === true) {
+      normalized.type = 'number';
+      normalized.minimum = 0;
+      // Remove string-specific properties that don't apply to numbers
+      delete normalized.enum;
+      delete normalized.pattern;
+    }
+
+    // Filter enum options to show only user-friendly variants
+    if (normalized.enum && Array.isArray(normalized.enum) && normalized.enum.length > 5) {
+      // Only filter if there are many options (likely case variants)
+      const allStrings = normalized.enum.every(v => typeof v === 'string');
+      if (allStrings) {
+        normalized.enum = filterEnumOptions(normalized.enum as string[]);
+      }
+    }
+
+    // Handle nested properties
+    if (normalized.properties) {
+      const newProperties: Record<string, JsonSchema> = {};
+      Object.keys(normalized.properties).forEach(key => {
+        newProperties[key] = normalizeProperty(normalized.properties![key]);
+      });
+      normalized.properties = newProperties;
+    }
+
+    // Handle array items
+    if (normalized.items) {
+      normalized.items = normalizeProperty(normalized.items);
+    }
+
+    // Handle additionalProperties (for dynamic dicts)
+    if (normalized.additionalProperties && typeof normalized.additionalProperties === 'object') {
+      normalized.additionalProperties = normalizeProperty(normalized.additionalProperties);
+    }
+
+    return normalized;
+  };
+
+  return normalizeProperty(schema);
+};
+
+/**
+ * Per-section schemas derived from the full schema, cached across mounts.
+ *
+ * Keyed by the input count, which is the only thing about the configuration
+ * that reaches this derivation: the board version decides how many
+ * boneio_input values exist. Everything else here is a pure function of the
+ * schema file, which cannot change while the page is loaded.
+ *
+ * Section *data* is deliberately not cached — that does change, and the caller
+ * merges it in fresh.
+ */
+const sectionSchemaCache = new Map<number, Map<string, { schema: JsonSchema; normalizedSchema: JsonSchema }>>();
+
 
 /**
  * UISettings - Form-based configuration editor with tabs for each config section
@@ -38,13 +229,8 @@ const BindingMatrix = lazy(() => import('./BindingMatrix'));
  * menu item is commented out. Can be re-enabled when schema issues are resolved.
  */
 
-interface ConfigSection {
-  name: string;
-  schema: any;
-  normalizedSchema: any;
-  uiSchema: any;
-  data: Record<string, any>;
-}
+/** Where this browser last was in settings. Per-browser, like a scroll position. */
+const LAST_SECTION_KEY = 'boneio.settings.lastSection';
 
 export default function UISettings() {
   const { section } = useParams<{ section?: string }>();
@@ -63,9 +249,8 @@ export default function UISettings() {
     }
   }, [editItemName, setSearchParams]);
   const [sections, setSections] = useState<ConfigSection[]>([]);
-  const [formData, setFormData] = useState<Record<string, any>>({});
-  const [originalData, setOriginalData] = useState<Record<string, any>>({});
-  const [showYamlPreview, setShowYamlPreview] = useState(false);
+  const [formData, setFormData] = useState<SettingsFormData>({});
+  const [originalData, setOriginalData] = useState<SettingsFormData>({});
   const [saveStatus, setSaveStatus] = useState<{
     [key: string]: 'idle' | 'saving' | 'success' | 'error';
   }>({});
@@ -82,6 +267,11 @@ export default function UISettings() {
     return true;
   });
   const [schemaLoaded, setSchemaLoaded] = useState(false);
+  // Whether formData holds the loaded configuration. Until then a form shows
+  // its defaults, and a save replaced the whole section with them — on a
+  // slow controller, a click in the first seconds wiped `web.expose`.
+  const [formReady, setFormReady] = useState(false);
+  const [configLoadFailed, setConfigLoadFailed] = useState(false);
   const [loxFormValid, setLoxFormValid] = useState(true);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -96,8 +286,34 @@ export default function UISettings() {
     dismissDialog,
   } = useOverlayCheck();
 
-  // Get active section from URL parameter or default to first section
-  const activeSection = section || 'mqtt';
+  // The section in the URL wins. With none — /settings on its own, from the
+  // top menu — resume where this browser last was, so that returning to
+  // settings does not mean finding your way back every time.
+  //
+  // Read once, at mount: a value that changed under the component would move
+  // the user mid-edit. localStorage is wrapped because it throws outright in
+  // a private window or with site data blocked.
+  const [remembered] = useState(() => {
+    try {
+      const saved = localStorage.getItem(LAST_SECTION_KEY);
+      // Only if it still exists — a section can be renamed or removed between
+      // releases, and a stale name would open a blank page.
+      return saved && ALL_SECTIONS.some(s => s.name === saved) ? saved : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const activeSection = section || remembered || 'mqtt';
+
+  useEffect(() => {
+    if (!section) return;
+    try {
+      localStorage.setItem(LAST_SECTION_KEY, section);
+    } catch {
+      // Nothing to do — settings simply open at the default next time.
+    }
+  }, [section]);
 
   /**
    * Handle application restart
@@ -143,43 +359,39 @@ export default function UISettings() {
     return remoteInputs.length > 0 || remoteDevices.length > 0;
   }, [formData.remote_inputs, formData.remote_devices]);
 
-  // Use imported section definitions with translated titles
-  // Hide remote_inputs when no remote devices exist and no inputs configured
-  const reloadSections = useMemo(
-    () => RELOAD_SECTIONS
-      .filter(s => s.name !== 'remote_inputs' || hasRemoteInputs)
-      .map(s => ({ ...s, title: t(s.translationKey) })),
-    [t, hasRemoteInputs]
-  );
-
   // Hardware version determines which sections are available
   // CAN bus support was added in hardware version 0.5
-  const hwVersion = parseFloat(formData.boneio?.version || '0');
+  const hwVersion = parseFloat(String(formData.boneio?.version || '0'));
   const canSupported = hwVersion >= 0.5;
 
   if (!canSupported && hwVersion > 0) {
     console.log('CAN not supported: hardware version', hwVersion, '< 0.5');
   }
 
-  const restartSections = useMemo(
-    () => RESTART_SECTIONS
+  const configSections = useMemo(
+    () => ALL_SECTIONS
+      // Two sections are hidden rather than shown empty: remote inputs on a
+      // device with no remote devices to take them from, and the CAN bus on
+      // hardware older than 0.5, which has none. These filters used to live on
+      // the two lists the sidebar was built from; they moved here when the
+      // sidebar started reading a single list.
+      .filter(s => s.name !== 'remote_inputs' || hasRemoteInputs)
       .filter(s => s.name !== 'can' || canSupported)
       .map(s => ({ ...s, title: t(s.translationKey) })),
-    [t, canSupported]
+    [t, hasRemoteInputs, canSupported]
   );
 
-  const configSections = useMemo(
-    () => ALL_SECTIONS.map(s => ({ ...s, title: t(s.translationKey) })),
-    [t]
-  );
+  // Sections that bring their own component. Null for a schema-driven one,
+  // which is what the render below branches on.
+  const StandaloneComponent = STANDALONE_SECTIONS[activeSection]?.component ?? null;
 
   /**
    * Convert data to match schema types (for form display)
    */
   const convertDataToSchemaTypes = (
-    data: Record<string, any>,
-    schema: any
-  ): Record<string, any> => {
+    data: ConfigRecord,
+    schema: JsonSchema
+  ): ConfigRecord => {
     if (!data || !schema || typeof data !== 'object' || typeof schema !== 'object') {
       return data;
     }
@@ -190,14 +402,14 @@ export default function UISettings() {
     if (schema.properties) {
       Object.keys(schema.properties).forEach(key => {
         if (key in converted && converted[key] !== null && converted[key] !== undefined) {
-          const propSchema = schema.properties[key] as any;
+          const propSchema = schema.properties![key];
           const currentValue = converted[key];
 
           // Handle array with items schema
           if (propSchema?.items && Array.isArray(currentValue)) {
-            converted[key] = currentValue.map((item: any) => {
+            converted[key] = currentValue.map((item: unknown) => {
               if (typeof item === 'object' && propSchema.items?.properties) {
-                return convertDataToSchemaTypes(item, propSchema.items);
+                return convertDataToSchemaTypes(item as ConfigRecord, propSchema.items);
               }
               return item;
             });
@@ -224,7 +436,7 @@ export default function UISettings() {
           }
           // Handle nested objects recursively
           else if (propSchema?.type === 'object' && typeof currentValue === 'object') {
-            converted[key] = convertDataToSchemaTypes(currentValue, propSchema);
+            converted[key] = convertDataToSchemaTypes(currentValue as ConfigRecord, propSchema);
           }
         }
       });
@@ -236,7 +448,7 @@ export default function UISettings() {
       // Re-injecting defaults here keeps the UI consistent.
       Object.keys(schema.properties).forEach(key => {
         if (!(key in converted) || converted[key] === null || converted[key] === undefined) {
-          const propSchema = schema.properties[key] as any;
+          const propSchema = schema.properties![key];
           if (propSchema?.default !== undefined) {
             if (propSchema?.['x-timeperiod'] === true) {
               converted[key] = convertTimeperiodToMilliseconds(propSchema.default);
@@ -255,22 +467,23 @@ export default function UISettings() {
    * Load configuration and schemas (lazy loading - config first, schema in background)
    */
   const loadConfiguration = useCallback(async () => {
+    setConfigLoadFailed(false);
     try {
       // Check restart status from backend (non-blocking)
-      axios.get('/api/status/restart')
+      axios.get<{ restart_required?: boolean }>('/api/status/restart')
         .then(res => {
           if (res.data?.restart_required) setRestartRequired(true);
         })
         .catch(() => { });
 
       // Load parsed config from backend — uses prefetched cache if available
-      const configContent = await fetchConfig() as Record<string, any>;
-      const configData: Record<string, any> = configContent?.config || {};
+      const configContent = await fetchConfig();
+      const configData = (configContent?.config || {}) as SettingsFormData;
 
       // Merge composite sections (e.g. lm75 + ina219 + mcp9808 → board_sensors,
       // binary_sensor + event → local_inputs)
       for (const [virtualName, yamlKeys] of Object.entries(COMPOSITE_SECTIONS)) {
-        const merged: any[] = [];
+        const merged: ConfigRecord[] = [];
         for (const key of yamlKeys) {
           const items = configData[key];
           if (Array.isArray(items)) {
@@ -284,6 +497,7 @@ export default function UISettings() {
 
       // Enrich remote_devices with WLED discovery cache (effects, palettes, segments)
       // This data lives in .wled_cache.json, not in config.yaml
+<<<<<<< ours
       if (Array.isArray(configData.remote_devices)) {
         try {
           const { data: wledCache } = await axios.get<Record<string, Record<string, unknown[]>>>('/api/remote-devices/wled_info');
@@ -303,6 +517,9 @@ export default function UISettings() {
           console.debug('WLED cache not available, effect selectors will be hidden');
         }
       }
+=======
+      await enrichRemoteDevicesWithWled(configData.remote_devices);
+>>>>>>> theirs
 
       // remote_inputs is now a top-level config section (no aggregation needed)
 
@@ -316,26 +533,16 @@ export default function UISettings() {
         schema: { type: 'object' },
         normalizedSchema: { type: 'object', properties: {} },
         uiSchema: {},
-        data: configData[sectionConfig.name] || {},
+        data: (configData[sectionConfig.name] || {}) as ConfigRecord | ConfigRecord[],
       }));
       setSections(initialSections);
 
-      // Load schema in background (lazy) - only needed for ArrayTableWidget sections
-      const schemaUrl = '/schema/config.schema.json';
-
-      axios.get(schemaUrl, { headers: { 'Cache-Control': 'no-store' } })
-        .then(res => res.data)
+      // Load schema in background (lazy) - only needed for ArrayTableWidget
+      // sections. Cached for the page's lifetime: it is a 434 KB static file
+      // generated at build time, and re-fetching it on every entry into
+      // Settings cost about a second on a BeagleBone for nothing.
+      fetchSchema()
         .then(mainSchema => {
-          // Debug: log all schema keys
-          console.log(
-            '📦 Schema loaded. All property keys:',
-            Object.keys(mainSchema.properties || {})
-          );
-          console.log('📦 Cover schema exists?', !!mainSchema.properties?.cover);
-          if (mainSchema.properties?.cover) {
-            console.log('📦 Cover schema type:', mainSchema.properties.cover.type);
-          }
-
           // Update sections with proper schemas
           // Filter boneio_input enum based on board version:
           // Boards 0.5+ have 49 inputs (CAN uses 3 pins)
@@ -346,25 +553,48 @@ export default function UISettings() {
             `in_${String(i + 1).padStart(2, '0')}`
           );
 
-          const loadedSections: ConfigSection[] = configSections.map(sectionConfig => {
-            // Virtual sections use the event schema as base (superset of binary_sensor)
-            const schemaKey = sectionConfig.name === 'local_inputs'
-              ? 'event'
-              : sectionConfig.name;
-            let sectionSchema = mainSchema.properties?.[schemaKey];
+          // Derived once per board, then reused. Leaving Settings unmounts
+          // this component, so coming back from any other page re-ran the whole
+          // derivation — forty sections walked out of a 434 KB schema — for a
+          // schema that cannot change while the page is loaded.
+          let derived = sectionSchemaCache.get(maxInputs);
+          const alreadyDerived = derived !== undefined;
+          if (!derived) {
+            derived = new Map();
+            sectionSchemaCache.set(maxInputs, derived);
+          }
 
-            // Debug for cover section
-            if (sectionConfig.name === 'cover') {
-              console.log('🔍 Cover section lookup:', {
+          const loadedSections: ConfigSection[] = configSections.map(sectionConfig => {
+            const hit = derived!.get(sectionConfig.name);
+            if (hit) {
+              return {
                 name: sectionConfig.name,
-                found: !!sectionSchema,
-                schema: sectionSchema,
-              });
+                schema: hit.schema,
+                normalizedSchema: hit.normalizedSchema,
+                uiSchema: {},
+                data: (configData[sectionConfig.name] || {}) as ConfigRecord | ConfigRecord[],
+              };
             }
+
+            let sectionSchema: JsonSchema | undefined = sectionConfig.name === 'local_inputs'
+              ? buildLocalInputsSchema(mainSchema, allowedInputs)
+              : mainSchema.properties?.[sectionConfig.name];
+
+            // Three kinds of section legitimately have no top-level schema:
+            // the ones that bring their own component, the binding matrix, and
+            // composite sections built from several YAML keys. Warning about
+            // each of them on every load — fifteen of them now — buries the
+            // warning that means something.
+            const schemaless =
+              sectionConfig.name in STANDALONE_SECTIONS ||
+              sectionConfig.name === 'binding_matrix' ||
+              sectionConfig.name in COMPOSITE_SECTIONS;
 
             // Safe fallback if schema is missing
             if (!sectionSchema) {
-              console.warn(`⚠️ Missing schema for section: ${sectionConfig.name}`);
+              if (!schemaless) {
+                console.warn(`⚠️ Missing schema for section: ${sectionConfig.name}`);
+              }
               if (
                 [
                   'cover',
@@ -384,34 +614,21 @@ export default function UISettings() {
               }
             }
 
-            // Filter boneio_input enum for event/binary_sensor/local_inputs based on board version
-            if (
-              (sectionConfig.name === 'event' || sectionConfig.name === 'binary_sensor' || sectionConfig.name === 'local_inputs') &&
-              sectionSchema?.items?.properties?.boneio_input?.enum
-            ) {
-              sectionSchema = {
-                ...sectionSchema,
-                items: {
-                  ...sectionSchema.items,
-                  properties: {
-                    ...sectionSchema.items.properties,
-                    boneio_input: {
-                      ...sectionSchema.items.properties.boneio_input,
-                      enum: sectionSchema.items.properties.boneio_input.enum.filter(
-                        (v: string) => allowedInputs.includes(v)
-                      ),
-                    },
-                  },
-                },
-              };
+            // Filter boneio_input enum based on board version.
+            // local_inputs is already filtered inside buildLocalInputsSchema().
+            if (sectionConfig.name === 'event' || sectionConfig.name === 'binary_sensor') {
+              sectionSchema = withFilteredInputs(sectionSchema, allowedInputs);
             }
+
+            const normalizedSchema = normalizeSchema(sectionSchema);
+            derived!.set(sectionConfig.name, { schema: sectionSchema, normalizedSchema });
 
             return {
               name: sectionConfig.name,
               schema: sectionSchema,
-              normalizedSchema: normalizeSchema(sectionSchema),
+              normalizedSchema,
               uiSchema: {},
-              data: configData[sectionConfig.name] || {},
+              data: (configData[sectionConfig.name] || {}) as ConfigRecord | ConfigRecord[],
             };
           });
           setSections(loadedSections);
@@ -420,30 +637,40 @@ export default function UISettings() {
           const convertedFormData = convertDataToSchemaTypes(configData, mainSchema);
           setFormData(convertedFormData);
           setOriginalData(JSON.parse(JSON.stringify(convertedFormData)));
+          setFormReady(true);
 
           // Mark schema as loaded AFTER data conversion is complete
           setSchemaLoaded(true);
-          console.log('✅ Schema loaded and data converted', convertedFormData);
+          if (!alreadyDerived) {
+            console.debug('Schema derived for %d sections', loadedSections.length);
+          }
         })
-        .catch(err => console.warn('Schema loading failed (non-critical):', err));
+        .catch(err => {
+          console.warn('Schema loading failed (non-critical):', err);
+          // The forms still get the configuration, only without type
+          // conversion; otherwise settings would wait for ever.
+          setFormData(configData);
+          setFormReady(true);
+        });
     } catch (error) {
       console.error('Error loading configuration:', error);
+      setConfigLoadFailed(true);
     }
   }, []);
 
   /**
    * Filter out auto-generated fields from configuration
    */
-  const filterAutoGeneratedFields = useCallback((data: any): any => {
+  const filterAutoGeneratedFields = useCallback((data: unknown): unknown => {
     if (!data || typeof data !== 'object') return data;
 
     // Create a deep copy to avoid mutating original
-    const filtered = JSON.parse(JSON.stringify(data));
+    const filtered: ConfigRecord | unknown[] = JSON.parse(JSON.stringify(data));
 
     // Filter outputs - remove auto-generated fields if boneio_output exists
     if (Array.isArray(filtered)) {
-      return filtered.map((item: any) => {
-        if (item && typeof item === 'object') {
+      return filtered.map((item: unknown) => {
+        if (isRecord(item)) {
           // If boneio_output exists, remove auto-generated fields
           if (item.boneio_output) {
             const { kind, mcp_id, pca_id, pcf_id, pin, ...rest } = item;
@@ -461,7 +688,7 @@ export default function UISettings() {
 
     // Handle object with output/input arrays
     if (filtered.output && Array.isArray(filtered.output)) {
-      filtered.output = filtered.output.map((output: any) => {
+      filtered.output = filtered.output.map((output: ConfigRecord) => {
         if (output.boneio_output) {
           const { kind, mcp_id, pca_id, pcf_id, pin, ...rest } = output;
           return rest;
@@ -471,7 +698,7 @@ export default function UISettings() {
     }
 
     if (filtered.input && Array.isArray(filtered.input)) {
-      filtered.input = filtered.input.map((input: any) => {
+      filtered.input = filtered.input.map((input: ConfigRecord) => {
         if (input.boneio_input) {
           const { kind, mcp_id, pca_id, pcf_id, pin, ...rest } = input;
           return rest;
@@ -481,11 +708,11 @@ export default function UISettings() {
     }
 
     // Remove empty/null values to clean up the YAML
-    const removeEmptyValues = (obj: any): any => {
+    const removeEmptyValues = (obj: unknown): unknown => {
       if (Array.isArray(obj)) {
         return obj.map(removeEmptyValues).filter(item => item !== null && item !== undefined);
       } else if (obj !== null && typeof obj === 'object') {
-        const cleaned: any = {};
+        const cleaned: ConfigRecord = {};
         for (const [key, value] of Object.entries(obj)) {
           const cleanedValue = removeEmptyValues(value);
           // Keep the key if value is not null/undefined/empty string/empty array/empty object
@@ -511,6 +738,7 @@ export default function UISettings() {
   }, []);
 
   /**
+<<<<<<< ours
    * Convert data to YAML format (with defaults stripped)
    */
   const convertToYaml = useCallback(
@@ -638,25 +866,27 @@ export default function UISettings() {
   );
 
   /**
+=======
+>>>>>>> theirs
    * Handle form data change for a section
    */
-  const handleSectionChange = (sectionName: string, newFormData: any) => {
+  const handleSectionChange = (sectionName: string, newFormData: unknown) => {
     console.log('📝 handleSectionChange called for:', sectionName);
 
-    setFormData((prevFormData: Record<string, any>) => ({
+    setFormData((prevFormData: SettingsFormData) => ({
       ...prevFormData,
       [sectionName]: newFormData,
     }));
 
     // Normalize data before comparison - remove empty objects/arrays/nulls
-    const normalizeForComparison = (obj: any): any => {
+    const normalizeForComparison = (obj: unknown): unknown => {
       if (obj === null || obj === undefined) return undefined;
       if (Array.isArray(obj)) {
         const filtered = obj.map(normalizeForComparison).filter(v => v !== undefined);
         return filtered.length > 0 ? filtered : undefined;
       }
-      if (typeof obj === 'object') {
-        const result: any = {};
+      if (isRecord(obj)) {
+        const result: ConfigRecord = {};
         for (const [key, value] of Object.entries(obj)) {
           const normalized = normalizeForComparison(value);
           if (normalized !== undefined) {
@@ -670,12 +900,12 @@ export default function UISettings() {
     };
 
     // Deep comparison using sorted JSON stringify
-    const sortedStringify = (obj: any): string => {
+    const sortedStringify = (obj: unknown): string => {
       if (obj === null || obj === undefined) return 'null';
       if (Array.isArray(obj)) {
         return '[' + obj.map(sortedStringify).join(',') + ']';
       }
-      if (typeof obj === 'object') {
+      if (isRecord(obj)) {
         const keys = Object.keys(obj).sort();
         return (
           '{' + keys.map(k => JSON.stringify(k) + ':' + sortedStringify(obj[k])).join(',') + '}'
@@ -686,7 +916,7 @@ export default function UISettings() {
 
     // Check if a value is "effectively empty" (only false/null/undefined/empty values)
     // e.g. { enabled: false } is semantically the same as no section at all
-    const isEffectivelyEmpty = (obj: any): boolean => {
+    const isEffectivelyEmpty = (obj: unknown): boolean => {
       if (obj === null || obj === undefined || obj === '') return true;
       if (Array.isArray(obj)) return obj.length === 0;
       if (typeof obj === 'object') {
@@ -756,7 +986,7 @@ export default function UISettings() {
     const originalValue =
       originalData[sectionName] !== undefined ? originalData[sectionName] : defaultValue;
 
-    setFormData((prevFormData: Record<string, any>) => ({
+    setFormData((prevFormData: SettingsFormData) => ({
       ...prevFormData,
       [sectionName]: JSON.parse(JSON.stringify(originalValue)), // Deep copy
     }));
@@ -769,7 +999,8 @@ export default function UISettings() {
   /**
    * Save a specific section
    */
-  const saveSection = async (sectionName: string, dataOverride?: any) => {
+  const saveSection = async (sectionName: string, dataOverride?: unknown) => {
+    if (!formReady) return;
     console.log('🔄 saveSection called for:', sectionName);
     console.log('📦 formData[sectionName]:', formData[sectionName]);
     console.log('📦 dataOverride:', dataOverride);
@@ -786,7 +1017,7 @@ export default function UISettings() {
 
     // Validate boneio section - name is required if any other field is set
     if (sectionName === 'boneio') {
-      const boneioData = formData[sectionName];
+      const boneioData = formData.boneio;
       const hasOtherFields = boneioData?.version || boneioData?.device_type;
       const hasName = boneioData?.name && boneioData.name.trim() !== '';
 
@@ -809,7 +1040,7 @@ export default function UISettings() {
       const ids = new Set<string>();
       const duplicates: string[] = [];
 
-      for (const sensor of dataToUse) {
+      for (const sensor of dataToUse as { id?: string; name?: string }[]) {
         // Generate ID from name if not provided (same logic as backend)
         const sensorId =
           sensor.id ||
@@ -848,13 +1079,29 @@ export default function UISettings() {
       const sectionInfo = sections.find(s => s.name === sectionName);
       const sectionSchema = sectionInfo?.schema;
 
+      // What the backend is sent for form data: original types back, generated
+      // fields (kind, mcp_id, pin, etc.) out, hidden fields and defaults dropped.
+      const toMinimalConfig = (data: unknown): unknown => {
+        const dataToSend = convertFormDataToOriginalTypes(
+          data,
+          originalData[sectionName],
+          sectionSchema
+        );
+        const filteredData = filterAutoGeneratedFields(dataToSend);
+        return stripHiddenAndDefaults(
+          filteredData,
+          sectionSchema,
+          sectionInfo?.uiSchema || {}
+        );
+      };
+
       // Special handling for mcp23017 - use data directly from form without transformations
-      let minimalConfig;
+      let minimalConfig: unknown;
       if (sectionName === 'mcp23017') {
         // For mcp23017, use data directly - form already provides clean data
         // Convert addresses to integers for backend
         minimalConfig = Array.isArray(dataToUse)
-          ? dataToUse.map((entry: any) => {
+          ? dataToUse.map((entry: { id?: string; address?: string | number; inverted?: boolean; init_sleep?: string | number } | null) => {
             if (entry && entry.address !== undefined) {
               let addr = entry.address;
               // Convert to integer
@@ -869,28 +1116,14 @@ export default function UISettings() {
               if (isNaN(addr)) {
                 addr = entry.id === 'mcp_left' ? 0x20 : 0x21;
               }
-              return { id: entry.id, address: addr };
+              // Every other field (init_sleep, inverted) goes back as it was.
+              return { ...entry, address: addr };
             }
             return entry;
           })
           : dataToUse;
       } else {
-        // Convert form data back to original types before sending
-        const dataToSend = convertFormDataToOriginalTypes(
-          dataToUse,
-          originalData[sectionName],
-          sectionSchema
-        );
-
-        // Filter out auto-generated fields (kind, mcp_id, pin, etc.)
-        const filteredData = filterAutoGeneratedFields(dataToSend);
-
-        // Usuń pola ukryte i wartości domyślne
-        minimalConfig = stripHiddenAndDefaults(
-          filteredData,
-          sectionSchema,
-          sectionInfo?.uiSchema || {}
-        );
+        minimalConfig = toMinimalConfig(dataToUse);
       }
 
       // Send converted data to backend
@@ -902,26 +1135,40 @@ export default function UISettings() {
       // Handle composite sections — split and save each YAML key separately
       if (COMPOSITE_SECTIONS[sectionName]) {
         const yamlKeys = COMPOSITE_SECTIONS[sectionName];
-        const allItems = Array.isArray(minimalConfig) ? minimalConfig : [];
 
         // Split items by _type back into separate arrays
-        const buckets: Record<string, any[]> = {};
-        for (const key of yamlKeys) {
-          buckets[key] = [];
-        }
-        for (const item of allItems) {
-          const type = item._type;
-          if (type && buckets[type]) {
-            const { _type, ...rest } = item;
-            buckets[type].push(rest);
+        const splitByType = (config: unknown): Record<string, ConfigRecord[]> => {
+          const buckets: Record<string, ConfigRecord[]> = {};
+          for (const key of yamlKeys) {
+            buckets[key] = [];
           }
-        }
+          for (const item of (Array.isArray(config) ? config : []) as ConfigRecord[]) {
+            const type = item._type as string | undefined;
+            if (type && buckets[type]) {
+              const { _type, ...rest } = item;
+              buckets[type].push(rest);
+            }
+          }
+          return buckets;
+        };
+        const buckets = splitByType(minimalConfig);
 
-        // Save each YAML key separately
-        for (const key of yamlKeys) {
+        // The last saved state, put through the same steps, so a key whose
+        // list did not change is neither written nor reloaded. Editing one
+        // event input used to rewrite binary_sensor too and reload both.
+        const saved = originalData[sectionName];
+        const savedBuckets = saved !== undefined
+          ? splitByType(toMinimalConfig(JSON.parse(JSON.stringify(saved))))
+          : null;
+        const changedKeys = yamlKeys.filter(
+          (key) => !savedBuckets || JSON.stringify(buckets[key]) !== JSON.stringify(savedBuckets[key])
+        );
+
+        // Save each changed YAML key separately
+        for (const key of changedKeys) {
           console.log(`📤 Saving composite key ${key}:`, buckets[key]);
           await axios.put(`/api/config/${key}`, buckets[key], {
-            timeout: 15000, // Large configs can take seconds on ARM
+            timeout: 30000, // Large configs can take seconds on ARM; the web section reloads Caddy
           });
         }
 
@@ -929,14 +1176,7 @@ export default function UISettings() {
         // local_inputs (binary_sensor + event) supports hot-reload with granular change detection
         if (sectionName === 'local_inputs') {
           // Granular reload: only reload sub-sections that actually changed
-          const sectionsToReload: string[] = [];
-          for (const key of yamlKeys) {
-            const originalItems = (originalData[key] || []);
-            const newItems = buckets[key];
-            if (JSON.stringify(newItems) !== JSON.stringify(originalItems)) {
-              sectionsToReload.push(key);
-            }
-          }
+          const sectionsToReload = changedKeys;
 
           if (sectionsToReload.length > 0) {
             try {
@@ -977,8 +1217,8 @@ export default function UISettings() {
       const bodyData = JSON.stringify(minimalConfig);
       console.log('📤 Sending to backend:', bodyData);
 
-      const response = await axios.put(`/api/config/${sectionName}`, minimalConfig, {
-        timeout: 15000, // Large configs (e.g. WLED effects/palettes) can take seconds on ARM
+      const response = await axios.put<{ restart_required?: boolean }>(`/api/config/${sectionName}`, minimalConfig, {
+        timeout: 30000, // Large configs (e.g. WLED effects/palettes) take seconds on ARM; the web section reloads Caddy
       });
       const result = response.data;
 
@@ -1003,7 +1243,7 @@ export default function UISettings() {
 
         // Check overlay mismatch after saving boneio section with version change
         if (sectionName === 'boneio') {
-          const newVersion = String(dataToUse?.version || '');
+          const newVersion = String((dataToUse as ConfigRecord)?.version || '');
           const oldVersion = String(originalData.boneio?.version || '');
           if (newVersion && newVersion !== oldVersion) {
             checkOverlayAfterVersionChange(newVersion);
@@ -1027,6 +1267,10 @@ export default function UISettings() {
           'remote_outputs',
           'template',
           'oled',
+          // Both reload in place on the device. Without them here, saving the
+          // section wrote the file and changed nothing until a restart.
+          'virtual_switch',
+          'schedule',
         ];
         if (reloadableSections.includes(sectionName)) {
           try {
@@ -1078,158 +1322,10 @@ export default function UISettings() {
     }
   };
 
-  /**
-   * Filter enum options to show only lowercase variants
-   * while keeping all variants in the schema for validation
-   */
-  const filterEnumOptions = (enumValues: string[]): string[] => {
-    if (!enumValues || enumValues.length === 0) return enumValues;
-
-    // Group values by their lowercase version
-    const groups: { [key: string]: string[] } = {};
-    enumValues.forEach(value => {
-      const lowerValue = value.toLowerCase();
-      if (!groups[lowerValue]) {
-        groups[lowerValue] = [];
-      }
-      groups[lowerValue].push(value);
-    });
-
-    // For each group, prefer lowercase variant
-    const filtered: string[] = [];
-    Object.values(groups).forEach(group => {
-      if (group.length === 1) {
-        // Only one variant, keep it
-        filtered.push(group[0]);
-      } else {
-        // Multiple variants, prefer lowercase
-        const lowerCase = group.find(v => v === v.toLowerCase());
-
-        if (lowerCase) {
-          filtered.push(lowerCase);
-        } else {
-          // Fallback to first variant
-          filtered.push(group[0]);
-        }
-      }
-    });
-
-    return filtered;
-  };
 
   /**
    * Normalize schema to fix common issues
    */
-  const normalizeSchema = (schema: any): any => {
-    const normalizeProperty = (prop: any): any => {
-      if (!prop || typeof prop !== 'object') return prop;
-
-      const normalized = { ...prop };
-
-      // Handle oneOf with x-yaml-boolean - normalize to simple boolean
-      if (normalized.oneOf && Array.isArray(normalized.oneOf)) {
-        // Check if this is a boolean field with string alternatives
-        const hasBooleanType = normalized.oneOf.some((option: any) => option.type === 'boolean');
-        const hasYamlBooleanString = normalized.oneOf.some(
-          (option: any) => option.type === 'string' && option['x-yaml-boolean'] === true
-        );
-
-        if (hasBooleanType && hasYamlBooleanString) {
-          // Convert to simple boolean type
-          const booleanOption = normalized.oneOf.find((option: any) => option.type === 'boolean');
-          normalized.type = 'boolean';
-          if (booleanOption.default !== undefined) {
-            normalized.default = booleanOption.default;
-          }
-          // Keep title and description from the original
-          delete normalized.oneOf;
-        }
-      }
-
-      // Handle enum with mixed string/number types - normalize to consistent type
-      if (normalized.enum && Array.isArray(normalized.enum) && normalized.type === 'string') {
-        // Check if enum contains numbers that should be strings
-        const hasNumbers = normalized.enum.some((val: any) => typeof val === 'number');
-        const hasStrings = normalized.enum.some((val: any) => typeof val === 'string');
-
-        if (hasNumbers && hasStrings) {
-          // Convert all enum values to strings to match the string type
-          normalized.enum = normalized.enum.map((val: any) => String(val));
-        } else if (hasNumbers && !hasStrings) {
-          // If all enum values are numbers but type is string, convert to strings
-          normalized.enum = normalized.enum.map((val: any) => String(val));
-        }
-      }
-
-      // Handle type arrays - convert to single type if possible
-      if (Array.isArray(normalized.type)) {
-        if (normalized.type.length === 1) {
-          normalized.type = normalized.type[0];
-        } else {
-          // Take the first non-null type, but prefer structural types
-          const validTypes = normalized.type.filter((t: any) => t && t !== 'null');
-          if (validTypes.length > 0) {
-            // Prefer object types for complex structures
-            if (validTypes.includes('object')) {
-              normalized.type = 'object';
-            } else if (validTypes.includes('integer')) {
-              normalized.type = 'integer';
-            } else if (validTypes.includes('array')) {
-              normalized.type = 'array';
-            } else if (validTypes.includes('string') && validTypes.includes('number')) {
-              // For mixed string/number, prefer string for form inputs
-              normalized.type = 'string';
-            } else {
-              normalized.type = validTypes[0];
-            }
-          } else {
-            normalized.type = 'string';
-          }
-        }
-      }
-
-      // Handle x-timeperiod fields - convert to number type for form display
-      if (normalized['x-timeperiod'] === true) {
-        normalized.type = 'number';
-        normalized.minimum = 0;
-        // Remove string-specific properties that don't apply to numbers
-        delete normalized.enum;
-        delete normalized.pattern;
-      }
-
-      // Filter enum options to show only user-friendly variants
-      if (normalized.enum && Array.isArray(normalized.enum) && normalized.enum.length > 5) {
-        // Only filter if there are many options (likely case variants)
-        const allStrings = normalized.enum.every((v: string) => typeof v === 'string');
-        if (allStrings) {
-          normalized.enum = filterEnumOptions(normalized.enum);
-        }
-      }
-
-      // Handle nested properties
-      if (normalized.properties) {
-        const newProperties: any = {};
-        Object.keys(normalized.properties).forEach(key => {
-          newProperties[key] = normalizeProperty(normalized.properties[key]);
-        });
-        normalized.properties = newProperties;
-      }
-
-      // Handle array items
-      if (normalized.items) {
-        normalized.items = normalizeProperty(normalized.items);
-      }
-
-      // Handle additionalProperties (for dynamic dicts)
-      if (normalized.additionalProperties && typeof normalized.additionalProperties === 'object') {
-        normalized.additionalProperties = normalizeProperty(normalized.additionalProperties);
-      }
-
-      return normalized;
-    };
-
-    return normalizeProperty(schema);
-  };
 
   useEffect(() => {
     let isMounted = true;
@@ -1246,24 +1342,31 @@ export default function UISettings() {
     };
   }, []);
 
-  // Effect to handle URL parameter changes
+  // Put a section in the URL once the list is known.
+  //
+  // This fills in the address rather than navigating, so it goes through
+  // `navigate(..., { replace: true })` and not navigateToSection: that one
+  // closes the mobile section sheet, which the phone opens on a bare /settings
+  // for the user to pick from — it flashed for a second and vanished. Replace
+  // also keeps Back from landing on /settings and being bounced forward again.
   useEffect(() => {
-    // If no section in URL and we have sections loaded, navigate to first section
-    if (!section && sections.length > 0) {
-      navigateToSection(sections[0].name);
-    }
-    // If section in URL doesn't exist in loaded sections, navigate to first section
-    else if (section && sections.length > 0 && !sections.find(s => s.name === section)) {
-      navigateToSection(sections[0].name);
-    }
-  }, [section, sections, navigateToSection]);
+    if (sections.length === 0) return;
+    const exists = (name: string) => sections.some(s => s.name === name);
 
-  // Auto-hide YAML preview when switching to a composite section
-  useEffect(() => {
-    if (activeSection && COMPOSITE_SECTIONS[activeSection] && showYamlPreview) {
-      setShowYamlPreview(false);
+    // Arriving at /settings with nothing else to go on: resume where this
+    // browser last was. Falling straight to sections[0] is what made every
+    // visit start at Areas regardless of where the last one ended.
+    if (!section) {
+      navigate(`/settings/${exists(activeSection) ? activeSection : sections[0].name}`, { replace: true });
+      return;
     }
-  }, [activeSection, showYamlPreview]);
+
+    // A section that is not in the list — renamed, removed, or hidden because
+    // the hardware does not have it. The first one is a safe landing.
+    if (!exists(section)) {
+      navigate(`/settings/${sections[0].name}`, { replace: true });
+    }
+  }, [section, sections, activeSection, navigate]);
 
   // Debug console.log for active section
   useEffect(() => {
@@ -1279,8 +1382,71 @@ export default function UISettings() {
   }, [activeSection, sections, formData]);
 
   const activeSection_data = sections.find(s => s.name === activeSection);
+  const activeSectionDef = ALL_SECTIONS.find(s => s.name === activeSection);
+  const activeSectionTitle = activeSectionDef
+    ? t(activeSectionDef.translationKey)
+    : (t(`sections.${activeSection}`) || activeSection_data?.name || activeSection);
+  const activeSectionDescription = t(`sections.descriptions.${activeSection}`, { defaultValue: '' });
+
+  /**
+   * Whether this section is committed as a whole — which is what the action
+   * bar at the bottom offers. The standalone pages are not: they act on the
+   * operating system the moment you press their own buttons, so there is
+   * nothing to save. Binding matrix and the YAML editor save themselves.
+   */
+  const hasSectionSave =
+    !StandaloneComponent &&
+    activeSection !== 'binding_matrix' &&
+    activeSection !== 'yaml_editor' &&
+    Boolean(activeSection_data);
+
+  /**
+   * The column the header and the action bar centre themselves on.
+   *
+   * The open page reports its own column through SectionColumnContext, which
+   * is the only thing that knows it for certain. The guess below is what the
+   * header uses for the frame before the page has mounted — right for every
+   * section that does not say otherwise, so nothing visibly settles into
+   * place on arrival.
+   */
+  const [pageWidth, setPageWidth] = useState<SettingsPageWidth | null>(null);
+  const reportSectionColumn = useCallback(
+    (width: SettingsPageWidth | null) => setPageWidth(width),
+    [],
+  );
+  const guessedWidth: SettingsPageWidth =
+    activeSection === 'binding_matrix'
+      ? 'full'
+      : ARRAY_SECTIONS.includes(activeSection as (typeof ARRAY_SECTIONS)[number])
+        ? 'wide'
+        : 'form';
+  const sectionWidth = pageWidth ?? guessedWidth;
+
+  /**
+   * The save published by a hand-written page, if it has one.
+   *
+   * Those pages are not committed by the machinery above — they hold their
+   * own state and call their own endpoint — but the button belongs in the
+   * same place as everyone else's, so they register it and the shell draws
+   * it. Withdrawn on unmount, which is what changing section does.
+   */
+  const [standaloneSave, setStandaloneSave] = useState<SectionSaveRegistration | null>(null);
+  const registerSectionSave = useCallback(
+    (registration: SectionSaveRegistration | null) => setStandaloneSave(registration),
+    [],
+  );
+
+  const sectionDirty = unsavedChanges[activeSection] || false;
+
+  const saveActiveSection = async () => {
+    await saveSection(activeSection);
+  };
+
+  const restoreActiveSection = () => {
+    restoreSection(activeSection);
+  };
   return (
-    <div className="flex flex-col lg:flex-row h-full bg-base-100 relative">
+    <div className="settings-scope flex flex-col lg:flex-row h-full relative">
       {/* Global loading overlay - fixed to viewport */}
       {isReloading && (
         <div className="fixed inset-0 bg-base-100/80 backdrop-blur-sm z-50 flex items-center justify-center">
@@ -1306,8 +1472,8 @@ export default function UISettings() {
         isChanging={isChangingOverlay}
         changeResult={overlayChangeResult}
         changeError={overlayChangeError}
-        onApply={async (password: string) => {
-          const success = await applyOverlayChange(password);
+        onApply={async () => {
+          const success = await applyOverlayChange();
           // Trigger restart after successful overlay change
           if (success) {
             try {
@@ -1319,31 +1485,6 @@ export default function UISettings() {
         }}
         onDismiss={dismissDialog}
       />
-
-      {/* Unsaved changes toast - show when there are unsaved changes and no restart required */}
-      {Object.values(unsavedChanges).some(Boolean) && !restartRequired && (
-        <div className="toast toast-top toast-center z-50">
-          <div className="alert alert-warning shadow-lg">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="stroke-current shrink-0 h-6 w-6"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-              />
-            </svg>
-            <div>
-              <h3 className="font-bold">📝 {t('settings.unsaved_changes')}</h3>
-              <div className="text-xs">{t('settings.click_save')}</div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Restart required toast - persistent, with restart button */}
       {restartRequired && (
@@ -1402,8 +1543,6 @@ export default function UISettings() {
       {/* Sidebar with section tabs */}
       <SettingsSidebar
         sections={sections}
-        reloadSections={reloadSections}
-        restartSections={restartSections}
         configSections={configSections}
         activeSection={activeSection}
         saveStatus={saveStatus}
@@ -1411,13 +1550,20 @@ export default function UISettings() {
         isSidebarOpen={isSidebarOpen}
         onSidebarToggle={setIsSidebarOpen}
         onNavigate={navigateToSection}
+<<<<<<< ours
         onRestore={() => restoreSection(activeSection)}
         onSave={() => saveSection(activeSection)}
         saveDisabled={activeSection === 'lox_udp' && !loxFormValid}
+=======
+>>>>>>> theirs
       />
 
       {/* Main content area */}
+      {/* Whatever the open page draws, it tells the shell how wide its column
+          is from in here, so the header and the action bar can sit on it. */}
+      <SectionColumnContext.Provider value={reportSectionColumn}>
       <div ref={contentRef} className="flex-1 flex flex-col overflow-hidden lg:min-h-0 pb-14 lg:pb-0">
+<<<<<<< ours
         {/* Tool sections (not schema-driven) */}
         {activeSection === 'accounts' ? (
           // Not schema-driven: accounts live in users.json, so this section has
@@ -1428,13 +1574,78 @@ export default function UISettings() {
             </div>
           </Suspense>
         ) : activeSection === 'binding_matrix' ? (
+=======
+        {/* Render header for all sections except yaml_editor (which is a full-height code editor) */}
+        {activeSection !== 'yaml_editor' && (
+          <SectionHeader
+            sectionName={activeSection}
+            sectionTitle={activeSectionTitle}
+            sectionDescription={activeSectionDescription}
+            width={sectionWidth}
+          />
+        )}
+
+        {/* Content area */}
+        {configLoadFailed ? (
+          /* Before the sections: they are built from the configuration, so
+             without it there is no section to show this in. */
+          <div className="flex flex-col items-center gap-4 px-6 py-16 text-center">
+            <p className="text-base-content/70 max-w-md">{t('settings.config_load_failed')}</p>
+            <button className="btn btn-primary btn-sm" onClick={() => void loadConfiguration()}>
+              {t('settings.config_load_retry')}
+            </button>
+          </div>
+        ) : activeSection === 'yaml_editor' ? (
+>>>>>>> theirs
           <Suspense fallback={<div className="flex justify-center py-12"><span className="loading loading-ring loading-lg text-primary" /></div>}>
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-hidden h-full">
+              {StandaloneComponent && <StandaloneComponent onRestartRequired={() => setRestartRequired(true)} />}
+            </div>
+          </Suspense>
+        ) : StandaloneComponent ? (
+          <Suspense fallback={<div className="flex justify-center py-12"><span className="loading loading-ring loading-lg text-primary" /></div>}>
+            <SectionSaveContext.Provider value={registerSectionSave}>
+              {/* The same column as the schema-driven branch below, and the
+                  same shape whether or not a bar appears: swapping the
+                  wrapper would remount the page, which would withdraw the
+                  registration that asked for the bar in the first place. */}
+              <div
+                className={cn(
+                  'stg-canvas flex-1 overflow-y-auto flex flex-col px-4 pt-4 sm:px-6 sm:pt-6 lg:px-8 lg:pt-8',
+                  !standaloneSave && 'pb-4 sm:pb-6 lg:pb-8',
+                )}
+              >
+                {/* The page decides its own column width through SettingsPage —
+                    the shell only supplies the canvas and the outer padding. */}
+                <div className={cn('flex-1', standaloneSave && 'pb-5')}>
+                  <StandaloneComponent onRestartRequired={() => setRestartRequired(true)} />
+                </div>
+
+                {standaloneSave && (
+                  <SettingsActionBar
+                    dirty={standaloneSave.dirty}
+                    saving={standaloneSave.saving}
+                    saveDisabled={standaloneSave.disabled}
+                    width={standaloneSave.width ?? sectionWidth}
+                    onSave={standaloneSave.onSave}
+                    labels={{
+                      save: standaloneSave.label ?? t('settings.save'),
+                      restore: t('settings.restore'),
+                      unsaved: t('settings.unsaved_changes'),
+                    }}
+                  />
+                )}
+              </div>
+            </SectionSaveContext.Provider>
+          </Suspense>
+        ) : activeSection === 'binding_matrix' ? (
+          <Suspense fallback={<div className="flex justify-center py-12"><span className="loading loading-ring loading-lg text-primary" /></div>}>
+            <div className="stg-canvas flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
               <BindingMatrix
                 formData={formData}
                 sections={sections}
                 onSaveSection={saveSection}
-                onUpdateFormData={(section: string, data: any) => {
+                onUpdateFormData={(section: string, data: ConfigRecord[]) => {
                   setFormData(prev => ({ ...prev, [section]: data }));
                   setUnsavedChanges(prev => ({ ...prev, [section]: true }));
                 }}
@@ -1442,6 +1653,7 @@ export default function UISettings() {
             </div>
           </Suspense>
         ) : activeSection_data && (
+<<<<<<< ours
           <>
             {/* Header */}
             <SectionHeader
@@ -1503,12 +1715,57 @@ export default function UISettings() {
                     onSaveSection={saveSection}
                     onLoxValidationChange={setLoxFormValid}
                   />
+=======
+          /* A column, so the action bar can be pushed to the bottom edge when
+             the section is short. Without it the bar landed wherever the
+             content happened to end — a full-width rule with a lone button
+             floating in the middle of an empty page. */
+          <div className="stg-canvas flex-1 overflow-y-auto flex flex-col px-4 pt-4 sm:px-6 sm:pt-6 lg:px-8 lg:pt-8">
+            {/* Grows to fill a short section, so the bar below stays at the
+                bottom edge; the padding keeps the last card off it. */}
+            <div className="flex-1 pb-5">
+              {formReady ? <SectionContent
+                activeSection={activeSection}
+                activeSectionData={activeSection_data}
+                formData={formData}
+                originalData={originalData}
+                schemaLoaded={schemaLoaded}
+                editItemName={editItemName || undefined}
+                onEditItemOpened={clearEditParam}
+                onSectionChange={handleSectionChange}
+                onSaveSection={saveSection}
+                onLoxValidationChange={setLoxFormValid}
+              /> : (
+                <div className="flex justify-center py-16">
+                  <span className="loading loading-spinner loading-lg text-primary" />
+>>>>>>> theirs
                 </div>
               )}
             </div>
-          </>
+
+            {/* The one place a section is committed from, at every width. */}
+            {hasSectionSave && formReady && (
+              <SettingsActionBar
+                dirty={sectionDirty}
+                saving={saveStatus[activeSection] === 'saving'}
+                saveDisabled={
+                  activeSection === 'lox_udp' && !loxFormValid
+                }
+                width={sectionWidth}
+                onSave={() => void saveActiveSection()}
+                onRestore={restoreActiveSection}
+                labels={{
+                  save: t('settings.save'),
+                  restore: t('settings.restore'),
+                  unsaved: t('settings.unsaved_changes'),
+                }}
+              />
+            )}
+          </div>
         )}
+
       </div>
+      </SectionColumnContext.Provider>
     </div>
   );
 }

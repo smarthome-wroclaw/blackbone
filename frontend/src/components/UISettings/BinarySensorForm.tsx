@@ -1,23 +1,27 @@
+import { NoticeCallout } from './ui';
 import React, { useState } from 'react';
-import { FaPlus } from 'react-icons/fa';
+import { FaExclamationTriangle, FaPlus } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
-import { NumericInput } from '@/components/ui/NumericInput';
 import ActionFields, { validateAction, cleanActionFields } from './ActionFields';
 import AiConfigAssistant from './AiConfigAssistant';
 import BlueprintPicker from './widgets/BlueprintPicker';
-import { getInputAvailability, buildInputOptions } from './helpers/inputFilterUtils';
-import { convertTimeperiodToMilliseconds } from './helpers/configSchemaUtils';
+import { getInputAvailability, buildInputOptions, mustNotBeActiveAtStartup } from './helpers/inputFilterUtils';
 import AreaSelect from './widgets/AreaSelect';
+import PinAvailabilityHint from './widgets/PinAvailabilityHint';
+import BounceTimeInput, { BOUNCE_TIME_MAX_MS, BOUNCE_TIME_MIN_MS } from './widgets/BounceTimeInput';
 import SettingsToggleGroup from './widgets/SettingsToggleGroup';
 import { TabsBox } from '@/components/ui/tabs-box';
 import type { 
   BinarySensorEntity, 
+  EventEntity,
   CoverEntity, 
   OutputEntity, 
   AreaEntity,
   RemoteDeviceEntity,
   Action,
 } from '@/types/config';
+import type { JsonSchema } from '@/types/jsonSchema';
+import type { ActionInput, OutputGroupRecord } from './ActionFields/types';
 import {
   Select,
   SelectContent,
@@ -32,24 +36,26 @@ interface BinarySensorFormProps {
   onSave: () => void;
   onCancel: () => void;
   isNew: boolean;
-  schema?: any;
+  schema?: JsonSchema;
   allBinarySensors?: BinarySensorEntity[];
-  allEvents?: any[];
+  allEvents?: EventEntity[];
   editingIndex?: number | null;
   allOutputs?: OutputEntity[];
-  allOutputGroups?: any[];
+  allOutputGroups?: OutputGroupRecord[];
   allCovers?: CoverEntity[];
   allAreas?: AreaEntity[];
   allRemoteDevices?: RemoteDeviceEntity[];
   /** Remote inputs for condition entity picker */
   allRemoteInputs?: Array<Record<string, unknown>>;
+  /** Virtual switches — flags with no hardware, usable in conditions. */
+  allVirtualSwitches?: Array<Record<string, unknown>>;
   onValidationChange?: (hasErrors: boolean) => void;
   /** Whether user attempted to submit (shows validation errors) */
   attemptedSubmit?: boolean;
   /** Saved (committed) outputs for comparison */
   savedOutputs?: OutputEntity[];
   /** Saved (committed) output groups for comparison */
-  savedOutputGroups?: any[];
+  savedOutputGroups?: OutputGroupRecord[];
   /** Saved (committed) covers for comparison */
   savedCovers?: CoverEntity[];
   /** Optional initial tab — when opened from binding matrix with a specific click type. */
@@ -68,6 +74,7 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
   allAreas = [],
   allRemoteDevices = [],
   allRemoteInputs = [],
+  allVirtualSwitches = [],
   editingIndex,
   onValidationChange,
   attemptedSubmit = false,
@@ -115,57 +122,57 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
   }, [validationErrors.length, onValidationChange]);
 
   // Extract enum values from schema
-  const deviceClassOptions = schema?.items?.properties?.device_class?.enum || [
+  const deviceClassOptions = (schema?.items?.properties?.device_class?.enum as string[] | undefined) || [
     'battery', 'battery_charging', 'carbon_monoxide', 'cold', 'connectivity',
     'door', 'garage_door', 'gas', 'heat', 'light', 'lock', 'moisture',
     'motion', 'moving', 'occupancy', 'opening', 'plug', 'power', 'presence',
     'problem', 'running', 'safety', 'smoke', 'sound', 'tamper', 'vibration', 'window'
   ];
 
-  const allBoneioInputs = schema?.items?.properties?.boneio_input?.enum || [];
+  const allBoneioInputs = (schema?.items?.properties?.boneio_input?.enum as string[] | undefined) || [];
   
   // Filter out already used inputs from both binary_sensor and event (except current one)
   // Case-insensitive comparison — see inputFilterUtils.ts for details
-  const { usedInputs, availableInputs } = getInputAvailability(
+  const { availableInputs } = getInputAvailability(
     allBoneioInputs, allBinarySensors, allEvents, editingIndex, 'binary_sensor',
   );
   const boneioInputOptions = buildInputOptions(availableInputs, data.boneio_input);
 
-  const rawActionTypeOptions = schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action?.enum || [
+  const rawActionTypeOptions = (schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action?.enum as string[] | undefined) || [
     'mqtt', 'output', 'cover', 'output_over_mqtt', 'cover_over_mqtt', 'remote_output', 'remote_cover'
   ];
   // Deduplicate: schema may provide both uppercase and lowercase variants
   const actionTypeOptions = [...new Set(rawActionTypeOptions.map((o: string) => o.toLowerCase()))] as string[];
 
-  const actionOutputOptions = schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_output?.enum || [
+  const actionOutputOptions = (schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_output?.enum as string[] | undefined) || [
     'TOGGLE', 'ON', 'OFF', 'BRIGHTNESS_UP', 'BRIGHTNESS_DOWN', 'BRIGHTNESS_UP_CYCLE', 'BRIGHTNESS_DOWN_CYCLE', 'SET_BRIGHTNESS', 'CYCLE_COLOR', 'CYCLE_PRESET'
   ];
 
-  const actionCoverOptions = schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_cover?.enum || [
-    'TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'TILT', 'TILT_OPEN', 'TILT_CLOSE'
+  const actionCoverOptions = (schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_cover?.enum as string[] | undefined) || [
+    'TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'SET_POSITION', 'TILT', 'TILT_OPEN', 'TILT_CLOSE'
   ];
 
-  const updateField = (field: keyof BinarySensorEntity, value: any) => {
+  const updateField = (field: keyof BinarySensorEntity, value: unknown) => {
     onChange({ ...data, [field]: value });
   };
 
-  const updateAction = (type: 'pressed' | 'released', index: number, field: string, value: any) => {
+  const updateAction = (type: 'pressed' | 'released', index: number, field: string, value: unknown) => {
     const actions = { ...data.actions };
     if (!actions[type]) actions[type] = [];
-    const updatedActions = [...actions[type]!];
+    const updatedActions: ActionInput[] = [...actions[type]!];
     
     // When changing action type, clean fields to only keep valid ones for new type
     if (field === 'action') {
       const currentAction = updatedActions[index];
-      updatedActions[index] = cleanActionFields(value, currentAction) as any;
+      updatedActions[index] = cleanActionFields(value as string, currentAction);
     } else if (field === '__batch') {
       // Batch update: value is an object with multiple fields to set at once
-      const current = { ...updatedActions[index] };
-      for (const [k, v] of Object.entries(value)) {
+      const current: Record<string, unknown> = { ...updatedActions[index] };
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         if (v === undefined) {
-          delete (current as any)[k];
+          delete current[k];
         } else {
-          (current as any)[k] = v;
+          current[k] = v;
         }
       }
       updatedActions[index] = current;
@@ -190,7 +197,8 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
       }
     }
     
-    actions[type] = updatedActions;
+    // The edited entries are raw records; they carry the Action fields the editor writes.
+    actions[type] = updatedActions as Action[];
     onChange({ ...data, actions });
   };
 
@@ -233,6 +241,8 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
         clickType={type}
         allBinarySensors={allBinarySensors}
         allRemoteInputs={allRemoteInputs}
+      allVirtualSwitches={allVirtualSwitches}
+        
         excludeEntityId={data.boneio_input}
         preferredArea={data.area}
       />
@@ -243,16 +253,18 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
     <div className="space-y-4">
       {/* Validation Errors - sticky at top - pokazuj tylko gdy użytkownik próbował zapisać */}
       {attemptedSubmit && validationErrors.length > 0 && (
-        <div className="alert alert-error sticky top-0 z-10 shadow-lg">
-          <div>
-            <h3 className="font-bold">{t('validation.errors')} ({validationErrors.length}):</h3>
+        <NoticeCallout
+          variant="error"
+          className="sticky top-0 z-10 bg-base-100 shadow-sm"
+          title={`${t('validation.errors')} (${validationErrors.length}):`}
+          message={
             <ul className="list-disc list-inside max-h-24 overflow-y-auto">
               {validationErrors.map((error, index) => (
                 <li key={index}>{error}</li>
               ))}
             </ul>
-          </div>
-        </div>
+          }
+        />
       )}
 
       <AiConfigAssistant
@@ -329,53 +341,45 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
                       value={data.boneio_input || ''}
                       onValueChange={(value) => updateField('boneio_input', value)}
                     >
-                      <SelectTrigger className={`w-full uppercase ${usedInputs.length > 0 && boneioInputOptions.length === 0 ? 'border-warning' : ''}`}>
+                      <SelectTrigger className={`w-full uppercase ${!data.boneio_input && boneioInputOptions.length === 0 ? 'border-warning' : ''}`}>
                         <SelectValue placeholder={t('inputs.select_input')} />
                       </SelectTrigger>
                       <SelectContent>
                         {boneioInputOptions.map((input: string) => (
                           <SelectItem key={input} value={input}>
                             {input}
+                            {mustNotBeActiveAtStartup(input) && (
+                              <FaExclamationTriangle className="inline ml-2 w-3 h-3 text-warning" title={t('inputs.not_active_at_startup_short')} aria-label={t('inputs.not_active_at_startup_short')} />
+                            )}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
-                    {usedInputs.length > 0 && boneioInputOptions.length === 1 && (
-                      <label className="label max-w-full">
-                        <span className="label-text-alt text-warning whitespace-normal break-all">
-                          {t('inputs.all_inputs_used')}
-                        </span>
-                      </label>
-                    )}
-                    {usedInputs.length > 0 && (
-                      <label className="label max-w-full">
-                        <span className="label-text-alt text-info whitespace-normal break-all">
-                          {t('inputs.used_inputs')}: {usedInputs.length > 5 
-                            ? `${usedInputs.slice(0, 3).join(', ')}, ... (+${usedInputs.length - 3} more)`
-                            : usedInputs.join(', ')
-                          }
-                        </span>
-                      </label>
+                    <PinAvailabilityHint
+                      available={availableInputs}
+                      total={allBoneioInputs.length}
+                      current={data.boneio_input}
+                      allUsedMessage={t('inputs.all_inputs_used')}
+                    />
+                    {mustNotBeActiveAtStartup(data.boneio_input) && (
+                      <NoticeCallout
+                        variant="warning"
+                        message={t('inputs.not_active_at_startup', { pin: data.boneio_input!.toUpperCase() })}
+                      />
                     )}
                   </div>
-
-                  <AreaSelect
-                    value={data.area}
-                    onChange={(v) => updateField('area', v)}
-                    areas={allAreas}
-                  />
 
                   <div className="form-control">
                     <label className="label">
                       <span className="label-text font-medium">{t('inputs.bounce_time')} (ms)</span>
                     </label>
-                    <NumericInput
-                      placeholder="120"
-                      value={convertTimeperiodToMilliseconds(data.bounce_time) || 120}
-                      onChange={(v) => updateField('bounce_time', v === '' ? 120 : v)}
+                    <BounceTimeInput
+                      value={data.bounce_time}
+                      defaultMs={120}
+                      onChange={(ms) => updateField('bounce_time', ms)}
                     />
                     <label className="label">
-                      <span className="label-text-alt">{t('inputs.bounce_time_hint')}</span>
+                      <span className="label-text-alt">{t('inputs.bounce_time_range', { min: BOUNCE_TIME_MIN_MS, max: BOUNCE_TIME_MAX_MS })}</span>
                     </label>
                   </div>
 
@@ -402,6 +406,12 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
                       </SelectContent>
                     </Select>
                   </div>
+
+                  <AreaSelect
+                    value={data.area}
+                    onChange={(v) => updateField('area', v)}
+                    areas={allAreas}
+                  />
                 </div>
 
                 <div className="divider">{t('settings.options')}</div>
@@ -428,13 +438,6 @@ const BinarySensorForm: React.FC<BinarySensorFormProps> = ({
                       description: t('inputs.initial_send_hint'),
                       checked: data.initial_send === true,
                       onChange: (checked) => updateField('initial_send', checked),
-                    },
-                    {
-                      key: 'clear_message',
-                      label: t('inputs.clear_message'),
-                      description: t('inputs.clear_message_hint'),
-                      checked: data.clear_message === true,
-                      onChange: (checked) => updateField('clear_message', checked),
                     },
                   ]}
                 />

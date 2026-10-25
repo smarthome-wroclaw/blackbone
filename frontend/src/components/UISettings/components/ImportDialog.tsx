@@ -1,3 +1,4 @@
+import { NoticeCallout } from '../ui';
 /**
  * ImportDialog - Dialog for confirming YAML/JSON import with merge/replace options.
  */
@@ -14,7 +15,7 @@ import {
 interface ImportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  importData: any[] | null;
+  importData: readonly unknown[] | null;
   importError: string | null;
   importMode: 'replace' | 'merge';
   onModeChange: (mode: 'replace' | 'merge') => void;
@@ -47,9 +48,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
         </DialogHeader>
         <div className="py-4 space-y-4">
           {importError ? (
-            <div className="alert alert-error">
-              <span>{importError}</span>
-            </div>
+            <NoticeCallout variant="error" message={importError} />
           ) : (
             <>
               <p>{t('import_export.import_confirm', { count: importData?.length || 0 })}</p>

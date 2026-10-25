@@ -1,15 +1,36 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
-  FaCheck,
-  FaExclamationTriangle,
   FaSpinner,
   FaUndo,
   FaRedo,
+  FaFileArchive,
 } from 'react-icons/fa';
-import SettingsCard from '../components/SettingsCard';
-import HelpLabel from '../components/HelpLabel';
 import { useTranslation } from '@/hooks/useTranslation';
 import axios from '@/api/axios';
+import {
+  SettingsPage,
+  SettingsCard,
+  FormField,
+  FormActions,
+  NoticeCallout,
+  EmptyState,
+} from '../ui';
+
+/** Answer of the factory-reset and restore-backup endpoints. */
+interface FactoryResetResult {
+  status: string;
+  message?: string;
+  backup_path?: string;
+  copied_files?: string[];
+  restart_required?: boolean;
+}
+
+/** One entry of the config backups listing. */
+interface ConfigBackup {
+  path: string;
+  timestamp: string;
+  file_count: number;
+}
 
 interface FactoryResetSectionProps {
   onRestartRequired: () => void;
@@ -20,21 +41,23 @@ interface FactoryResetSectionProps {
  */
 export default function FactoryResetSection({ onRestartRequired }: FactoryResetSectionProps) {
   const { t } = useTranslation();
-  const [showFactoryReset, setShowFactoryReset] = useState(false);
   const [deviceTypes, setDeviceTypes] = useState<string[]>([]);
   const [hardwareVersions, setHardwareVersions] = useState<string[]>([]);
   const [hardwareSensors, setHardwareSensors] = useState<Record<string, { temp_sensor: string; has_ina219: boolean; power_sensor?: string | null }>>({});
   const [selectedDeviceType, setSelectedDeviceType] = useState<string | null>(null);
   const [selectedHardwareVersion, setSelectedHardwareVersion] = useState<string>('0.8');
   const [isResettingFactory, setIsResettingFactory] = useState(false);
-  const [factoryResetResult, setFactoryResetResult] = useState<any>(null);
-  const [configBackups, setConfigBackups] = useState<any[]>([]);
+  const [factoryResetResult, setFactoryResetResult] = useState<FactoryResetResult | null>(null);
+  const [configBackups, setConfigBackups] = useState<ConfigBackup[]>([]);
   const [showConfigBackups, setShowConfigBackups] = useState(false);
 
   const fetchDeviceTypes = useCallback(async () => {
     try {
       const { data } = await axios.get('/api/factory_reset/device_types');
       setDeviceTypes(data.device_types || []);
+      // What this controller is now, as the version below: a reset usually
+      // keeps both, and either can still be changed.
+      if (data.current) setSelectedDeviceType((chosen) => chosen ?? data.current);
     } catch (err) {
       console.error('Error fetching device types:', err);
     }
@@ -45,6 +68,7 @@ export default function FactoryResetSection({ onRestartRequired }: FactoryResetS
       const { data } = await axios.get('/api/factory_reset/hardware_versions');
       setHardwareVersions(data.versions || []);
       setHardwareSensors(data.sensors || {});
+      if (data.current) setSelectedHardwareVersion(data.current);
     } catch (err) {
       console.error('Error fetching hardware versions:', err);
     }
@@ -59,8 +83,18 @@ export default function FactoryResetSection({ onRestartRequired }: FactoryResetS
     }
   }, []);
 
+  useEffect(() => {
+    fetchDeviceTypes();
+    fetchHardwareVersions();
+    fetchConfigBackups();
+  }, [fetchDeviceTypes, fetchHardwareVersions, fetchConfigBackups]);
+
   const performFactoryReset = async () => {
     if (!selectedDeviceType) return;
+
+    if (!confirm(t('device_management.confirm_factory_reset') || 'Are you sure you want to perform a factory reset? All settings will be replaced with defaults.')) {
+      return;
+    }
 
     setIsResettingFactory(true);
     setFactoryResetResult(null);
@@ -95,200 +129,176 @@ export default function FactoryResetSection({ onRestartRequired }: FactoryResetS
   };
 
   return (
-    <SettingsCard
-      icon={<FaRedo />}
-      title={t('device_management.factory_reset')}
-      toggleButtonText={t('device_management.show_factory_reset')}
-      toggleButtonTextExpanded={t('common.close')}
-      isExpanded={showFactoryReset}
-      onToggle={() => {
-        setShowFactoryReset(!showFactoryReset);
-        if (!showFactoryReset) {
-          fetchDeviceTypes();
-          fetchHardwareVersions();
-          fetchConfigBackups();
+    <SettingsPage>
+      {/* Factory reset */}
+      <SettingsCard
+        variant="danger"
+        icon={<FaRedo />}
+        title={t('device_management.factory_reset')}
+        footer={
+          <FormActions>
+            <button
+              className="btn btn-error btn-sm gap-2"
+              onClick={performFactoryReset}
+              disabled={!selectedDeviceType || isResettingFactory}
+            >
+              {isResettingFactory ? (
+                <>
+                  <FaSpinner className="animate-spin" />
+                  {t('device_management.resetting')}
+                </>
+              ) : (
+                <>
+                  <FaRedo />
+                  {t('device_management.reset_to_factory')}
+                </>
+              )}
+            </button>
+          </FormActions>
         }
-      }}
-      expandableContent={
+      >
         <div className="space-y-4">
-          <div className="alert alert-warning">
-            <FaExclamationTriangle />
-            <span>{t('device_management.factory_reset_warning')}</span>
-          </div>
+          <NoticeCallout
+            variant="warning"
+            message={t('device_management.factory_reset_warning')}
+          />
 
-          <div className="form-control">
-            <label className="label">
-              <span className="label-text font-medium">
-                {t('device_management.select_device_type')}
-              </span>
-            </label>
-            <select
-              className="select select-bordered w-full max-w-xs"
-              value={selectedDeviceType || ''}
-              onChange={e => setSelectedDeviceType(e.target.value || null)}
-            >
-              <option value="">
-                {t('device_management.select_device_type_placeholder')}
-              </option>
-              {deviceTypes.map(type => (
-                <option key={type} value={type}>
-                  {type === '24x16'
-                    ? 'boneIO 24x16A'
-                    : type === '32x10'
-                      ? 'boneIO 32x10A'
-                      : type === '48x4'
-                        ? 'boneIO 48x4A (DISCONTINUED)'
-                        : type === 'cover'
-                          ? 'boneIO Cover'
-                          : type === 'cover_mix'
-                            ? 'boneIO Cover Mix'
-                            : type}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <FormField label={t('device_management.select_device_type')}>
+              <select
+                className="select select-bordered w-full"
+                value={selectedDeviceType || ''}
+                onChange={e => setSelectedDeviceType(e.target.value || null)}
+              >
+                <option value="">
+                  {t('device_management.select_device_type_placeholder')}
                 </option>
-              ))}
-            </select>
-          </div>
+                {deviceTypes.map(type => (
+                  <option key={type} value={type}>
+                    {type === '24x16'
+                      ? 'boneIO 24x16A'
+                      : type === '32x10'
+                        ? 'boneIO 32x10A'
+                        : type === '48x4'
+                          ? 'boneIO 48x4A (DISCONTINUED)'
+                          : type === 'cover'
+                            ? 'boneIO Cover'
+                            : type === 'cover_mix'
+                              ? 'boneIO Cover Mix'
+                              : type}
+                  </option>
+                ))}
+              </select>
+            </FormField>
 
-          <div className="form-control">
-            <label className="label">
-              <span className="label-text font-medium">
-                {t('device_management.select_hardware_version')}
-              </span>
-            </label>
-            <select
-              className="select select-bordered w-full max-w-xs"
-              value={selectedHardwareVersion}
-              onChange={e => setSelectedHardwareVersion(e.target.value)}
+            <FormField
+              label={t('device_management.select_hardware_version')}
+              help={t('device_management.hardware_version_help')}
             >
-              {hardwareVersions.map(version => (
-                <option key={version} value={version}>
-                  v{version}
-                  {hardwareSensors[version] && (
-                    ` (${hardwareSensors[version].temp_sensor}${
-                      hardwareSensors[version].power_sensor
-                        ? ` + ${hardwareSensors[version].power_sensor!.toUpperCase()}`
-                        : hardwareSensors[version].has_ina219
-                        ? ' + INA219'
-                        : ''
-                    })`
-                  )}
-                </option>
-              ))}
-            </select>
-            <HelpLabel>{t('device_management.hardware_version_help')}</HelpLabel>
+              <select
+                className="select select-bordered w-full"
+                value={selectedHardwareVersion}
+                onChange={e => setSelectedHardwareVersion(e.target.value)}
+              >
+                {hardwareVersions.map(version => (
+                  <option key={version} value={version}>
+                    v{version}
+                    {hardwareSensors[version] && (
+                      ` (${hardwareSensors[version].temp_sensor}${
+                        hardwareSensors[version].power_sensor
+                          ? ` + ${hardwareSensors[version].power_sensor!.toUpperCase()}`
+                          : hardwareSensors[version].has_ina219
+                          ? ' + INA219'
+                          : ''
+                      })`
+                    )}
+                  </option>
+                ))}
+              </select>
+            </FormField>
           </div>
-
-          <button
-            className="btn btn-outline btn-error"
-            onClick={performFactoryReset}
-            disabled={!selectedDeviceType || isResettingFactory}
-          >
-            {isResettingFactory ? (
-              <>
-                <FaSpinner className="animate-spin mr-2" />
-                {t('device_management.resetting')}
-              </>
-            ) : (
-              <>
-                <FaRedo className="mr-2" />
-                {t('device_management.reset_to_factory')}
-              </>
-            )}
-          </button>
 
           {factoryResetResult && (
-            <div
-              className={`alert ${factoryResetResult.status === 'success' ? 'alert-success' : 'alert-error'} mt-4`}
-            >
-              {factoryResetResult.status === 'success' ? (
-                <FaCheck className="shrink-0" />
-              ) : (
-                <FaExclamationTriangle className="shrink-0" />
-              )}
-              <div className="text-sm min-w-0 flex-1">
-                <p className="wrap-break-word">{factoryResetResult.message}</p>
-                {factoryResetResult.backup_path && (
-                  <p className="text-xs opacity-70 mt-1 break-all">
-                    {t('device_management.backup_created')}: {factoryResetResult.backup_path}
-                  </p>
-                )}
-                {factoryResetResult.copied_files && (
-                  <p className="text-xs opacity-70 mt-1 wrap-break-word">
-                    {t('device_management.copied_files')}:{' '}
-                    {factoryResetResult.copied_files.join(', ')}
-                  </p>
-                )}
-                {factoryResetResult.restart_required && (
-                  <p className="text-xs font-semibold mt-2">
-                    {t('device_management.restart_required')}
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Config Backups */}
-          <div className="divider">{t('device_management.config_backups')}</div>
-
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => {
-              setShowConfigBackups(!showConfigBackups);
-              if (!showConfigBackups) fetchConfigBackups();
-            }}
-          >
-            {showConfigBackups
-              ? t('device_management.hide_config_backups').replace(
-                  '{count}',
-                  String(configBackups.length)
-                )
-              : t('device_management.show_config_backups').replace(
-                  '{count}',
-                  String(configBackups.length)
-                )}
-          </button>
-
-          {showConfigBackups && (
-            <div className="mt-2">
-              {configBackups.length === 0 ? (
-                <p className="text-sm opacity-70">
-                  {t('device_management.no_config_backups')}
-                </p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="table table-sm">
-                    <thead>
-                      <tr>
-                        <th>{t('device_management.date')}</th>
-                        <th>{t('device_management.files')}</th>
-                        <th>{t('device_management.actions')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {configBackups.map(backup => (
-                        <tr key={backup.path}>
-                          <td>{backup.timestamp.replace('_', ' ')}</td>
-                          <td>
-                            {backup.file_count} {t('device_management.yaml_files')}
-                          </td>
-                          <td>
-                            <button
-                              className="btn btn-warning btn-xs"
-                              onClick={() => restoreConfigBackup(backup.path)}
-                            >
-                              <FaUndo />
-                              {t('device_management.restore')}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            <NoticeCallout
+              variant={factoryResetResult.status === 'success' ? 'success' : 'error'}
+              message={
+                <>
+                  <span className="block wrap-break-word">{factoryResetResult.message}</span>
+                  {factoryResetResult.backup_path && (
+                    <span className="block text-xs opacity-70 mt-1 break-all">
+                      {t('device_management.backup_created')}: {factoryResetResult.backup_path}
+                    </span>
+                  )}
+                  {factoryResetResult.copied_files && (
+                    <span className="block text-xs opacity-70 mt-1 wrap-break-word">
+                      {t('device_management.copied_files')}:{' '}
+                      {factoryResetResult.copied_files.join(', ')}
+                    </span>
+                  )}
+                  {factoryResetResult.restart_required && (
+                    <span className="block text-xs font-semibold mt-2">
+                      {t('device_management.restart_required')}
+                    </span>
+                  )}
+                </>
+              }
+            />
           )}
         </div>
-      }
-    />
+      </SettingsCard>
+
+      {/* Config backups */}
+      <SettingsCard
+        icon={<FaFileArchive />}
+        title={t('device_management.config_backups')}
+        collapsible
+        open={showConfigBackups}
+        onOpenChange={(next) => {
+          setShowConfigBackups(next);
+          if (next) fetchConfigBackups();
+        }}
+        summary={configBackups.length}
+      >
+        {showConfigBackups ? (
+          configBackups.length === 0 ? (
+            <EmptyState
+              icon={<FaFileArchive />}
+              title={t('device_management.no_config_backups')}
+            />
+          ) : (
+            <div className="stg-inset overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>{t('device_management.date')}</th>
+                    <th>{t('device_management.files')}</th>
+                    <th className="text-right">{t('device_management.actions')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {configBackups.map(backup => (
+                    <tr key={backup.path}>
+                      <td className="font-mono text-xs">{backup.timestamp.replace('_', ' ')}</td>
+                      <td>
+                        {backup.file_count} {t('device_management.yaml_files')}
+                      </td>
+                      <td className="text-right">
+                        <button
+                          className="btn btn-warning btn-xs gap-1.5"
+                          onClick={() => restoreConfigBackup(backup.path)}
+                        >
+                          <FaUndo />
+                          {t('device_management.restore')}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : null}
+      </SettingsCard>
+    </SettingsPage>
   );
 }

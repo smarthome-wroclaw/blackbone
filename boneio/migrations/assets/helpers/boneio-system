@@ -1,0 +1,2556 @@
+#!/usr/bin/env python3
+"""boneio-system — the remaining privileged system operations, by name.
+
+Three features needed root and got it the two worst ways available: a broad
+sudo rule, or an API endpoint that asked the operator for their system password.
+The password is the same on every controller that shipped, so an endpoint
+collecting it is a way to intercept it; and the rules it stood in for were
+wildcards — ``ip link set can0 *`` and a ``sed -i`` expression built in the
+application and run as root on /boot/uEnv.txt.
+
+This replaces both with named operations:
+
+    can-up <iface> <bitrate>       down, set bitrate, up
+    can-down <iface>
+    can-restart <iface>            recover from bus-off without a full cycle
+    overlay-get                    read the device-tree overlay from uEnv.txt
+    overlay-set <basename>         change it, from a fixed list of overlays
+    hostname-set <name>
+    ntp-get                        read the configured NTP servers
+    ntp-set <servers|default>      point systemd-timesyncd at given servers
+    mqtt-password <account>        set a broker password, read from stdin
+    mqtt-reload                    have the broker re-read its password file
+    mqtt-tls-state                 the broker's TLS mode and whether it has a certificate
+    mqtt-tls-cert                  install the broker's certificate and key, from stdin
+    mqtt-tls-cert-remove           remove them, while TLS is off
+    mqtt-tls-mode <off|optional|required>  TLS on 8883, beside or instead of 1883
+    service-password-state         is the boneio login locked, shipped or set
+    service-password-init          set it once, from stdin — see below
+    service-password-change        passwd: current and new, from stdin
+    os-update-state                apt: last run, reboot needed, will the kernel boot
+    os-update-start <check|upgrade>  run apt in its own unit, return at once
+    os-update-run <check|upgrade>  what that unit runs; refused anywhere else
+    os-update-log                  the end of the last run's log
+    os-autoupdate-set <on|off>     automatic security updates (never a reboot)
+
+Every argument is checked against a closed set before anything runs, and the
+uEnv.txt edit is done here with a compiled pattern rather than by handing a
+``sed`` expression to root. The sudoers rule for this helper is NOPASSWD, which
+is safe precisely because the vocabulary is closed. The only verb that reads a
+password to authorise itself is service-password-change, and the password it
+wants is the one sudo would have asked for.
+
+Exit codes:
+    0  success
+    1  refused, or the underlying command failed
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import ipaddress
+import json
+import logging
+import logging.handlers
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+LOG_FILE = "/var/log/boneio-system.log"
+
+#: The CAN interfaces this board has, plus the virtual one the schema allows for
+#: testing. A name from the caller would otherwise reach `ip link set`, where it
+#: is not just a device but a namespace and a rename away from something else.
+CAN_INTERFACES = ("can0", "can1", "vcan0")
+#: Bitrates the schema accepts, and only those. Kept identical to the `allowed`
+#: list under `can.bitrate` in boneio/schema/schema.yaml: a helper that takes
+#: more than the schema does is a wider grant than anything can ask for, and one
+#: that takes fewer silently breaks a configuration the schema called valid.
+CAN_BITRATES = (10_000, 20_000, 50_000, 100_000, 125_000, 250_000, 500_000,
+                1_000_000)
+
+#: Device-tree overlays shipped for this board. The application already kept
+#: this list to reject unknown filenames; it is repeated here because the
+#: helper cannot trust the application's copy of it.
+VALID_OVERLAYS = (
+    "BONEIO-BLACK-PINS-v0.2-v0.3.dtbo",
+    "BONEIO-BLACK-PINS-v0.4-v0.8.dtbo",
+    "BONEIO-BLACK-PINS-v1.0.dtbo",
+    "BONEIO-BLACK-PINS.dtbo",
+)
+
+#: Overlays boneIO itself ships, installed here by migrations. The image put
+#: its overlays into /boot/dtbs once and nothing updates them after, so this
+#: is the only way a corrected overlay reaches a controller: a file here is
+#: the version every kernel's copy of that name must match.
+SHIPPED_OVERLAYS_DIR = Path("/usr/lib/boneio/overlays")
+
+UENV_PATHS = (Path("/boot/firmware/uEnv.txt"), Path("/boot/uEnv.txt"))
+
+#: An uncommented uboot_overlay_addr line naming a boneIO overlay, with or
+#: without a directory prefix. Compiled here rather than passed to `sed -i` as
+#: an expression the application composes.
+_OVERLAY_LINE_RE = re.compile(
+    r"^(?P<indent>[^\S\n]*)"
+    r"(?P<key>uboot_overlay_addr[0-9]*=)"
+    r"(?P<dir>.*/)?"
+    r"(?P<name>BONEIO-BLACK-PINS[^\s]*)"
+    r"(?P<rest>.*)$"
+)
+
+#: A hostname: DNS label rules, which is stricter than hostnamectl's own.
+_HOSTNAME_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+#: Where the NTP servers chosen in the web UI are written. A drop-in rather than
+#: timesyncd.conf itself, so the distribution's file stays untouched and
+#: "use the defaults" is a file deletion rather than an edit that has to guess
+#: what the defaults were.
+NTP_DROPIN = Path("/etc/systemd/timesyncd.conf.d/boneio.conf")
+
+#: At most this many servers. systemd accepts more; the UI offers this many and
+#: a bounded list keeps the generated file a fixed, reviewable shape.
+NTP_MAX_SERVERS = 5
+
+#: The broker's password file, and the accounts the application manages in it.
+#: Naming them here rather than taking any account keeps this from becoming a
+#: way to add a broker login nobody asked for.
+MOSQUITTO_PASSWD = Path("/etc/mosquitto/passwd")
+MQTT_ACCOUNTS = ("boneio", "homeassistant", "mqtt")
+#: mosquitto_passwd rewrites the file with a mode of its own, so the permissions
+#: have to be re-applied after every write. Found the hard way: the file shipped
+#: 0644 and was seen at 0704, which let any local account take the hashes for an
+#: offline crack (F-11). The broker runs as its own user, so the group read bit
+#: has to stay or the fix takes the broker down with the exposure.
+MOSQUITTO_PASSWD_MODE = 0o640
+MOSQUITTO_PASSWD_OWNER = ("root", "mosquitto")
+
+#: The broker configuration boneIO manages, in exactly one of the shapes in
+#: MOSQUITTO_CONFS. Anything else is somebody's hand edit, and the TLS verbs
+#: refuse to overwrite it rather than guess which parts matter.
+MOSQUITTO_CONF = Path("/etc/mosquitto/conf.d/boneio.conf")
+MOSQUITTO_CONF_OWNER = ("mosquitto", "mosquitto")
+MOSQUITTO_CONF_MODE = 0o600
+#: Debian's own directory for broker certificates, 0755 root. The key is
+#: protected by its own mode; the certificate is public and stays readable so
+#: the panel can describe it and hand out the CA at the end of its chain.
+MOSQUITTO_CERT_DIR = Path("/etc/mosquitto/certs")
+MOSQUITTO_CERT = MOSQUITTO_CERT_DIR / "boneio.crt"
+MOSQUITTO_KEY = MOSQUITTO_CERT_DIR / "boneio.key"
+MOSQUITTO_TLS_OWNER = ("root", "mosquitto")
+MOSQUITTO_CERT_MODE = 0o644
+MOSQUITTO_KEY_MODE = 0o640
+MQTT_PLAIN_PORT = 1883
+MQTT_TLS_PORT = 8883
+MQTT_TLS_MODES = ("off", "optional", "required")
+#: A chain and a key are a few kilobytes.
+MQTT_TLS_MAX_BYTES = 64 * 1024
+#: How long a restarted broker gets to open its listeners before a change is
+#: rolled back. A BeagleBone needs about two seconds.
+MQTT_TLS_START_TIMEOUT = 20.0
+
+#: ``off`` is byte for byte what migration 1.3.0 installs, so turning TLS off
+#: returns a device to the state every other one is in. ``required`` keeps 1883
+#: on loopback: boneIO and anything else on the controller keep connecting
+#: without TLS, where the traffic never leaves the device.
+_MOSQUITTO_PLAIN = "listener 1883\npassword_file /etc/mosquitto/passwd\n"
+_MOSQUITTO_LOOPBACK = "listener 1883 127.0.0.1\npassword_file /etc/mosquitto/passwd\n"
+_MOSQUITTO_TLS = (
+    "\n# TLS for the network. Written by boneio-system mqtt-tls-mode.\n"
+    "listener 8883\n"
+    "certfile /etc/mosquitto/certs/boneio.crt\n"
+    "keyfile /etc/mosquitto/certs/boneio.key\n"
+)
+MOSQUITTO_CONFS = {
+    "off": _MOSQUITTO_PLAIN,
+    "optional": _MOSQUITTO_PLAIN + _MOSQUITTO_TLS,
+    "required": _MOSQUITTO_LOOPBACK + _MOSQUITTO_TLS,
+}
+#: One PEM block. The body alphabet has no room for the ``Proc-Type`` header of
+#: an encrypted traditional key, so such a key is refused as unknown text.
+_PEM_BLOCK_RE = re.compile(
+    r"-----BEGIN ([A-Z ]+)-----\r?\n[A-Za-z0-9+/=\r\n]+?-----END \1-----[ \t]*(?:\r?\n|$)"
+)
+_PEM_KEY_TYPES = ("PRIVATE KEY", "EC PRIVATE KEY", "RSA PRIVATE KEY")
+
+#: The login this helper serves, and the only account whose password it may
+#: touch. Not a parameter: a verb that set "an account's password" would be a
+#: way to give any local account a password its owner never chose.
+SERVICE_ACCOUNT = "boneio"
+SHADOW = Path("/etc/shadow")
+#: What every image before 1.6 shipped as that account's password, identical on
+#: every unit and published. Recognised so the panel can say it is still there;
+#: never written by this helper.
+SHIPPED_PASSWORD = "Black"
+#: Written once the owner's password has been set. Root-owned and outside the
+#: application's reach, so the one-shot cannot be re-armed by relocking the
+#: account — see _service_password_init.
+SERVICE_PASSWORD_FLAG = Path("/var/lib/boneio/service-password.set")
+#: Generous, and well above anything a person types. chpasswd has no limit of
+#: its own worth relying on, and a caller able to hand root a megabyte on stdin
+#: is a caller who should be told no.
+SERVICE_PASSWORD_MAX = 1024
+#: The panel's own minimum, so a password it would refuse is not taken here.
+SERVICE_PASSWORD_MIN = 8
+#: When service-password-change was last given a wrong current password, as a
+#: JSON list of timestamps. Root-only, in a directory boneio cannot write, so
+#: the count cannot be reset by deleting the file.
+SERVICE_PASSWORD_ATTEMPTS = Path("/var/lib/boneio/service-password-change.json")
+#: At most this many wrong current passwords in the window, then the change is
+#: refused until the oldest ages out. Global, not per caller: there is one
+#: account, and anyone holding boneio can call this helper without the panel.
+SERVICE_PASSWORD_MAX_FAILURES = 5
+SERVICE_PASSWORD_WINDOW = 15 * 60
+#: Seconds each wrong password costs, taken while the lock is held so parallel
+#: callers queue behind it. What pam_faildelay would do for a login.
+SERVICE_PASSWORD_FAIL_DELAY = 2.0
+
+#: One DNS name. Addresses are validated with :mod:`ipaddress` instead, so this
+#: only has to cover hostnames.
+#:
+#: The point of validating at all is not that systemd would choke on a bad name.
+#: It is that this value is written into a systemd configuration file: a space,
+#: a newline or a bracket in it would let the caller append directives of their
+#: own to a file parsed as root. The character set below has no way to express
+#: any of that.
+_NTP_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
+    r"(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$"
+)
+
+#: This helper's own path: the transient update unit runs it again, as root,
+#: outside boneio.service.
+HELPER_SELF = "/usr/sbin/boneio-system"
+#: What the caller may ask of apt. Nothing else reaches it.
+OS_UPDATE_MODES = ("check", "upgrade")
+#: A fixed name, so systemd itself refuses a second update while one runs.
+OS_UPDATE_UNIT = "boneio-os-update.service"
+OS_UPDATE_STATE = Path("/var/lib/boneio/os-update/state.json")
+OS_UPDATE_LOG = Path("/var/log/boneio-os-update.log")
+OS_UPDATE_LOG_TAIL = 400
+#: The least an upgrade starts with, however small apt says it is. A kernel
+#: upgrade alone unpacks ~60 MB and builds an initramfs next to the old one; the
+#: eMMC rootfs has little to spare.
+OS_UPDATE_MIN_FREE_MB = 300
+#: Added to what apt reports before an upgrade is let through. apt's figures are
+#: the downloads plus the packages' installed size; they leave out the new
+#: kernel's initramfs, the copies dpkg keeps of the files it replaces until each
+#: package is in, and the log. A year-old controller has well over a hundred
+#: packages to bring in, and 300 MB flat let one of them fill / to zero halfway.
+OS_UPDATE_MARGIN_MB = 100
+#: Packages apt downloaded earlier, unattended-upgrades included. It clears
+#: them only after a successful upgrade, so on a small eMMC they can be what
+#: keeps the next one from starting. apt downloads again whatever it needs.
+APT_ARCHIVES = Path("/var/cache/apt/archives")
+#: Debian writes these only when a package asks; the kernel check below is what
+#: actually tells a BeagleBone it needs a reboot.
+REBOOT_REQUIRED = Path("/run/reboot-required")
+REBOOT_REQUIRED_PKGS = Path("/run/reboot-required.pkgs")
+#: Packages whose new code is not in use until the device restarts.
+REBOOT_PACKAGE_PREFIXES = ("linux-image", "libc6", "systemd", "dbus", "libssl")
+BOOT_DIR = Path("/boot")
+#: What U-Boot merged into the running device tree. Every boneIO overlay adds an
+#: entry named after itself here, whatever path it was loaded from.
+DT_CHOSEN_OVERLAYS = Path("/proc/device-tree/chosen/overlays")
+#: A clean environment for apt: nothing from the caller's is passed through.
+#: NEEDRESTART_MODE=l lists stale services instead of restarting them — the
+#: panel asks for a reboot instead of services bouncing under the operator.
+APT_ENV = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LC_ALL": "C",
+    "DEBIAN_FRONTEND": "noninteractive",
+    "NEEDRESTART_MODE": "l",
+    "APT_LISTCHANGES_FRONTEND": "none",
+}
+#: --force-confold keeps configuration files the device has changed. Migrations
+#: install mosquitto, sshd and journald settings; a package upgrade that put the
+#: distribution's defaults back would silently undo that hardening.
+APT_OPTIONS = (
+    "-o", "DPkg::Lock::Timeout=300",
+    "-o", "Dpkg::Options::=--force-confdef",
+    "-o", "Dpkg::Options::=--force-confold",
+)
+#: Caddy's third-party apt repository. A bad or rotated key there must not stop
+#: the distribution's own updates, so the update step can run without it.
+APT_SOURCE_PARTS = Path("/etc/apt/sources.list.d")
+CADDY_APT_LIST = APT_SOURCE_PARTS / "caddy-stable.list"
+#: Automatic security updates: the switch the panel flips, and the timers that
+#: run them. The origin restriction and the no-reboot rule live in
+#: 52boneio-unattended, which this helper never writes.
+AUTOUPDATE_PERIODIC = Path("/etc/apt/apt.conf.d/52boneio-periodic")
+AUTOUPDATE_TIMERS = ("apt-daily.timer", "apt-daily-upgrade.timer")
+AUTOUPDATE_LOG = Path("/var/log/unattended-upgrades/unattended-upgrades.log")
+AUTOUPDATE_BINARY = Path("/usr/bin/unattended-upgrade")
+_PERIODIC_TEMPLATE = (
+    "// Installed by boneIO migration 1.6.22; switched from the panel through\n"
+    "// boneio-system os-autoupdate-set. Overrides 20auto-upgrades.\n"
+    'APT::Periodic::Update-Package-Lists "{value}";\n'
+    'APT::Periodic::Unattended-Upgrade "{value}";\n'
+)
+_PERIODIC_ON_RE = re.compile(r'^APT::Periodic::Unattended-Upgrade\s+"1";', re.MULTILINE)
+#: ``2026-09-25 06:31:12,114 INFO Packages that will be upgraded: libssl3t64 openssl``
+_UNATTENDED_PACKAGES_RE = re.compile(
+    r"^(?P<when>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ INFO Packages that will be upgraded: (?P<pkgs>.*)$"
+)
+_UNATTENDED_RUN_RE = re.compile(
+    r"^(?P<when>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ INFO Starting unattended upgrades script"
+)
+
+#: ``Inst libssl3t64 [3.5.1-1] (3.5.4-1~deb13u1 Debian-Security:13/stable [armhf])``
+#: — the bracketed installed version is absent for a package that is new.
+_APT_INST_RE = re.compile(
+    r"^Inst (?P<name>\S+) (?:\[(?P<old>[^\]]+)\] )?\((?P<new>\S+)"
+)
+#: ``Need to get 44.4 MB of archives.`` — or ``12.3 MB/44.4 MB`` when part of
+#: it is already downloaded; the first figure is what is still to come.
+_APT_NEED_RE = re.compile(r"^Need to get (?P<size>[\d.,]+ ?[kMGT]?B)\b", re.MULTILINE)
+#: ``After this operation, 59.0 MB of additional disk space will be used.``, or
+#: ``… 3072 kB disk space will be freed.``
+_APT_AFTER_RE = re.compile(
+    r"^After this operation, (?P<size>[\d.,]+ ?[kMGT]?B) (?:of additional )?disk space "
+    r"will be (?P<way>used|freed)",
+    re.MULTILINE,
+)
+_APT_SIZE_RE = re.compile(r"^(?P<num>[\d.,]+) ?(?P<unit>[kMGT]?)B$")
+_APT_UNITS = {"": 1, "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12}
+
+VERBS = (
+    "can-up", "can-down", "can-restart", "overlay-get", "overlay-set",
+    "overlay-repair",
+    "hostname-set",
+    "ntp-get", "ntp-set",
+    "mqtt-password", "mqtt-reload",
+    "mqtt-tls-state", "mqtt-tls-cert", "mqtt-tls-cert-remove", "mqtt-tls-mode",
+    "service-password-state", "service-password-init", "service-password-change",
+    "os-update-state", "os-update-start", "os-update-run", "os-update-log",
+    "os-autoupdate-set",
+    "disk-usage", "disk-clean",
+)
+
+
+def _configure_logging() -> logging.Logger:
+    """Set up logging without making the log file a hard requirement.
+
+    Returns:
+        The helper's logger.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    try:
+        handlers.append(
+            logging.handlers.RotatingFileHandler(
+                LOG_FILE, maxBytes=524_288, backupCount=1, encoding="utf-8"
+            )
+        )
+    except OSError as exc:
+        print(f"boneio-system: cannot open {LOG_FILE}: {exc}", file=sys.stderr)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=handlers,
+    )
+    return logging.getLogger("boneio-system")
+
+
+_LOGGER = _configure_logging()
+
+
+class Refused(Exception):
+    """The request was rejected; nothing was run."""
+
+
+def _assert_root() -> None:
+    """Exit unless running as root."""
+    if os.geteuid() != 0:
+        _LOGGER.error("boneio-system must be run as root via sudo.")
+        sys.exit(1)
+
+
+def _run(argv: list[str], timeout: int = 30, tolerate: bool = False) -> int:
+    """Run a fixed command.
+
+    Args:
+        argv: The command.
+        timeout: Seconds to allow.
+        tolerate: Report a failure but do not treat it as one.
+
+    Returns:
+        Process exit status, or 0 when *tolerate* and it failed.
+    """
+    _LOGGER.info("RUN: %s", " ".join(argv))
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _LOGGER.error("timed out after %ds: %s", timeout, " ".join(argv))
+        return 0 if tolerate else 1
+    except OSError as exc:
+        _LOGGER.error("cannot run %s: %s", argv[0], exc)
+        return 0 if tolerate else 1
+
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.returncode != 0:
+        _LOGGER.log(
+            logging.WARNING if tolerate else logging.ERROR,
+            "rc=%d: %s", result.returncode, result.stderr.strip(),
+        )
+        if not tolerate:
+            sys.stderr.write(result.stderr)
+    return 0 if tolerate else result.returncode
+
+
+# ------------------------------------------------------------------------ CAN
+
+
+def _check_interface(name: str | None) -> str:
+    """Validate a CAN interface name.
+
+    Args:
+        name: Candidate name.
+
+    Returns:
+        The name.
+
+    Raises:
+        Refused: If it is not one of this board's interfaces.
+    """
+    if name not in CAN_INTERFACES:
+        raise Refused(
+            f"not a CAN interface on this board: {name!r}. Allowed: "
+            f"{', '.join(CAN_INTERFACES)}"
+        )
+    return name
+
+
+def _can_up(interface: str | None, bitrate: str | None) -> int:
+    """Bring a CAN interface up at a given bitrate.
+
+    Args:
+        interface: ``can0`` or ``can1``.
+        bitrate: One of :data:`CAN_BITRATES`, as text.
+
+    Returns:
+        Process exit status.
+
+    Raises:
+        Refused: If either argument is not in its allowed set.
+    """
+    interface = _check_interface(interface)
+    if bitrate is None or not bitrate.isdigit() or int(bitrate) not in CAN_BITRATES:
+        raise Refused(
+            f"unsupported bitrate: {bitrate!r}. Allowed: "
+            f"{', '.join(str(rate) for rate in CAN_BITRATES)}"
+        )
+
+    # Down first, tolerating an interface that was not up.
+    _run(["ip", "link", "set", interface, "down"], tolerate=True)
+    status = _run(
+        ["ip", "link", "set", interface, "type", "can", "bitrate", bitrate]
+    )
+    if status != 0:
+        return status
+    return _run(["ip", "link", "set", interface, "up"])
+
+
+def _can_restart(interface: str | None) -> int:
+    """Bring a CAN controller out of bus-off.
+
+    A controller that has counted too many errors stops transmitting until it is
+    restarted. The bring-up cycle does that too — down clears the state and up
+    starts a fresh controller — but this is the primitive the kernel offers for
+    exactly that job, and it keeps the configured bitrate, so a recovery does not
+    have to know what the bus is running at.
+
+    Args:
+        interface: ``can0``, ``can1`` or ``vcan0``.
+
+    Returns:
+        Process exit status.
+    """
+    return _run(
+        ["ip", "link", "set", _check_interface(interface), "type", "can", "restart"]
+    )
+
+
+def _can_down(interface: str | None) -> int:
+    """Take a CAN interface down.
+
+    Args:
+        interface: ``can0`` or ``can1``.
+
+    Returns:
+        Process exit status.
+    """
+    return _run(["ip", "link", "set", _check_interface(interface), "down"])
+
+
+# -------------------------------------------------------------------- overlay
+
+
+def _find_uenv() -> Path:
+    """The active uEnv.txt.
+
+    Returns:
+        Its path.
+
+    Raises:
+        Refused: If there is none.
+    """
+    for path in UENV_PATHS:
+        if path.is_file() and not path.is_symlink():
+            return path
+    raise Refused(f"no uEnv.txt at any of {[str(p) for p in UENV_PATHS]}")
+
+
+def _overlay_get() -> int:
+    """Print the overlay currently configured in uEnv.txt.
+
+    The one U-Boot uses, so the same line the kernel check reads.
+
+    Returns:
+        0, with the overlay name on stdout, or ``null`` when none is set.
+    """
+    uenv = _find_uenv()
+    configured = _configured_overlay()
+    name = configured[0] if configured else None
+    print(json.dumps({"overlay": name, "uenv": str(uenv)}))
+    return 0
+
+
+def _overlay_set(overlay: str | None) -> int:
+    """Point uEnv.txt at one of the shipped overlays.
+
+    The application used to build a ``sed -i`` expression and have root run it.
+    The edit happens here instead, line by line, against a compiled pattern —
+    and commented lines are left alone, as before.
+
+    Args:
+        overlay: Overlay basename.
+
+    Returns:
+        0 on success.
+
+    Raises:
+        Refused: If the overlay is not one that ships with this board.
+    """
+    if overlay not in VALID_OVERLAYS:
+        raise Refused(
+            f"unknown overlay: {overlay!r}. Allowed: {', '.join(VALID_OVERLAYS)}"
+        )
+
+    uenv = _find_uenv()
+    original = uenv.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+
+    changed = 0
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        match = _OVERLAY_LINE_RE.match(line.rstrip("\n"))
+        if not match:
+            continue
+        if match.group("name") == overlay:
+            continue
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = (
+            f"{match.group('indent')}{match.group('key')}"
+            f"{match.group('dir') or ''}{overlay}{match.group('rest')}{newline}"
+        )
+        changed += 1
+
+    if not changed:
+        _LOGGER.info("uEnv.txt already points at %s", overlay)
+        return 0
+
+    backup = uenv.with_suffix(uenv.suffix + ".boneio.bak")
+    if not backup.exists():
+        shutil.copy2(uenv, backup)
+        _LOGGER.info("Backed up %s to %s", uenv, backup)
+
+    with tempfile.NamedTemporaryFile(
+        dir=uenv.parent, delete=False, suffix=".tmp", mode="w", encoding="utf-8"
+    ) as tmp:
+        tmp.write("".join(lines))
+        tmp_path = tmp.name
+    try:
+        os.chmod(tmp_path, uenv.stat().st_mode & 0o7777)
+        if os.geteuid() == 0:
+            os.chown(tmp_path, 0, 0)
+        os.replace(tmp_path, uenv)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _LOGGER.info("Overlay set to %s in %s (%d line(s))", overlay, uenv, changed)
+    return 0
+
+
+# ------------------------------------------------------------------- hostname
+
+
+def _mqtt_password(account: str | None) -> int:
+    """Set a broker password for one of the managed accounts.
+
+    The password is read from stdin, never from the argument list. The rule this
+    replaces was ``mosquitto_passwd -b /etc/mosquitto/passwd <account> *``, so
+    the new password stood in the process table for as long as the command ran —
+    visible to every local account, and to anything sampling ``ps``.
+
+    Args:
+        account: One of :data:`MQTT_ACCOUNTS`.
+
+    Returns:
+        Process exit status.
+
+    Raises:
+        Refused: If the account is not one this application manages, or the
+            password is empty or contains a newline.
+    """
+    if account not in MQTT_ACCOUNTS:
+        raise Refused(
+            f"not an account this device manages: {account!r}. Allowed: "
+            f"{', '.join(MQTT_ACCOUNTS)}"
+        )
+    if not MOSQUITTO_PASSWD.is_file() or MOSQUITTO_PASSWD.is_symlink():
+        raise Refused(f"{MOSQUITTO_PASSWD} is missing or is a symlink")
+
+    password = sys.stdin.read()
+    # Only the trailing newline a shell adds; anything else would be part of
+    # the password, and mosquitto_passwd takes it on one line.
+    password = password[:-1] if password.endswith("\n") else password
+    if not password:
+        raise Refused("no password on stdin")
+    if "\n" in password or "\r" in password:
+        raise Refused("a password cannot contain a line break")
+
+    # -b takes the password as an argument, which is what we are getting away
+    # from; the interactive form reads it from stdin instead.
+    try:
+        result = subprocess.run(
+            ["mosquitto_passwd", str(MOSQUITTO_PASSWD), account],
+            input=f"{password}\n{password}\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refused(f"cannot run mosquitto_passwd: {exc}") from exc
+
+    if result.returncode != 0:
+        # Deliberately not echoing stdout/stderr wholesale: mosquitto_passwd is
+        # not expected to print a password back, but this is not the place to
+        # find out the hard way.
+        _LOGGER.error("mosquitto_passwd failed for %s (rc=%d)", account, result.returncode)
+        return result.returncode
+
+    _restore_passwd_permissions()
+    _LOGGER.info("Broker password set for %s", account)
+    return 0
+
+
+def _restore_passwd_permissions() -> None:
+    """Put the password file back to root:mosquitto 0640 after a write."""
+    try:
+        import grp
+        import pwd
+
+        os.chmod(MOSQUITTO_PASSWD, MOSQUITTO_PASSWD_MODE)
+        uid = pwd.getpwnam(MOSQUITTO_PASSWD_OWNER[0]).pw_uid
+        gid = grp.getgrnam(MOSQUITTO_PASSWD_OWNER[1]).gr_gid
+        os.chown(MOSQUITTO_PASSWD, uid, gid)
+    except (KeyError, OSError) as exc:
+        _LOGGER.error(
+            "Could not restore %s to %s:%s %04o: %s — the hashes may be readable "
+            "by other local accounts",
+            MOSQUITTO_PASSWD, *MOSQUITTO_PASSWD_OWNER, MOSQUITTO_PASSWD_MODE, exc,
+        )
+
+
+def _mqtt_reload() -> int:
+    """Have the broker re-read its password file."""
+    return _run(["systemctl", "reload", "mosquitto"])
+
+
+# ------------------------------------------------------------ broker TLS
+
+
+def _mqtt_tls_mode_now() -> str:
+    """Which managed shape the broker configuration is in.
+
+    Returns:
+        ``off``, ``optional`` or ``required``; ``custom`` for a file edited by
+        hand; ``missing`` when there is none.
+    """
+    try:
+        text = MOSQUITTO_CONF.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, UnicodeDecodeError):
+        return "custom"
+    for mode, conf in MOSQUITTO_CONFS.items():
+        if text == conf:
+            return mode
+    return "custom"
+
+
+def _mqtt_tls_have_cert() -> bool:
+    return MOSQUITTO_CERT.is_file() and MOSQUITTO_KEY.is_file()
+
+
+def _broker_active() -> bool:
+    """Whether systemd reports the broker as running."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "mosquitto"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip() == "active"
+
+
+def _port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """Whether something accepts TCP connections on *port*."""
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _set_owner(path: Path, owner: tuple[str, str], mode: int) -> None:
+    import grp
+    import pwd
+
+    os.chown(path, pwd.getpwnam(owner[0]).pw_uid, grp.getgrnam(owner[1]).gr_gid)
+    os.chmod(path, mode)
+
+
+def _broker_file_spec(path: Path) -> tuple[tuple[str, str], int]:
+    """Owner and mode each managed broker file must have."""
+    if path == MOSQUITTO_CONF:
+        return MOSQUITTO_CONF_OWNER, MOSQUITTO_CONF_MODE
+    if path == MOSQUITTO_KEY:
+        return MOSQUITTO_TLS_OWNER, MOSQUITTO_KEY_MODE
+    return MOSQUITTO_TLS_OWNER, MOSQUITTO_CERT_MODE
+
+
+def _replace_file(path: Path, data: bytes | None) -> None:
+    """Put *data* at *path* atomically, owned and moded from the start.
+
+    None removes the file. The temporary file is private until renamed, so a
+    key is never readable by anyone it should not be, even for an instant.
+    """
+    if data is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    owner, mode = _broker_file_spec(path)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        _set_owner(Path(temporary), owner, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _read_or_none(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _broker_restarted(expect_tls: bool) -> bool:
+    """Restart the broker and wait until it serves what it should.
+
+    Running is not enough: mosquitto that cannot load a certificate exits,
+    and systemd starts it again, so ``is-active`` flickers. Success is 1883
+    answering on loopback — boneIO's own connection — and, with TLS, 8883.
+
+    The unit restarts on failure every 100 ms with a limit of five starts in
+    ten seconds, so a bad certificate uses the limit up within a second —
+    and the restart that rolls it back would then be refused, leaving the
+    broker down in exactly the case the rollback exists for. Clearing the
+    failed state first keeps every restart here possible.
+    """
+    _run(["systemctl", "reset-failed", "mosquitto"], timeout=30, tolerate=True)
+    if _run(["systemctl", "restart", "mosquitto"], timeout=60) != 0:
+        return False
+    deadline = time.monotonic() + MQTT_TLS_START_TIMEOUT
+    while True:
+        if (
+            _broker_active()
+            and _port_open(MQTT_PLAIN_PORT)
+            and (not expect_tls or _port_open(MQTT_TLS_PORT))
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+def _apply_broker_files(changes: dict[Path, bytes | None], expect_tls: bool, had_tls: bool) -> int:
+    """Write broker files, restart, and put everything back if it fails.
+
+    A broker that does not start takes Home Assistant and boneIO's own
+    connection with it, on a device that may be in a cabinet. So nothing is
+    left half-applied: the previous files are restored and the broker started
+    again on them.
+
+    Raises:
+        Refused: If the broker did not come up with the new files.
+    """
+    saved = {path: _read_or_none(path) for path in changes}
+    try:
+        for path, data in changes.items():
+            _replace_file(path, data)
+    except OSError as exc:
+        for path, data in saved.items():
+            try:
+                _replace_file(path, data)
+            except OSError:
+                _LOGGER.error("could not restore %s", path)
+        raise Refused(f"could not write the broker's files: {exc}") from exc
+
+    if _broker_restarted(expect_tls):
+        return 0
+
+    _LOGGER.error("the broker did not come up with the new files; restoring the previous ones")
+    for path, data in saved.items():
+        try:
+            _replace_file(path, data)
+        except OSError as exc:
+            _LOGGER.error("could not restore %s: %s", path, exc)
+    if not _broker_restarted(had_tls):
+        _LOGGER.error("the broker did not come up with the previous files either")
+    raise Refused(
+        "the broker did not start with the new TLS settings, so the previous "
+        "ones were put back"
+    )
+
+
+def _mqtt_tls_state() -> int:
+    """Print the broker's TLS state as JSON."""
+    print(json.dumps({
+        "mode": _mqtt_tls_mode_now(),
+        "certificate": _mqtt_tls_have_cert(),
+        "active": _broker_active(),
+        "tls_port": MQTT_TLS_PORT,
+    }))
+    return 0
+
+
+def _split_bundle(text: str) -> tuple[bytes, bytes]:
+    """Separate a PEM bundle into the certificate chain and the one key.
+
+    Raises:
+        Refused: If it holds anything but certificates, one unencrypted key
+            and optional EC parameters.
+    """
+    certificates: list[str] = []
+    keys: list[str] = []
+    for match in _PEM_BLOCK_RE.finditer(text):
+        kind = match.group(1)
+        block = match.group(0).rstrip() + "\n"
+        if kind == "CERTIFICATE":
+            certificates.append(block)
+        elif kind in _PEM_KEY_TYPES:
+            keys.append(block)
+        elif kind == "EC PARAMETERS":
+            continue
+        elif kind == "ENCRYPTED PRIVATE KEY":
+            raise Refused("the key is protected by a passphrase; the broker starts unattended")
+        else:
+            raise Refused(f"unexpected PEM block: {kind}")
+    if _PEM_BLOCK_RE.sub("", text).strip():
+        raise Refused("stdin holds something besides PEM certificates and a key")
+    if not certificates:
+        raise Refused("no certificate on stdin")
+    if len(keys) != 1:
+        raise Refused(f"expected exactly one private key on stdin, found {len(keys)}")
+    return "".join(certificates).encode("ascii"), keys[0].encode("ascii")
+
+
+def _check_pair(chain: bytes, key: bytes) -> None:
+    """Load the pair the way the broker will, before it is asked to.
+
+    Raises:
+        Refused: If OpenSSL will not serve them together.
+    """
+    import ssl
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cert_path = Path(scratch) / "cert.pem"
+        key_path = Path(scratch) / "key.pem"
+        cert_path.write_bytes(chain)
+        key_path.write_bytes(key)
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(
+                str(cert_path), str(key_path), password=lambda: b""
+            )
+        except (ssl.SSLError, OSError, ValueError) as exc:
+            raise Refused(f"the certificate and key cannot be served together: {exc}") from exc
+
+
+def _mqtt_tls_cert() -> int:
+    """Install the broker's certificate chain and key, read from stdin.
+
+    With TLS on, the broker is restarted onto them and rolled back if it does
+    not come up; with TLS off they only wait for ``mqtt-tls-mode``.
+    """
+    raw = sys.stdin.read(MQTT_TLS_MAX_BYTES + 1)
+    if len(raw) > MQTT_TLS_MAX_BYTES:
+        raise Refused("that is far too much to be a certificate and a key")
+    chain, key = _split_bundle(raw)
+    _check_pair(chain, key)
+
+    mode = _mqtt_tls_mode_now()
+    if mode == "custom":
+        raise Refused(f"{MOSQUITTO_CONF} was edited by hand; boneIO will not touch the broker's TLS")
+    MOSQUITTO_CERT_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if mode in ("optional", "required"):
+        result = _apply_broker_files(
+            {MOSQUITTO_CERT: chain, MOSQUITTO_KEY: key}, expect_tls=True, had_tls=True
+        )
+    else:
+        # The key first: a certificate without its key is the worse half-state.
+        _replace_file(MOSQUITTO_KEY, key)
+        _replace_file(MOSQUITTO_CERT, chain)
+        result = 0
+    _LOGGER.info("Broker certificate installed (TLS %s)", mode)
+    return result
+
+
+def _mqtt_tls_cert_remove() -> int:
+    """Remove the broker's certificate and key. Only while TLS is off."""
+    mode = _mqtt_tls_mode_now()
+    if mode not in ("off", "missing"):
+        raise Refused(f"TLS is {mode}; turn it off before removing its certificate")
+    _replace_file(MOSQUITTO_KEY, None)
+    _replace_file(MOSQUITTO_CERT, None)
+    _LOGGER.info("Broker certificate removed")
+    return 0
+
+
+def _mqtt_tls_mode(mode: str | None) -> int:
+    """Switch the broker between plain, TLS beside plain, and TLS only.
+
+    Args:
+        mode: One of :data:`MQTT_TLS_MODES`.
+
+    Raises:
+        Refused: For an unknown mode, a hand-edited configuration, TLS without
+            a certificate, or a broker that did not come back.
+    """
+    if mode not in MQTT_TLS_MODES:
+        raise Refused(f"unknown mode {mode!r}. Allowed: {', '.join(MQTT_TLS_MODES)}")
+    current = _mqtt_tls_mode_now()
+    if current == "custom":
+        raise Refused(
+            f"{MOSQUITTO_CONF} was edited by hand; boneIO will not overwrite it. "
+            "Put it back to the two lines migration 1.3.0 installs to manage TLS here."
+        )
+    if current == "missing":
+        raise Refused(f"{MOSQUITTO_CONF} does not exist; apply the pending migrations first")
+    if current == mode:
+        _LOGGER.info("Broker TLS already %s", mode)
+        return 0
+    if mode != "off" and not _mqtt_tls_have_cert():
+        raise Refused("install a certificate first (mqtt-tls-cert)")
+
+    result = _apply_broker_files(
+        {MOSQUITTO_CONF: MOSQUITTO_CONFS[mode].encode("ascii")},
+        expect_tls=mode != "off",
+        had_tls=current != "off",
+    )
+    _LOGGER.info("Broker TLS %s -> %s", current, mode)
+    return result
+
+
+def _hostname_set(name: str | None) -> int:
+    """Set the system hostname.
+
+    Args:
+        name: The new hostname.
+
+    Returns:
+        Process exit status.
+
+    Raises:
+        Refused: If it is not a plausible DNS label.
+    """
+    if not name or not _HOSTNAME_RE.match(name):
+        raise Refused(
+            f"not a valid hostname: {name!r}. Lower-case letters, digits and "
+            "hyphens, up to 63 characters, not starting or ending with a hyphen."
+        )
+    return _run(["hostnamectl", "set-hostname", name])
+
+
+# ------------------------------------------------------------------------ NTP
+
+
+def _check_ntp_server(value: str) -> str:
+    """Validate one NTP server: an IP address or a DNS name.
+
+    Args:
+        value: Candidate server.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        Refused: If it is neither a valid address nor a plausible DNS name.
+    """
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    if not _NTP_HOSTNAME_RE.match(value):
+        raise Refused(
+            f"not a usable NTP server: {value!r}. Give an IPv4 or IPv6 address, "
+            "or a DNS name made of letters, digits, hyphens and dots."
+        )
+    return value
+
+
+def _parse_ntp_servers(argument: str | None) -> list[str]:
+    """Split and validate the comma-separated server list.
+
+    Args:
+        argument: ``"a,b,c"``, or ``""``/``"default"`` to mean "no drop-in".
+
+    Returns:
+        The validated servers, possibly empty.
+
+    Raises:
+        Refused: On an invalid entry, a duplicate, or too many of them.
+    """
+    if argument is None or argument.strip().lower() in ("", "default"):
+        return []
+
+    servers: list[str] = []
+    for raw in argument.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        checked = _check_ntp_server(entry)
+        if checked in servers:
+            raise Refused(f"duplicate NTP server: {checked!r}")
+        servers.append(checked)
+
+    if len(servers) > NTP_MAX_SERVERS:
+        raise Refused(
+            f"too many NTP servers: {len(servers)}. At most {NTP_MAX_SERVERS}."
+        )
+    return servers
+
+
+def _read_ntp_dropin() -> list[str]:
+    """Return the servers currently in the drop-in, empty if there is none."""
+    try:
+        text = NTP_DROPIN.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("NTP="):
+            return stripped[4:].split()
+    return []
+
+
+def _ntp_get() -> int:
+    """Print the configured NTP servers as JSON.
+
+    Returns:
+        0 always; an absent drop-in is a valid state, not a failure.
+    """
+    print(
+        json.dumps(
+            {
+                "servers": _read_ntp_dropin(),
+                "dropin": NTP_DROPIN.exists(),
+                "path": str(NTP_DROPIN),
+            }
+        )
+    )
+    return 0
+
+
+def _ntp_set(argument: str | None) -> int:
+    """Write (or remove) the timesyncd drop-in naming the NTP servers.
+
+    An empty list removes the drop-in, which returns the device to whatever the
+    distribution configured — the only honest meaning of "use the defaults".
+
+    The daemon is restarted with ``try-restart``, not ``restart``: if NTP has
+    been switched off, changing which servers *would* be used must not quietly
+    switch synchronisation back on.
+
+    Args:
+        argument: Comma-separated servers, or ``""``/``"default"``.
+
+    Returns:
+        0 on success.
+
+    Raises:
+        Refused: If any server is invalid.
+    """
+    servers = _parse_ntp_servers(argument)
+
+    if not servers:
+        if NTP_DROPIN.exists():
+            NTP_DROPIN.unlink()
+            _LOGGER.info("Removed %s; using the distribution defaults.", NTP_DROPIN)
+        else:
+            _LOGGER.info("No NTP drop-in to remove; already on the defaults.")
+        return _run(["systemctl", "try-restart", "systemd-timesyncd"], tolerate=True)
+
+    content = (
+        "# Written by boneio-system. Edits here are replaced on the next change\n"
+        "# from the boneIO web interface.\n"
+        "[Time]\n"
+        f"NTP={' '.join(servers)}\n"
+    )
+
+    NTP_DROPIN.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=NTP_DROPIN.parent, delete=False, suffix=".tmp", mode="w", encoding="utf-8"
+    ) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        os.chmod(tmp_path, 0o644)
+        if os.geteuid() == 0:
+            os.chown(tmp_path, 0, 0)
+        os.replace(tmp_path, NTP_DROPIN)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    _LOGGER.info("NTP servers set to %s in %s", " ".join(servers), NTP_DROPIN)
+    return _run(["systemctl", "try-restart", "systemd-timesyncd"], tolerate=True)
+
+
+# ---------------------------------------------------------- service password
+#
+# The boneio account carries a password-gated (ALL:ALL) ALL, so its password is
+# the root password. Images before 1.6 shipped it as "Black" on every unit;
+# images from 1.6 ship it locked, and the owner's first password — the one they
+# give the first-run wizard — becomes it.
+#
+# Setting it is the one thing here that could undo F-04. This helper runs as
+# root, without a password, for anyone holding the boneio account. An operation
+# that sets that account's password whenever asked is boneio -> root in two
+# steps: set a password, then sudo with it. So it is allowed in exactly the two
+# states where it grants nothing new:
+#
+#   locked   nobody has chosen a password yet — the factory state.
+#   shipped  the password is "Black". Whoever holds boneio already has root,
+#            through sudo with a password everybody knows.
+#   empty    no password at all, which is the same thing without the typing.
+#
+# and never where the owner has chosen one. The flag makes it once-only even if
+# somebody later locks the account again by hand.
+#
+# After that, service-password-change is passwd: it wants the current password
+# and grants nothing knowing it does not — whoever has it can already sudo, and
+# passwd itself. It is not a way back in when the password is lost; that stays
+# with the flasher card. What it must not become is an oracle cheaper than sudo
+# for guessing the password, so wrong guesses are counted here, as root, where
+# the caller cannot reset the count.
+
+
+def _shadow_hash(account: str = SERVICE_ACCOUNT) -> str | None:
+    """The password field of *account* in /etc/shadow, or None if absent.
+
+    Args:
+        account: The account to look up.
+
+    Returns:
+        The hash field, possibly empty or carrying a lock prefix.
+
+    Raises:
+        Refused: If the shadow file cannot be read.
+    """
+    try:
+        lines = SHADOW.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise Refused(f"cannot read {SHADOW}: {exc}") from exc
+    for line in lines:
+        name, _, rest = line.partition(":")
+        if name == account:
+            return rest.split(":", 1)[0]
+    return None
+
+
+def _crypt_matches(password: str, stored: str) -> bool | None:
+    """Whether *password* verifies against the crypt(3) hash *stored*.
+
+    Through libcrypt directly: Python 3.13 removed the crypt module, and the
+    alternatives — su, sudo -S, an expect script — all mean trying the password
+    against a live login and leaving a failed attempt in the log for every
+    check.
+
+    Returns:
+        True or False, or None when libcrypt cannot be used here.
+    """
+    import ctypes
+    import ctypes.util
+
+    name = ctypes.util.find_library("crypt") or "libcrypt.so.1"
+    try:
+        libcrypt = ctypes.CDLL(name)
+    except OSError:
+        return None
+    libcrypt.crypt.restype = ctypes.c_char_p
+    libcrypt.crypt.argtypes = (ctypes.c_char_p, ctypes.c_char_p)
+    result = libcrypt.crypt(password.encode(), stored.encode())
+    if not result:
+        return None
+    return result.decode(errors="replace") == stored
+
+
+def _service_password_state() -> str:
+    """Classify the boneio login.
+
+    Returns:
+        ``locked``, ``empty``, ``shipped``, ``set`` or ``unknown``.
+
+    Raises:
+        Refused: If the account does not exist.
+    """
+    stored = _shadow_hash()
+    if stored is None:
+        raise Refused(f"no {SERVICE_ACCOUNT} account in {SHADOW}")
+    if stored.startswith(("!", "*")):
+        return "locked"
+    if stored == "":
+        # An empty field is a login with no password at all.
+        return "empty"
+    matches = _crypt_matches(SHIPPED_PASSWORD, stored)
+    if matches is None:
+        return "unknown"
+    return "shipped" if matches else "set"
+
+
+def _service_password_state_verb() -> int:
+    """Print the state as JSON. Changes nothing.
+
+    Returns:
+        Process exit status.
+    """
+    state = _service_password_state()
+    print(json.dumps({"state": state, "initialised": SERVICE_PASSWORD_FLAG.exists()}))
+    return 0
+
+
+def _service_password_init() -> int:
+    """Set the boneio password once, from stdin.
+
+    Returns:
+        Process exit status.
+
+    Raises:
+        Refused: If a password has already been set this way, if the owner has
+            chosen one, or if the password on stdin is unusable.
+    """
+    if SERVICE_PASSWORD_FLAG.exists():
+        raise Refused(
+            "the service account password has already been set once; change it "
+            "with passwd or service-password-change, which ask for the current one"
+        )
+    state = _service_password_state()
+    if state not in ("locked", "shipped", "empty"):
+        raise Refused(
+            f"the service account password is {state!r}, not one the factory "
+            "left; it is the owner's to change, with passwd or "
+            "service-password-change"
+        )
+
+    password = _checked_password(sys.stdin.read().removesuffix("\n"))
+
+    rc = _apply_service_password(password)
+    if rc != 0:
+        return rc
+    _mark_service_password_set(f"set from state {state}")
+    _LOGGER.info("Service account password set (was %s)", state)
+    return 0
+
+
+def _checked_password(password: str, minimum: int = 1) -> str:
+    """Refuse a password that chpasswd could misread or that is unreasonable.
+
+    Args:
+        password: One line from stdin, without its newline.
+        minimum: Shortest length accepted.
+
+    Returns:
+        The password, unchanged.
+
+    Raises:
+        Refused: If it is empty, too short or too long, or has a line break.
+    """
+    if not password:
+        raise Refused("no password on stdin")
+    if "\n" in password or "\r" in password:
+        raise Refused("a password cannot contain a line break")
+    if len(password) > SERVICE_PASSWORD_MAX:
+        raise Refused(f"a password longer than {SERVICE_PASSWORD_MAX} characters")
+    if len(password) < minimum:
+        raise Refused(f"a password shorter than {minimum} characters")
+    return password
+
+
+def _apply_service_password(password: str) -> int:
+    """Give the boneio account *password*, through chpasswd.
+
+    Returns:
+        chpasswd's exit status.
+
+    Raises:
+        Refused: If chpasswd cannot be run.
+    """
+    try:
+        result = subprocess.run(
+            ["chpasswd"],
+            # chpasswd splits on the first colon, so one in the password is
+            # fine. Over stdin, never as an argument: ps would show it.
+            input=f"{SERVICE_ACCOUNT}:{password}\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refused(f"cannot run chpasswd: {exc}") from exc
+    if result.returncode != 0:
+        _LOGGER.error("chpasswd failed for %s (rc=%d)", SERVICE_ACCOUNT, result.returncode)
+        return result.returncode
+
+    # A password set from the expired 1.6-era state would still demand a change
+    # at the first login; the owner has just chosen this one, so it is current.
+    subprocess.run(
+        ["chage", "-d", str(int(time.time()) // 86400), SERVICE_ACCOUNT],
+        capture_output=True,
+        timeout=30,
+    )
+    return 0
+
+
+def _mark_service_password_set(how: str) -> None:
+    """Write the flag that keeps service-password-init from running again."""
+    SERVICE_PASSWORD_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    SERVICE_PASSWORD_FLAG.write_text(f"{how} at {int(time.time())}\n", encoding="utf-8")
+    os.chmod(SERVICE_PASSWORD_FLAG, 0o644)
+
+
+def _recent_failures(handle: int, now: float) -> list[float]:
+    """The wrong-password timestamps still inside the window.
+
+    Args:
+        handle: The attempts file, open and locked.
+        now: The current time.
+
+    Returns:
+        Timestamps, oldest first. One in the future — the clock was set back —
+        is dropped rather than left to block the change for longer than the
+        window.
+    """
+    os.lseek(handle, 0, os.SEEK_SET)
+    raw = b""
+    while chunk := os.read(handle, 65536):
+        raw += chunk
+    try:
+        stamps = json.loads(raw or b"[]")
+    except ValueError:
+        _LOGGER.warning("%s is not JSON; starting the count again", SERVICE_PASSWORD_ATTEMPTS)
+        stamps = []
+    if not isinstance(stamps, list):
+        stamps = []
+    return sorted(
+        float(s) for s in stamps
+        if isinstance(s, (int, float)) and now - SERVICE_PASSWORD_WINDOW < s <= now
+    )
+
+
+def _write_failures(handle: int, stamps: list[float]) -> None:
+    """Replace the attempts file's contents, durably."""
+    os.lseek(handle, 0, os.SEEK_SET)
+    os.ftruncate(handle, 0)
+    os.write(handle, json.dumps(stamps).encode())
+    os.fsync(handle)
+
+
+def _service_password_change() -> int:
+    """Change the boneio password, given the current one — passwd, as root.
+
+    Stdin is two lines: the current password, then the new one. The outcome is
+    one JSON object on stdout, ``{"result": ...}``:
+
+      changed         done
+      wrong_password  the current password is not it; ``attempts_left``
+      throttled       too many wrong ones lately; ``retry_after`` seconds
+      refused         the account is not in a state this may change; ``state``
+      failed          the password was right, chpasswd was not
+
+    The attempt is written down before the password is checked and cleared
+    only when it was right, all under an exclusive lock. So a burst of
+    parallel calls, or a call killed half way, still costs a try each.
+
+    Returns:
+        Process exit status: 0 only for ``changed``.
+
+    Raises:
+        Refused: If stdin is not two usable passwords.
+    """
+    lines = sys.stdin.read().removesuffix("\n").split("\n")
+    if len(lines) != 2:
+        raise Refused("expected the current password and the new one, one per line")
+    current = _checked_password(lines[0])
+    new = _checked_password(lines[1], minimum=SERVICE_PASSWORD_MIN)
+
+    SERVICE_PASSWORD_ATTEMPTS.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = os.open(SERVICE_PASSWORD_ATTEMPTS, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise Refused(f"cannot open {SERVICE_PASSWORD_ATTEMPTS}: {exc}") from exc
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+
+        # Inside the lock: a change that finished while this one waited has
+        # replaced the hash.
+        state = _service_password_state()
+        if state not in ("set", "shipped"):
+            # Locked or empty: that is service-password-init's to set, once.
+            # Unknown: nothing here can check a password.
+            _LOGGER.error("REFUSED: service password change while the account is %s", state)
+            print(json.dumps({"result": "refused", "state": state}))
+            return 1
+
+        now = time.time()
+        failures = _recent_failures(handle, now)
+        if len(failures) >= SERVICE_PASSWORD_MAX_FAILURES:
+            retry_after = max(1, int(failures[0] + SERVICE_PASSWORD_WINDOW - now) + 1)
+            _LOGGER.error(
+                "REFUSED: service password change throttled for %ds after %d wrong passwords",
+                retry_after, len(failures),
+            )
+            print(json.dumps({"result": "throttled", "retry_after": retry_after}))
+            return 1
+
+        _write_failures(handle, [*failures, now])
+        matches = _crypt_matches(current, _shadow_hash() or "")
+        if matches is None:
+            # Not a guess anybody got an answer to, so it does not count.
+            _write_failures(handle, failures)
+            print(json.dumps({"result": "refused", "state": "unknown"}))
+            return 1
+        if not matches:
+            time.sleep(SERVICE_PASSWORD_FAIL_DELAY)
+            left = SERVICE_PASSWORD_MAX_FAILURES - len(failures) - 1
+            _LOGGER.warning(
+                "Service password change: wrong current password, %d tries left", left
+            )
+            print(json.dumps({"result": "wrong_password", "attempts_left": left}))
+            return 1
+
+        _write_failures(handle, [])
+        rc = _apply_service_password(new)
+        if rc != 0:
+            print(json.dumps({"result": "failed"}))
+            return rc
+        # A password the owner chose: relocking the account later must not
+        # re-arm the wizard's one-shot.
+        if not SERVICE_PASSWORD_FLAG.exists():
+            _mark_service_password_set(f"changed from state {state}")
+        _LOGGER.info("Service account password changed (was %s)", state)
+        print(json.dumps({"result": "changed"}))
+        return 0
+    finally:
+        os.close(handle)
+
+
+# ----------------------------------------------------------------- OS updates
+#
+# A controller shipped a year ago still runs the kernel, OpenSSL and everything
+# else it left the factory with: updating boneIO does not touch the system under
+# it. These verbs give the panel `apt-get dist-upgrade`, and the reason they look
+# the way they do is F-04. apt run as root with anything the caller chooses is a
+# root shell — `-o APT::Update::Pre-Invoke=...`, a `.deb` path, another
+# sources.list. So the caller picks a mode from a closed set and nothing else;
+# the command lines, options and repositories are all fixed here, and what gets
+# installed is whatever the signed Debian and BeagleBoard archives already
+# configured on the device publish.
+
+
+def _os_update_list(text: str) -> list[dict[str, str | None]]:
+    """Parse the ``Inst`` lines of ``apt-get -s dist-upgrade``.
+
+    Args:
+        text: The simulation's output.
+
+    Returns:
+        One entry per package: name, installed version (None when new),
+        candidate version.
+    """
+    packages: list[dict[str, str | None]] = []
+    for line in text.splitlines():
+        match = _APT_INST_RE.match(line)
+        if match:
+            packages.append({
+                "name": match.group("name"),
+                "from": match.group("old"),
+                "to": match.group("new"),
+            })
+    return packages
+
+
+def _apt_size_bytes(text: str) -> int:
+    """Read one of apt's sizes, which are decimal: ``44.4 MB``, ``512 kB``, ``1308 B``.
+
+    Args:
+        text: The size as apt printed it.
+
+    Returns:
+        Bytes.
+
+    Raises:
+        ValueError: When it is not a size.
+    """
+    match = _APT_SIZE_RE.match(text.strip())
+    if not match:
+        raise ValueError(text)
+    return int(float(match.group("num").replace(",", "")) * _APT_UNITS[match.group("unit")])
+
+
+def _apt_space_needed(text: str) -> tuple[int, int] | None:
+    """What an upgrade will take on /, from ``apt-get --assume-no dist-upgrade``.
+
+    ``-s`` does not print the sizes, so they come from the real command
+    answered "no".
+
+    Args:
+        text: Its output, with ``LC_ALL=C``.
+
+    Returns:
+        ``(download_mb, growth_mb)`` rounded up, growth negative when the
+        upgrade frees space; None when apt printed neither figure.
+    """
+    need = _APT_NEED_RE.search(text)
+    after = _APT_AFTER_RE.search(text)
+    if not need and not after:
+        return None
+    mib = 1024 * 1024
+    try:
+        download = _apt_size_bytes(need.group("size")) if need else 0
+        growth = _apt_size_bytes(after.group("size")) if after else 0
+    except ValueError:
+        return None
+    if after and after.group("way") == "freed":
+        growth = -growth
+    return -(-download // mib), -(-growth // mib)
+
+
+def _os_update_required_mb(download_mb: int, growth_mb: int) -> int:
+    """Free space an upgrade must start with.
+
+    The downloads stay on disk until the end, so they count in full next to
+    what the packages grow by.
+
+    Args:
+        download_mb: Still to download.
+        growth_mb: What the installed packages grow by (negative when they shrink).
+
+    Returns:
+        MB, never below OS_UPDATE_MIN_FREE_MB.
+    """
+    return max(OS_UPDATE_MIN_FREE_MB, download_mb + max(growth_mb, 0) + OS_UPDATE_MARGIN_MB)
+
+
+def _os_update_unit_active() -> bool:
+    """Whether an update is running right now.
+
+    Returns:
+        True while the transient unit exists and is not finished.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", OS_UPDATE_UNIT],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip() in ("active", "activating", "reloading")
+
+
+def _os_update_load() -> dict:
+    """The last run's record.
+
+    Returns:
+        The stored state, or an empty dict when nothing has run yet.
+    """
+    try:
+        data = json.loads(OS_UPDATE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _os_update_save(state: dict) -> None:
+    """Write the run's record atomically.
+
+    Args:
+        state: What to store.
+    """
+    OS_UPDATE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=OS_UPDATE_STATE.parent, delete=False, suffix=".tmp", mode="w",
+        encoding="utf-8",
+    ) as tmp:
+        json.dump(state, tmp, indent=1)
+        tmp_path = tmp.name
+    os.chmod(tmp_path, 0o644)
+    os.replace(tmp_path, OS_UPDATE_STATE)
+
+
+def _configured_overlays() -> list[tuple[str, str | None]]:
+    """The boneIO overlays uEnv.txt asks U-Boot for.
+
+    One per ``uboot_overlay_addrN`` key, since U-Boot loads each of them. For a
+    key assigned twice, the last value: U-Boot imports uEnv.txt as an
+    environment, so a later assignment replaces an earlier one. Controllers have
+    been found with a stale legacy line above the right one.
+
+    Returns:
+        ``(name, directory)`` pairs in the order the keys first appear — the
+        directory as written, or None when the line uses the bare name U-Boot
+        resolves against /boot/dtbs/$uname_r/.
+    """
+    try:
+        uenv = _find_uenv()
+    except Refused:
+        return []
+    by_key: dict[str, tuple[str, str | None]] = {}
+    for line in uenv.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        match = _OVERLAY_LINE_RE.match(line)
+        if match:
+            by_key[match.group("key")] = match.group("name"), match.group("dir")
+    return list(by_key.values())
+
+
+def _configured_overlay() -> tuple[str, str | None] | None:
+    """The first of :func:`_configured_overlays`, or None when there is none."""
+    configured = _configured_overlays()
+    return configured[0] if configured else None
+
+
+def _on_boot(path: str) -> Path:
+    """A path from uEnv.txt, with /boot/ taken relative to BOOT_DIR."""
+    return BOOT_DIR / path[len("/boot/"):] if path.startswith("/boot/") else Path(path)
+
+
+def _overlay_to_bare_name(uenv: Path) -> int:
+    """Drop the directory from boneIO overlay lines in uEnv.txt.
+
+    Older images wrote the overlay as a full path into one kernel's dtbs
+    directory, e.g. ``/boot/dtbs/6.18.2-bone12/overlays/BONEIO-BLACK-PINS.dtbo``.
+    That keeps loading the old kernel's copy after an upgrade, and stops loading
+    anything once that kernel is removed. The bare name is what U-Boot resolves
+    against /boot/dtbs/$uname_r/, so it follows every kernel.
+
+    Args:
+        uenv: The file to edit.
+
+    Returns:
+        How many lines were changed.
+    """
+    original = uenv.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    changed = 0
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        match = _OVERLAY_LINE_RE.match(line.rstrip("\n"))
+        if not match or not match.group("dir"):
+            continue
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = (
+            f"{match.group('indent')}{match.group('key')}"
+            f"{match.group('name')}{match.group('rest')}{newline}"
+        )
+        changed += 1
+    if not changed:
+        return 0
+    backup = uenv.with_suffix(uenv.suffix + ".boneio.bak")
+    if not backup.exists():
+        shutil.copy2(uenv, backup)
+    with tempfile.NamedTemporaryFile(
+        dir=uenv.parent, delete=False, suffix=".tmp", mode="w", encoding="utf-8"
+    ) as tmp:
+        tmp.write("".join(lines))
+        tmp_path = tmp.name
+    os.chmod(tmp_path, uenv.stat().st_mode & 0o7777)
+    os.replace(tmp_path, uenv)
+    _LOGGER.warning("uEnv.txt: overlay path replaced by its bare name (%d line(s))", changed)
+    return changed
+
+
+def _refresh_shipped_overlays() -> list[str]:
+    """Bring every kernel's copy of a shipped overlay up to date.
+
+    Every /boot/dtbs/<kernel>/ and its overlays/, not only the boot kernel's:
+    the kernel postinst hook copies overlays into a new kernel from the newest
+    old one, so a stale copy left anywhere would come back with the next
+    upgrade. Only names from VALID_OVERLAYS, and only copies that exist —
+    which kernel lacks the overlay uEnv.txt loads is the kernel check's
+    business. Each file is replaced whole, so a power cut leaves the old
+    overlay or the new one, never half of one.
+
+    Returns:
+        One note per overlay name that was replaced somewhere.
+    """
+    notes: list[str] = []
+    for name in VALID_OVERLAYS:
+        shipped = SHIPPED_OVERLAYS_DIR / name
+        if not shipped.is_file():
+            continue
+        content = shipped.read_bytes()
+        stale = [
+            copy
+            for pattern in (f"*/{name}", f"*/overlays/{name}")
+            for copy in sorted((BOOT_DIR / "dtbs").glob(pattern))
+            if copy.is_file() and copy.read_bytes() != content
+        ]
+        for copy in stale:
+            with tempfile.NamedTemporaryFile(
+                dir=copy.parent, delete=False, suffix=".tmp"
+            ) as tmp:
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.chmod(tmp.name, 0o644)
+            os.replace(tmp.name, copy)
+            _LOGGER.warning("Replaced %s with the version boneIO ships", copy)
+        if stale:
+            notes.append(f"{name} replaced with the version boneIO ships in {len(stale)} place(s)")
+    return notes
+
+
+def _boot_kernel() -> str | None:
+    """The kernel U-Boot will load: ``uname_r`` in uEnv.txt."""
+    for path in UENV_PATHS:
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("uname_r="):
+                value = line.split("=", 1)[1].strip()
+                if value:
+                    return value
+    return None
+
+
+def _kernel_check(repair: bool = False, unattended: bool = False) -> dict[str, str | None]:
+    """Will the next boot come up with the boneIO pinmux?
+
+    A kernel upgrade brings a new /boot/dtbs/<version>/ that has never heard of
+    the boneIO overlay. U-Boot looks the overlay up there by bare name, and when
+    it is missing it boots the stock BeagleBone pinmux without a word: 1-Wire,
+    CAN and the buzzer are simply gone, and nothing in userspace says why. The
+    kernel postinst hook (zz-boneio-overlay) is meant to copy it across; this
+    checks that it did, and with *repair* does the copy itself — only for a file
+    from VALID_OVERLAYS, only from boneIO's shipped copy or from under
+    /boot/dtbs. A repair also replaces every kernel's copy of an overlay that
+    differs from the one boneIO ships.
+
+    Args:
+        repair: Copy a missing overlay into the boot kernel's directory.
+        unattended: Repair for boneIO's startup check, with nobody watching:
+            files only, into both of the boot kernel's directories. uEnv.txt is
+            left alone — switching it to the bare name stays with the system
+            update an operator starts.
+
+    Returns:
+        ``status`` (ok, repaired, problem), ``kernel`` (what will boot),
+        ``running`` and ``message``.
+    """
+    running = os.uname().release
+    kernel = _boot_kernel()
+    report: dict[str, str | None] = {
+        "status": "ok", "kernel": kernel, "running": running, "message": None,
+    }
+
+    def _problem(message: str) -> dict[str, str | None]:
+        report["status"] = "problem"
+        report["message"] = message
+        return report
+
+    if not kernel:
+        return _problem("uEnv.txt names no kernel (uname_r)")
+    for name in (f"vmlinuz-{kernel}", f"initrd.img-{kernel}"):
+        if not (BOOT_DIR / name).is_file():
+            return _problem(f"/boot/{name} is missing")
+    dtbs = BOOT_DIR / "dtbs" / kernel
+    if not dtbs.is_dir():
+        return _problem(f"/boot/dtbs/{kernel}/ is missing")
+
+    configured = _configured_overlays()
+    for overlay, _directory in configured:
+        if overlay not in VALID_OVERLAYS:
+            return _problem(f"uEnv.txt names an overlay this board does not ship: {overlay}")
+
+    # U-Boot reads a path exactly as written, and a bare name from the boot
+    # kernel's own directory. Only those files decide the next boot.
+    if not repair:
+        problems: list[str] = []
+        notes: list[str] = []
+        for overlay, directory in configured:
+            written = f"{directory}{overlay}" if directory else None
+            if written is None and not (dtbs / overlay).is_file():
+                problems.append(f"{overlay} is missing from /boot/dtbs/{kernel}/")
+            elif written is not None and not _on_boot(written).is_file():
+                problems.append(f"uEnv.txt loads the overlay from {written}, which does not exist")
+            elif written is not None:
+                notes.append(
+                    f"uEnv.txt loads the overlay from {written}, "
+                    "not from the boot kernel's directory"
+                )
+        if problems and _next_boot_is_this_one(kernel, running):
+            # U-Boot found it somewhere this check does not know about. The
+            # same files will be found the same way again.
+            notes = problems + ["but this boot used the same kernel and uEnv.txt "
+                                "and has the boneIO overlay"]
+        elif problems:
+            return _problem("; ".join(problems))
+        if notes:
+            report["message"] = "; ".join(notes)
+        return report
+
+    notes = _refresh_shipped_overlays()
+    running_dtbs = BOOT_DIR / "dtbs" / running
+    for overlay, directory in configured:
+        written = f"{directory}{overlay}" if directory else None
+        target = dtbs / overlay
+        if target.is_file():
+            tooling = dtbs / "overlays" / overlay
+            if unattended and not tooling.is_file():
+                # Otherwise the startup check finds overlays/ empty on every
+                # boot and asks again. Never from another kernel: the file
+                # U-Boot loads is the one to keep.
+                tooling.parent.mkdir(exist_ok=True)
+                shutil.copy2(target, tooling)
+                notes.append(f"{overlay} was missing from /boot/dtbs/{kernel}/overlays/")
+            continue
+        sources = [SHIPPED_OVERLAYS_DIR / overlay]
+        sources += [_on_boot(written)] if written else []
+        sources += [running_dtbs / overlay, running_dtbs / "overlays" / overlay]
+        sources += sorted((BOOT_DIR / "dtbs").glob(f"*/{overlay}"))
+        sources += sorted((BOOT_DIR / "dtbs").glob(f"*/overlays/{overlay}"))
+        # The boot kernel's own overlays/ is a valid source: early installs put
+        # the file only there, and it is the only copy on a controller that
+        # never had a second kernel.
+        source = next((s for s in sources if s.is_file() and s != target), None)
+        if source is None:
+            return _problem(
+                f"{overlay} is missing from /boot/dtbs/{kernel}/ and no other kernel has it"
+            )
+        (dtbs / "overlays").mkdir(exist_ok=True)
+        for destination in (target, dtbs / "overlays" / overlay):
+            if not destination.is_file() or not os.path.samefile(source, destination):
+                shutil.copy2(source, destination)
+        _LOGGER.warning("Copied %s from %s into /boot/dtbs/%s/", overlay, source.parent, kernel)
+        notes.append(f"{overlay} was missing for kernel {kernel}; copied from {source.parent}")
+
+    if unattended:
+        # U-Boot reads a written path exactly, whatever was copied beside it.
+        stale = [f"{d}{o}" for o, d in configured if d and not _on_boot(f"{d}{o}").is_file()]
+        if stale:
+            return _problem("; ".join(notes + [
+                f"uEnv.txt loads the overlay from {path}, which does not exist — "
+                "a system update from the panel switches it to the bare name"
+                for path in stale
+            ]))
+
+    # Only once every file is in place: from here U-Boot looks for bare names.
+    for overlay, directory in configured:
+        if directory and not unattended:
+            _overlay_to_bare_name(_find_uenv())
+            notes.append(f"uEnv.txt pointed at {directory}{overlay}; now uses the bare name")
+
+    if notes:
+        report["status"] = "repaired"
+        report["message"] = "; ".join(notes)
+    return report
+
+
+def _overlay_repair(argument: str | None, value: str | None) -> int:
+    """Copy a missing boneIO overlay into the boot kernel's directories.
+
+    boneIO asks for this at startup when /boot/dtbs/$uname_r/ has no boneIO
+    overlay. That used to be a plan piped to boneio-migrate, which 1.6.6
+    retired, so the check had only been logging that it could not help. The
+    caller chooses nothing: which overlay is uEnv.txt's, which files may be
+    copied is VALID_OVERLAYS, and where from is SHIPPED_OVERLAYS_DIR or
+    /boot/dtbs. boneIO also asks when a copy differs from the shipped one.
+
+    Returns:
+        0 with the kernel check's report on stdout; 1 when it is a problem.
+    """
+    if argument is not None or value is not None:
+        raise Refused("overlay-repair takes no arguments")
+    report = _kernel_check(repair=True, unattended=True)
+    print(json.dumps(report))
+    return 1 if report["status"] == "problem" else 0
+
+
+def _next_boot_is_this_one(kernel: str, running: str) -> bool:
+    """Will the next boot load what this one did, and did this one work?
+
+    Same kernel, uEnv.txt untouched since boot, and a boneIO overlay live in
+    the device tree. Then a file this check cannot find is one U-Boot found
+    anyway (old images differ in where they put it), and a restart is no
+    riskier than the boot that brought the controller up.
+    """
+    if kernel != running:
+        return False
+    try:
+        uenv = _find_uenv()
+        if uenv.stat().st_mtime >= _boot_time():
+            return False
+        entries = os.listdir(DT_CHOSEN_OVERLAYS)
+    except (Refused, OSError):
+        return False
+    return any(entry.startswith("BONEIO-BLACK-PINS") for entry in entries)
+
+
+def _apt_cache_mb() -> int:
+    """How much ``apt-get clean`` would free, in MB."""
+    total = 0
+    for pattern in ("*.deb", "partial/*"):
+        for path in APT_ARCHIVES.glob(pattern):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+    return total // (1024 * 1024)
+
+
+def _os_update_state_verb() -> int:
+    """Print what the panel needs to show. Changes nothing.
+
+    Returns:
+        0, with a JSON object on stdout.
+    """
+    state = _os_update_load()
+    kernel = _kernel_check(repair=False)
+    reboot_reasons: list[str] = []
+    if REBOOT_REQUIRED.exists():
+        try:
+            pkgs = REBOOT_REQUIRED_PKGS.read_text(encoding="utf-8").split()
+        except OSError:
+            pkgs = []
+        reboot_reasons.append("packages: " + ", ".join(pkgs) if pkgs else "packages")
+    if kernel["kernel"] and kernel["kernel"] != kernel["running"]:
+        reboot_reasons.append(f"kernel {kernel['running']} -> {kernel['kernel']}")
+    if state.get("reboot_recommended") and (state.get("finished") or 0) > _boot_time():
+        reboot_reasons.append("core libraries updated")
+    usage = shutil.disk_usage("/")
+    print(json.dumps({
+        "running": _os_update_unit_active(),
+        "last": state or None,
+        "reboot_required": bool(reboot_reasons),
+        "reboot_reasons": reboot_reasons,
+        "kernel": kernel,
+        "free_mb": usage.free // (1024 * 1024),
+        "min_free_mb": OS_UPDATE_MIN_FREE_MB,
+        # What the last check or failed upgrade measured; nothing is left to
+        # need it once an upgrade has gone through.
+        "required_mb": (
+            None
+            if state.get("mode") == "upgrade" and state.get("result") == "success"
+            else state.get("required_mb")
+        ),
+        "apt_cache_mb": _apt_cache_mb(),
+        "autoupdate": _autoupdate_state(),
+    }))
+    return 0
+
+
+def _boot_time() -> float:
+    """When the running system booted, as a Unix timestamp."""
+    try:
+        for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
+def _os_update_start(mode: str | None) -> int:
+    """Start a check or an upgrade in its own systemd unit, and return.
+
+    The work does not run here, and it must not: this process is a child of
+    boneio.service, and an upgrade that restarts boneIO — through needrestart,
+    or because python itself was upgraded — would kill dpkg halfway through.
+    A transient unit lives outside that cgroup, and its fixed name means
+    systemd itself refuses a second run while one is going.
+
+    Args:
+        mode: ``check`` or ``upgrade``.
+
+    Returns:
+        0 when the unit was started.
+
+    Raises:
+        Refused: For an unknown mode, or while a run is in progress.
+    """
+    if mode not in OS_UPDATE_MODES:
+        raise Refused(f"unknown mode: {mode!r}. Allowed: {', '.join(OS_UPDATE_MODES)}")
+    if _os_update_unit_active():
+        raise Refused("an operating system update is already running")
+    rc = _run([
+        "systemd-run", "--unit", OS_UPDATE_UNIT, "--collect", "--no-block", "--quiet",
+        "--description", "boneIO operating system update",
+        # boneIO runs at CPUWeight=1000; the update must not starve it.
+        "--property", "CPUWeight=50", "--property", "IOWeight=50",
+        HELPER_SELF, "os-update-run", mode,
+    ])
+    if rc == 0:
+        print(json.dumps({"started": mode}))
+    return rc
+
+
+def _in_update_unit() -> bool:
+    """Whether this process runs inside the update's own unit."""
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return f"/{OS_UPDATE_UNIT}" in cgroup
+
+
+def _stream(argv: list[str], log, timeout: int) -> tuple[int, str]:
+    """Run one apt step, writing its output to *log* as it comes.
+
+    A dist-upgrade on a BeagleBone configures packages for tens of minutes;
+    written only at the end, the log the panel shows sits on the step's header
+    the whole time and looks hung.
+
+    Args:
+        argv: The command, with APT_ENV as its whole environment.
+        log: Open log file.
+        timeout: Seconds before the step is killed.
+
+    Returns:
+        Exit status and the full output.
+    """
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env=APT_ENV, stdin=subprocess.DEVNULL, errors="replace",
+    )
+    timer = threading.Timer(timeout, process.kill)
+    timer.start()
+    output: list[str] = []
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            output.append(line)
+            log.write(line)
+            log.flush()
+        returncode = process.wait()
+    finally:
+        timer.cancel()
+    if returncode < 0:
+        log.write(f"\n=== killed after {timeout}s\n")
+    return returncode, "".join(output)
+
+
+def _os_update_run(mode: str | None) -> int:
+    """Do the work. Only inside the unit that os-update-start created.
+
+    Args:
+        mode: ``check`` or ``upgrade``.
+
+    Returns:
+        0 on success.
+
+    Raises:
+        Refused: For an unknown mode, or when called any other way.
+    """
+    if mode not in OS_UPDATE_MODES:
+        raise Refused(f"unknown mode: {mode!r}. Allowed: {', '.join(OS_UPDATE_MODES)}")
+    if not _in_update_unit():
+        raise Refused(f"os-update-run only runs inside {OS_UPDATE_UNIT}; use os-update-start")
+
+    state: dict = {
+        "mode": mode, "started": time.time(), "finished": None,
+        "result": "running", "step": None, "message": None,
+        "packages": [], "reboot_recommended": False, "kernel": None,
+        "warnings": [],
+    }
+    _os_update_save(state)
+    OS_UPDATE_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    with OS_UPDATE_LOG.open("w", encoding="utf-8") as log:
+        os.chmod(OS_UPDATE_LOG, 0o644)
+
+        def step(name: str, argv: list[str], timeout: int) -> str:
+            state["step"] = name
+            _os_update_save(state)
+            log.write(f"\n=== {name}: {' '.join(argv)}\n")
+            log.flush()
+            returncode, output = _stream(argv, log, timeout)
+            if returncode != 0:
+                raise Refused(f"{name} failed (rc={returncode})")
+            return output
+
+        def update_lists() -> None:
+            """apt-get update; a failing Caddy repository is left out, not fatal.
+
+            Later steps read the lists this downloads, so the retry only has to
+            refresh everything but Caddy. Any other failure still stops the run.
+            """
+            argv = ["apt-get", *APT_OPTIONS, "update"]
+            try:
+                step("update", argv, 900)
+                return
+            except Refused:
+                if not CADDY_APT_LIST.exists():
+                    raise
+            log.write("\n=== update: the Caddy repository failed; updating without it\n")
+            with tempfile.TemporaryDirectory(prefix="boneio-sourceparts-") as parts:
+                for entry in APT_SOURCE_PARTS.iterdir():
+                    if entry != CADDY_APT_LIST and entry.is_file():
+                        shutil.copy2(entry, parts)
+                step(
+                    "update",
+                    [*argv, "-o", f"Dir::Etc::sourceparts={parts}"],
+                    900,
+                )
+            state["warnings"].append("caddy-repo")
+
+        def measure() -> None:
+            """Record what the upgrade needs on /, as apt itself counts it."""
+            state["step"] = "measure"
+            _os_update_save(state)
+            argv = ["apt-get", *APT_OPTIONS, "--assume-no", "dist-upgrade"]
+            log.write(f"\n=== measure: {' '.join(argv)}\n")
+            log.flush()
+            # Answering "no" is how it ends, so its status says nothing.
+            _, output = _stream(argv, log, 600)
+            sizes = _apt_space_needed(output)
+            if sizes is None:
+                log.write("\n=== apt printed no sizes; using the fixed minimum\n")
+                sizes = (0, 0)
+            state["download_mb"], state["growth_mb"] = sizes
+            state["required_mb"] = _os_update_required_mb(*sizes)
+
+        try:
+            if mode == "upgrade":
+                # Packages downloaded earlier, unattended-upgrades included, are
+                # space this upgrade may need; apt downloads again what it uses.
+                # First, so a device left full by a failed run can be repaired.
+                if _apt_cache_mb():
+                    step("clean-cache", ["apt-get", "clean"], 300)
+                # An upgrade cut short by a power loss leaves dpkg half-done, and
+                # apt refuses to do anything until this has run.
+                step("dpkg-configure", ["dpkg", "--configure", "-a"], 1800)
+            update_lists()
+            simulated = step(
+                "simulate", ["apt-get", *APT_OPTIONS, "-s", "dist-upgrade"], 600
+            )
+            state["packages"] = _os_update_list(simulated)
+            if state["packages"]:
+                measure()
+            if mode == "upgrade" and state["packages"]:
+                free_mb = shutil.disk_usage("/").free // (1024 * 1024)
+                if free_mb < state["required_mb"]:
+                    raise Refused(
+                        f"only {free_mb} MB free on /, {state['required_mb']} MB needed "
+                        f"({state['download_mb']} MB to download, "
+                        f"{max(state['growth_mb'], 0)} MB more once installed)"
+                    )
+                step("dist-upgrade", ["apt-get", *APT_OPTIONS, "-y", "dist-upgrade"], 3 * 3600)
+                step("autoremove", ["apt-get", *APT_OPTIONS, "-y", "autoremove", "--purge"], 1800)
+                step("clean", ["apt-get", "clean"], 300)
+                state["reboot_recommended"] = any(
+                    p["name"].startswith(REBOOT_PACKAGE_PREFIXES) for p in state["packages"]
+                )
+            if mode == "upgrade":
+                state["kernel"] = _kernel_check(repair=True)
+                log.write(f"\n=== kernel check: {json.dumps(state['kernel'])}\n")
+            state["result"] = (
+                "problem" if (state["kernel"] or {}).get("status") == "problem" else "success"
+            )
+        except (Refused, OSError, subprocess.SubprocessError) as exc:
+            state["result"] = "failed"
+            state["message"] = str(exc)
+            cleared = False
+            if mode == "upgrade":
+                # A run that ran out of room leaves its downloads behind, and a
+                # full / is what the device is left with otherwise. First,
+                # because even this log line and the state need room.
+                try:
+                    subprocess.run(
+                        ["apt-get", "clean"], env=APT_ENV, stdin=subprocess.DEVNULL,
+                        capture_output=True, timeout=300, check=False,
+                    )
+                    cleared = True
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            log.write(f"\n=== FAILED: {exc}\n")
+            if cleared:
+                log.write("=== apt cache cleared after the failure\n")
+        finally:
+            state["finished"] = time.time()
+            state["step"] = None
+            _os_update_save(state)
+
+    _LOGGER.info("os-update %s: %s (%d package(s))", mode, state["result"], len(state["packages"]))
+    return 0 if state["result"] == "success" else 1
+
+
+def _autoupdate_state() -> dict:
+    """Whether automatic security updates are on, and what they last did.
+
+    Returns:
+        ``installed``, ``enabled``, ``last_run`` and ``last_packages``.
+    """
+    try:
+        periodic_on = bool(_PERIODIC_ON_RE.search(AUTOUPDATE_PERIODIC.read_text(encoding="utf-8")))
+    except OSError:
+        periodic_on = False
+    timers_on = True
+    for timer in AUTOUPDATE_TIMERS:
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-enabled", timer], capture_output=True, text=True, timeout=15
+            )
+        except (OSError, subprocess.SubprocessError):
+            timers_on = False
+            break
+        if result.stdout.strip() != "enabled":
+            timers_on = False
+    last_run = last_packages_at = None
+    last_packages: list[str] = []
+    try:
+        lines = AUTOUPDATE_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        run = _UNATTENDED_RUN_RE.match(line)
+        if run:
+            last_run = run.group("when")
+        pkgs = _UNATTENDED_PACKAGES_RE.match(line)
+        if pkgs:
+            last_packages_at = pkgs.group("when")
+            last_packages = pkgs.group("pkgs").split()
+    return {
+        "installed": AUTOUPDATE_BINARY.exists(),
+        "configured": AUTOUPDATE_PERIODIC.exists(),
+        "enabled": periodic_on and timers_on,
+        "last_run": last_run,
+        "last_packages_at": last_packages_at,
+        "last_packages": last_packages,
+    }
+
+
+#: What ``disk-clean`` may run, by name. Nothing the caller sends reaches argv.
+#: ``image prune -a`` keeps every image a container still refers to, stopped
+#: ones included, so Node-RED and Caddy keep theirs.
+DISK_CLEAN: dict[str, tuple[list[str], int]] = {
+    "docker": (["docker", "image", "prune", "-a", "-f"], 300),
+    "apt": (["apt-get", "clean"], 120),
+}
+
+
+def _bytes_in(path: str) -> int | None:
+    """Bytes under *path* on its own filesystem, or None if du cannot say."""
+    try:
+        out = subprocess.run(
+            ["du", "-sxb", path], capture_output=True, text=True, timeout=60
+        ).stdout
+        return int(out.split()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def _docker_images() -> list[dict] | None:
+    """Every image with its size and whether a container uses it.
+
+    ``docker image inspect`` gives sizes in bytes; ``docker system df`` only
+    gives them rounded for a person to read. None when Docker is not there.
+    """
+    def docker(*args: str) -> list[str]:
+        result = subprocess.run(
+            ["docker", *args], capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise OSError(result.stderr.strip())
+        return [line for line in result.stdout.splitlines() if line.strip()]
+
+    try:
+        ids = docker("image", "ls", "-q", "--no-trunc")
+        if not ids:
+            return []
+        containers = docker("ps", "-aq")
+        used = set(docker("inspect", "--format", "{{.Image}}", *containers)) if containers else set()
+        images = []
+        template = "{{.Id}} {{.Size}} {{json .RepoTags}} {{json .RepoDigests}}"
+        for line in docker("image", "inspect", "--format", template, *ids):
+            image_id, size, tags, digests = line.split(" ", 3)
+            # An image pinned by digest, as Caddy is, has no tag to show.
+            names = json.loads(tags) or [d[:d.index("@") + 20] for d in json.loads(digests) or []]
+            images.append({
+                "tags": names,
+                "size": int(size),
+                "in_use": image_id in used,
+            })
+        return images
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _disk_usage() -> int:
+    """Print what takes room on ``/`` that the app cannot read itself.
+
+    Returns:
+        0, with a JSON object on stdout. Changes nothing.
+    """
+    print(json.dumps({
+        "images": _docker_images(),
+        "journal": _bytes_in("/var/log/journal"),
+        "apt_cache": _bytes_in("/var/cache/apt/archives"),
+    }))
+    return 0
+
+
+def _disk_clean(target: str | None) -> int:
+    """Free space in one of the fixed places in :data:`DISK_CLEAN`."""
+    if target not in DISK_CLEAN:
+        raise Refused(f"disk-clean takes one of {', '.join(DISK_CLEAN)}")
+    argv, timeout = DISK_CLEAN[target]
+    return _run(argv, timeout=timeout)
+
+
+def _os_autoupdate_set(argument: str | None) -> int:
+    """Switch automatic security updates on or off.
+
+    Only the switch: which archive they come from (Debian-Security alone) and
+    that they never reboot are in 52boneio-unattended, installed by a signed
+    migration and not writable from here. The file written is a fixed template
+    with one of two values, so nothing the caller sends reaches apt's config.
+
+    Args:
+        argument: ``on`` or ``off``.
+
+    Returns:
+        0 on success.
+
+    Raises:
+        Refused: For anything else, or before migration 1.6.22 has run.
+    """
+    if argument not in ("on", "off"):
+        raise Refused(f"expected on or off, not {argument!r}")
+    if not AUTOUPDATE_PERIODIC.exists():
+        raise Refused(
+            f"{AUTOUPDATE_PERIODIC} is missing; apply boneIO migration 1.6.22 first"
+        )
+    value = "1" if argument == "on" else "0"
+    with tempfile.NamedTemporaryFile(
+        dir=AUTOUPDATE_PERIODIC.parent, delete=False, suffix=".tmp", mode="w",
+        encoding="utf-8",
+    ) as tmp:
+        tmp.write(_PERIODIC_TEMPLATE.format(value=value))
+        tmp_path = tmp.name
+    os.chmod(tmp_path, 0o644)
+    os.replace(tmp_path, AUTOUPDATE_PERIODIC)
+    verb = "enable" if argument == "on" else "disable"
+    rc = 0
+    for timer in AUTOUPDATE_TIMERS:
+        rc |= _run(["systemctl", verb, "--now", timer])
+    _LOGGER.info("Automatic security updates switched %s", argument)
+    if rc == 0:
+        print(json.dumps(_autoupdate_state()))
+    return rc
+
+
+def _os_update_log() -> int:
+    """Print the end of the last run's log.
+
+    Returns:
+        0, with the log text on stdout (empty when nothing has run).
+    """
+    try:
+        lines = OS_UPDATE_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    print("\n".join(lines[-OS_UPDATE_LOG_TAIL:]))
+    return 0
+
+
+# ----------------------------------------------------------------- selftest
+
+
+def selftest() -> int:
+    """Check the helper can do its job, changing nothing.
+
+    Returns:
+        0 when healthy.
+    """
+    problems: list[str] = []
+    if shutil.which("ip") is None:
+        problems.append("ip is not installed, so CAN cannot be configured")
+    if shutil.which("hostnamectl") is None:
+        problems.append("hostnamectl is not installed")
+    if shutil.which("systemctl") is None:
+        problems.append("systemctl is not installed, so NTP servers cannot be applied")
+    if shutil.which("chpasswd") is None:
+        problems.append("chpasswd is not installed, so the service password cannot be set")
+    try:
+        _find_uenv()
+    except Refused as exc:
+        problems.append(str(exc))
+
+    for problem in problems:
+        _LOGGER.error("selftest: %s", problem)
+    if problems:
+        return 1
+    _LOGGER.info("selftest: %d verbs available.", len(VERBS))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point.
+
+    Returns:
+        Process exit status.
+    """
+    parser = argparse.ArgumentParser(description="boneIO privileged system operations")
+    parser.add_argument("verb", nargs="?", help=f"one of: {', '.join(VERBS)}")
+    parser.add_argument("argument", nargs="?", default=None)
+    parser.add_argument("value", nargs="?", default=None)
+    parser.add_argument(
+        "--list-verbs", action="store_true", help="print the allowed verbs as JSON"
+    )
+    parser.add_argument(
+        "--selftest", action="store_true", help="check the helper, change nothing"
+    )
+    args, unparsed = parser.parse_known_args(argv)
+
+    if args.list_verbs:
+        print(json.dumps(list(VERBS)))
+        return 0
+
+    _assert_root()
+
+    if args.selftest:
+        return selftest()
+
+    if not args.verb:
+        parser.error("a verb is required")
+
+    try:
+        if unparsed:
+            # Argparse could not place these, and they are still caller input.
+            if args.argument is None and len(unparsed) == 1:
+                args.argument = unparsed[0]
+            elif args.value is None and len(unparsed) == 1:
+                args.value = unparsed[0]
+            else:
+                raise Refused(f"unexpected arguments: {unparsed}")
+
+        if args.verb == "can-up":
+            return _can_up(args.argument, args.value)
+        if args.verb == "can-restart":
+            return _can_restart(args.argument)
+        if args.verb == "can-down":
+            return _can_down(args.argument)
+        if args.verb == "overlay-get":
+            return _overlay_get()
+        if args.verb == "overlay-set":
+            return _overlay_set(args.argument)
+        if args.verb == "overlay-repair":
+            return _overlay_repair(args.argument, args.value)
+        if args.verb == "mqtt-password":
+            return _mqtt_password(args.argument)
+        if args.verb == "mqtt-reload":
+            return _mqtt_reload()
+        if args.verb in ("mqtt-tls-state", "mqtt-tls-cert", "mqtt-tls-cert-remove"):
+            if args.argument is not None or args.value is not None:
+                raise Refused(f"{args.verb} takes no arguments")
+            if args.verb == "mqtt-tls-state":
+                return _mqtt_tls_state()
+            if args.verb == "mqtt-tls-cert":
+                return _mqtt_tls_cert()
+            return _mqtt_tls_cert_remove()
+        if args.verb == "mqtt-tls-mode":
+            return _mqtt_tls_mode(args.argument)
+        if args.verb == "service-password-state":
+            return _service_password_state_verb()
+        if args.verb == "service-password-init":
+            return _service_password_init()
+        if args.verb == "service-password-change":
+            if args.argument is not None or args.value is not None:
+                # The account is fixed. Ignoring a name here would read as if
+                # the caller could pick one.
+                raise Refused("service-password-change takes no arguments")
+            return _service_password_change()
+        if args.verb == "hostname-set":
+            return _hostname_set(args.argument)
+        if args.verb == "ntp-get":
+            return _ntp_get()
+        if args.verb == "ntp-set":
+            return _ntp_set(args.argument)
+        if args.verb == "os-update-state":
+            return _os_update_state_verb()
+        if args.verb == "os-update-start":
+            return _os_update_start(args.argument)
+        if args.verb == "os-update-run":
+            return _os_update_run(args.argument)
+        if args.verb == "os-update-log":
+            return _os_update_log()
+        if args.verb == "os-autoupdate-set":
+            return _os_autoupdate_set(args.argument)
+        if args.verb == "disk-usage":
+            if args.argument is not None:
+                raise Refused("disk-usage takes no arguments")
+            return _disk_usage()
+        if args.verb == "disk-clean":
+            if args.value is not None:
+                raise Refused("disk-clean takes one argument")
+            return _disk_clean(args.argument)
+        raise Refused(f"unknown verb {args.verb!r}. Allowed: {', '.join(VERBS)}")
+    except Refused as exc:
+        _LOGGER.error("REFUSED: %s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

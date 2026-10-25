@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  applyActionUpdate,
   cleanActionFields,
   validateAction,
   validateCondition,
   coverSupportsTilt,
   filterCoverActionsByTilt,
+  filterCoverActionsByPosition,
+  coverDataForAction,
   TILT_ACTIONS,
 } from './helpers';
 
@@ -588,5 +591,78 @@ describe('TILT_ACTIONS', () => {
 
   it('has 3 entries', () => {
     expect(TILT_ACTIONS).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SET_POSITION
+// ---------------------------------------------------------------------------
+
+describe('SET_POSITION', () => {
+  it('requires a position', () => {
+    const base = { action: 'cover', boneio_cover: 'blind_01', action_cover: 'SET_POSITION' } as const;
+    expect(validateAction(base, t)).toBe('event_form.validation_position_required');
+    expect(validateAction({ ...base, data: { position: '' } }, t)).toBe('event_form.validation_position_required');
+    expect(validateAction({ ...base, data: { position: 0 } }, t)).toBeNull();
+  });
+
+  it('is hidden only when discovery says the cover cannot be positioned', () => {
+    const opts = ['OPEN', 'SET_POSITION'];
+    expect(filterCoverActionsByPosition(opts, { id: 'c1', supports_position: false })).toEqual(['OPEN']);
+    expect(filterCoverActionsByPosition(opts, { id: 'c1', supports_position: true })).toEqual(opts);
+    expect(filterCoverActionsByPosition(opts, { id: 'c1' })).toEqual(opts);
+    expect(filterCoverActionsByPosition(opts, undefined)).toEqual(opts);
+  });
+});
+
+describe('coverDataForAction', () => {
+  it('keeps only the key the new action reads', () => {
+    const data = { position: 40, tilt_position: 20, always_open_till: 60 };
+    expect(coverDataForAction(data, 'SET_POSITION')).toEqual({ position: 40 });
+    expect(coverDataForAction(data, 'TILT')).toEqual({ tilt_position: 20 });
+    expect(coverDataForAction(data, 'SMART_TOGGLE')).toEqual({ always_open_till: 60 });
+  });
+
+  it('drops everything for actions without data', () => {
+    expect(coverDataForAction({ position: 40 }, 'OPEN')).toBeUndefined();
+    expect(coverDataForAction({ tilt_position: 20 }, 'SET_POSITION')).toBeUndefined();
+    expect(coverDataForAction(undefined, 'TILT')).toBeUndefined();
+  });
+});
+
+describe('applyActionUpdate', () => {
+  it('sets a single field without touching the rest', () => {
+    const before = { action: 'output', boneio_output: 'out_01' };
+    const after = applyActionUpdate(before, 'action_output', 'ON');
+    expect(after).toEqual({ action: 'output', boneio_output: 'out_01', action_output: 'ON' });
+    expect(before).not.toHaveProperty('action_output');
+  });
+
+  it('applies every field of a __batch at once', () => {
+    // How the condition editor swaps between the single and multiple forms:
+    // one update, never a render where both are set.
+    const before: Record<string, unknown> = { condition: { type: 'time' } };
+    const after = applyActionUpdate(before, '__batch', {
+      conditions: { mode: 'and', list: [{ type: 'time' }, { type: 'date' }] },
+      condition: undefined,
+    });
+    expect(after).not.toHaveProperty('condition');
+    expect(after.conditions).toEqual({ mode: 'and', list: [{ type: 'time' }, { type: 'date' }] });
+  });
+
+  it('removes a key set to undefined rather than storing a null', () => {
+    const after = applyActionUpdate({ delay: '2min', action: 'output' }, 'delay', undefined);
+    expect(after).not.toHaveProperty('delay');
+    expect(after.action).toBe('output');
+  });
+
+  it('never writes the sentinel itself', () => {
+    // The regression this guards: treating __batch as a field name stored a
+    // junk key and dropped the update, so "Add condition" did nothing.
+    const after = applyActionUpdate({} as Record<string, unknown>, '__batch', {
+      condition: { type: 'sun' },
+    });
+    expect(after).not.toHaveProperty('__batch');
+    expect(after.condition).toEqual({ type: 'sun' });
   });
 });

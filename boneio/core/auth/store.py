@@ -18,6 +18,10 @@ import logging
 import os
 import tempfile
 import threading
+<<<<<<< ours
+=======
+import time
+>>>>>>> theirs
 from pathlib import Path
 
 from boneio.core.auth.hashing import hash_password, verify_password
@@ -34,6 +38,15 @@ _FORBIDDEN_CHARS = set('/\\:"\'`$\x00\r\n\t')
 _MAX_USERNAME_LEN = 64
 _MIN_PASSWORD_LEN = 8
 
+<<<<<<< ours
+=======
+# Below this, a username is too short to be worth banning from inside a
+# password: forbidding "ab" would reject half the dictionary for no real gain.
+# At or above it, containing the username is what makes a password guessable by
+# anyone who can read the login form.
+_MIN_USERNAME_IN_PASSWORD_LEN = 4
+
+>>>>>>> theirs
 
 class UserStoreError(Exception):
     """Raised when an account operation cannot be carried out."""
@@ -68,6 +81,7 @@ def normalize_username(username: str) -> str:
     return cleaned.lower()
 
 
+<<<<<<< ours
 def validate_password(password: str) -> None:
     """Reject passwords that are too short to be worth hashing.
 
@@ -76,12 +90,44 @@ def validate_password(password: str) -> None:
 
     Raises:
         UserStoreError: If the password is shorter than the minimum length.
+=======
+def validate_password(password: str, username: str | None = None) -> None:
+    """Reject passwords that are too short or too close to the account name.
+
+    The username is public — it is typed into the same form, logged, and
+    embedded in every token — so a password built out of it is guessable by
+    anyone who can reach the login page. Rejecting it is the one context-specific
+    rule worth enforcing on a device whose web UI is often the only thing
+    between a LAN and a box full of relays.
+
+    Args:
+        password: Plain-text password.
+        username: Account the password is for, when known. Omitting it skips
+            the similarity rule, never the length one.
+
+    Raises:
+        UserStoreError: If the password is shorter than the minimum length, or
+            is (or contains) the username.
+>>>>>>> theirs
     """
     if not password or len(password) < _MIN_PASSWORD_LEN:
         raise UserStoreError(
             f"Password must be at least {_MIN_PASSWORD_LEN} characters"
         )
 
+<<<<<<< ours
+=======
+    name = (username or "").strip().casefold()
+    if not name:
+        return
+
+    secret = password.casefold()
+    if name == secret or (
+        len(name) >= _MIN_USERNAME_IN_PASSWORD_LEN and name in secret
+    ):
+        raise UserStoreError("Password must not contain the username")
+
+>>>>>>> theirs
 
 class UserStore:
     """Loads, queries and persists web UI accounts."""
@@ -303,7 +349,11 @@ class UserStore:
         """
         user = self.get_user(username)
         if user is None:
+<<<<<<< ours
             verify_password(password or "x", _DUMMY_HASH)
+=======
+            verify_password(password or "x", dummy_hash())
+>>>>>>> theirs
             return None
 
         if not verify_password(password, user.password_hash):
@@ -342,7 +392,11 @@ class UserStore:
         self._ensure_loaded()
         key = normalize_username(username)
         if enforce_policy:
+<<<<<<< ours
             validate_password(password)
+=======
+            validate_password(password, username)
+>>>>>>> theirs
         elif not password:
             raise UserStoreError("Password must not be empty")
 
@@ -365,7 +419,15 @@ class UserStore:
         return user
 
     def set_password(self, username: str, password: str) -> User:
+<<<<<<< ours
         """Replace an account's password.
+=======
+        """Replace an account's password and revoke its sessions.
+
+        Every token issued before the change stops being honoured; the caller
+        that made the change has to be handed a fresh one if it is to stay
+        signed in.
+>>>>>>> theirs
 
         Args:
             username: Account to change.
@@ -380,7 +442,11 @@ class UserStore:
         """
         self._ensure_loaded()
         key = normalize_username(username)
+<<<<<<< ours
         validate_password(password)
+=======
+        validate_password(password, username)
+>>>>>>> theirs
 
         with self._lock:
             user = self._users.get(key)
@@ -388,11 +454,85 @@ class UserStore:
                 raise UserStoreError(f"No such account: {username}")
             user.password_hash = hash_password(password)
             user.updated_at = utc_now()
+<<<<<<< ours
+=======
+            # Signs out every session opened with the old password, the
+            # stolen one being the point.
+            user.session_version += 1
+>>>>>>> theirs
             self._save()
 
         _LOGGER.info("Password changed for account '%s'", user.username)
         return user
 
+<<<<<<< ours
+=======
+    def record_session_failure(self, username: str, session_id: str, until: int) -> int:
+        """Count a wrong password typed by one signed-in session.
+
+        Cumulative for the life of the session, not a sliding window: a window
+        lets a patient guesser stay under it forever, a few tries at a time.
+        The count goes when the password is typed right or the token expires.
+
+        Args:
+            username: Account the session belongs to.
+            session_id: The session (see middleware.auth.session_id_of).
+            until: Unix time the session's token expires.
+
+        Returns:
+            The session's count after this one, or 0 if the account is gone.
+        """
+        self._ensure_loaded()
+        key = normalize_username(username)
+        with self._lock:
+            user = self._users.get(key)
+            if user is None:
+                return 0
+            _prune(user)
+            entry = user.session_failures.get(session_id, {"count": 0, "until": until})
+            entry = {"count": entry["count"] + 1, "until": max(entry["until"], until)}
+            user.session_failures[session_id] = entry
+            self._save()
+            return entry["count"]
+
+    def clear_session_failures(self, username: str, session_id: str) -> None:
+        """Forget a session's wrong passwords once it has typed the right one.
+
+        Args:
+            username: Account the session belongs to.
+            session_id: The session.
+        """
+        self._ensure_loaded()
+        key = normalize_username(username)
+        with self._lock:
+            user = self._users.get(key)
+            if user is None or session_id not in user.session_failures:
+                return
+            del user.session_failures[session_id]
+            self._save()
+
+    def revoke_session(self, username: str, session_id: str, until: int) -> None:
+        """Sign one session out, leaving the account's other sessions alone.
+
+        Args:
+            username: Account the session belongs to.
+            session_id: The session to refuse from now on.
+            until: Unix time its token expires; the entry is useless after.
+        """
+        self._ensure_loaded()
+        key = normalize_username(username)
+        with self._lock:
+            user = self._users.get(key)
+            if user is None:
+                return
+            _prune(user)
+            user.revoked_sessions[session_id] = until
+            user.session_failures.pop(session_id, None)
+            self._save()
+
+        _LOGGER.warning("Signed out one session of '%s'", user.username)
+
+>>>>>>> theirs
     def set_role(self, username: str, role: Role) -> User:
         """Change an account's role.
 
@@ -471,5 +611,45 @@ class UserStore:
             )
 
 
+<<<<<<< ours
 # Hashed once at import so an unknown username costs the same as a known one.
 _DUMMY_HASH = hash_password("boneio-nonexistent-account-placeholder")
+=======
+#: Verified against when the username does not exist, so that answering an
+#: unknown username costs the same as answering a known one.
+#:
+#: Producing it is a real password hash - about a second on a BeagleBone - and
+#: it used to be computed at import, which put it on the boot path of every
+#: controller: runner.py imports this module before it even knows whether the
+#: device needs the "setup required" notice. It is computed on first use
+#: instead, and warmed by the web server as it comes up, so a login still finds
+#: it ready. Recomputed rather than stored as a constant on purpose: a hash
+#: carries the cost parameters it was made with, and a stale one would verify
+#: faster than a real password - handing back exactly the timing difference
+#: this exists to erase.
+_DUMMY_HASH: str | None = None
+_DUMMY_HASH_LOCK = threading.Lock()
+
+
+def dummy_hash() -> str:
+    """The placeholder hash, computed once."""
+    global _DUMMY_HASH
+
+    with _DUMMY_HASH_LOCK:
+        if _DUMMY_HASH is None:
+            _DUMMY_HASH = hash_password("boneio-nonexistent-account-placeholder")
+        return _DUMMY_HASH
+
+
+def _prune(user: User) -> None:
+    """Drop session entries whose tokens have expired anyway.
+
+    Args:
+        user: Account to tidy, modified in place.
+    """
+    now = int(time.time())
+    user.revoked_sessions = {k: v for k, v in user.revoked_sessions.items() if v > now}
+    user.session_failures = {
+        k: v for k, v in user.session_failures.items() if v["until"] > now
+    }
+>>>>>>> theirs

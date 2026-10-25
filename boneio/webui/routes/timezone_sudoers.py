@@ -1,7 +1,9 @@
-"""Timezone/timedatectl sudoers management for boneIO.
+"""Reporting on the timedatectl sudoers rule.
 
-Provides functions to check and fix sudoers configuration
-for timezone / NTP management commands (timedatectl set-timezone, set-ntp).
+Read-only. The rule that lets boneIO run ``timedatectl set-timezone`` and
+``set-ntp`` is installed by migration 1.6.7, not from here — it used to be
+created by an endpoint that accepted the operator's sudo password over HTTP,
+and that password is shared across controllers.
 """
 
 from __future__ import annotations
@@ -10,31 +12,50 @@ import asyncio
 import contextlib
 import logging
 import os
+from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
 
 # Sudoers file path for timezone commands
 SUDOERS_FILE = "/etc/sudoers.d/boneio-timedatectl"
 
-# Expected sudoers content template
-# {user} will be replaced with the current system user
-SUDOERS_TEMPLATE = """{user} ALL=(ALL) NOPASSWD: /usr/bin/timedatectl set-timezone *
-{user} ALL=(ALL) NOPASSWD: /usr/bin/timedatectl set-ntp *
-"""
+#: The rule as it is actually shipped. Read from the migration asset rather
+#: than repeated here: the asset is what lands on the device, and a second copy
+#: in this module would drift from it silently — it already had, with "(ALL)"
+#: here against the narrower "(root)" in the asset, which would have made the
+#: check below report a mismatch on a correctly configured controller.
+SUDOERS_ASSET = (
+    Path(__file__).resolve().parents[2]
+    / "migrations" / "assets" / "sudoers" / "boneio-timedatectl"
+)
 
 
 def get_sudoers_content(user: str | None = None) -> str:
-    """Generate expected sudoers file content for timedatectl.
+    """The sudoers rules boneIO expects for timedatectl.
 
     Args:
-        user: System user name. Defaults to current user or 'boneio'.
+        user: Ignored; kept so existing callers do not break. The rule is
+            written for the service account, and taking the name from the
+            environment meant the expected content depended on who happened to
+            be logged in.
 
     Returns:
-        Sudoers file content string.
+        The rule lines, comments stripped, as they appear in the shipped asset.
     """
-    if user is None:
-        user = os.environ.get("USER", "boneio")
-    return SUDOERS_TEMPLATE.format(user=user)
+    try:
+        text = SUDOERS_ASSET.read_text(encoding="utf-8")
+    except OSError:
+        _LOGGER.warning("Cannot read %s; falling back to the built-in rule", SUDOERS_ASSET)
+        text = (
+            "boneio ALL=(root) NOPASSWD: /usr/bin/timedatectl set-timezone *\n"
+            "boneio ALL=(root) NOPASSWD: /usr/bin/timedatectl set-ntp *\n"
+        )
+    rules = [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(rules) + "\n"
 
 
 async def check_sudo_nopasswd_for_timedatectl() -> dict:
@@ -55,6 +76,7 @@ async def check_sudo_nopasswd_for_timedatectl() -> dict:
         "error": None,
     }
 
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "sudo", "-n", "-l",
@@ -100,7 +122,19 @@ async def check_sudo_nopasswd_for_timedatectl() -> dict:
             )
 
     except TimeoutError:
-        result["error"] = "sudo check timed out"
+        # Not left behind blocking: wait_for has only cancelled the read.
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        # `sudo -l` can block on name resolution when the network is down,
+        # which is the same outage that makes NTP unreachable — so this is
+        # exactly the moment somebody opens this page. Say what is still
+        # known: the file either exists or it does not, and that answers
+        # "did the migration run" without asking sudo anything.
+        result["error"] = (
+            "sudo check timed out; the rule file "
+            + ("is present" if result["sudoers_file_exists"] else "is missing")
+        )
     except FileNotFoundError:
         result["error"] = "sudo command not found"
     except Exception as e:
@@ -109,93 +143,9 @@ async def check_sudo_nopasswd_for_timedatectl() -> dict:
     return result
 
 
-async def create_timedatectl_sudoers_file(password: str) -> dict:
-    """Create /etc/sudoers.d/boneio-timedatectl with NOPASSWD rules.
-
-    Uses sudo with the provided password to write the sudoers file.
-
-    Args:
-        password: User's sudo password.
-
-    Returns:
-        Dictionary with status and message.
-    """
-    user = os.environ.get("USER", "boneio")
-    content = get_sudoers_content(user)
-
-    try:
-        # Write content to a temp file first, then move it with sudo
-        tmp_path = f"/tmp/boneio-timedatectl-sudoers-{os.getpid()}"
-
-        with open(tmp_path, "w") as f:
-            f.write(content)
-
-        # Validate the sudoers file before installing
-        validate_cmd = ["sudo", "-S", "visudo", "-c", "-f", tmp_path]
-        proc = await asyncio.create_subprocess_exec(
-            *validate_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=(password + "\n").encode()),
-            timeout=10,
-        )
-
-        if proc.returncode != 0:
-            stderr_str = stderr.decode().strip()
-            os.unlink(tmp_path)
-            if "incorrect password" in stderr_str.lower() or "sorry" in stderr_str.lower():
-                return {"status": "error", "message": "Authentication failed.", "_auth_failed": True}
-            return {"status": "error", "message": f"Sudoers validation failed: {stderr_str}"}
-
-        # Copy the validated file to /etc/sudoers.d/ and set correct permissions
-        install_cmd = ["sudo", "-S", "cp", tmp_path, SUDOERS_FILE]
-        proc = await asyncio.create_subprocess_exec(
-            *install_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(
-            proc.communicate(input=(password + "\n").encode()),
-            timeout=10,
-        )
-
-        if proc.returncode != 0:
-            stderr_str = stderr.decode().strip()
-            os.unlink(tmp_path)
-            if "incorrect password" in stderr_str.lower() or "sorry" in stderr_str.lower():
-                return {"status": "error", "message": "Authentication failed.", "_auth_failed": True}
-            return {"status": "error", "message": f"Failed to install sudoers file: {stderr_str}"}
-
-        # Set correct permissions (must be 0440)
-        chmod_cmd = ["sudo", "-S", "chmod", "0440", SUDOERS_FILE]
-        proc = await asyncio.create_subprocess_exec(
-            *chmod_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(
-            proc.communicate(input=(password + "\n").encode()),
-            timeout=10,
-        )
-
-        # Clean up temp file
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-
-        _LOGGER.info("Successfully created sudoers file for timedatectl: %s", SUDOERS_FILE)
-        return {
-            "status": "success",
-            "message": f"Sudoers file created at {SUDOERS_FILE}",
-            "content": content,
-        }
-
-    except TimeoutError:
-        return {"status": "error", "message": "sudo command timed out"}
-    except Exception as e:
-        _LOGGER.error("Failed to create timedatectl sudoers file: %s", e)
-        return {"status": "error", "message": str(e)}
+# create_timedatectl_sudoers_file() is gone with the endpoint that called it.
+# It took the operator's sudo password, validated the fragment with
+# `sudo -S visudo` and installed it. The file now arrives through migration
+# 1.6.7, over a channel that needs no password at all — see the module that
+# replaced it for why an endpoint asking for that password was worth removing
+# even though it never stored one.

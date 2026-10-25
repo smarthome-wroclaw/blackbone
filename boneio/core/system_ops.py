@@ -1,0 +1,447 @@
+"""Privileged system operations, through the named-operation helper.
+
+CAN interface setup, the device-tree overlay and the hostname all needed root.
+They got it by asking the operator for their system password over HTTP, or by
+leaning on wildcard sudo rules — ``ip link set can0 *`` and a ``sed -i``
+expression this process composed and root executed.
+
+``boneio-system`` replaces both. Every argument is checked against a closed set
+inside the helper, so nothing here can widen what runs as root, and no password
+is involved: the sudoers rule is NOPASSWD precisely because the vocabulary is
+fixed.
+
+When the helper is not installed yet these operations report that rather than
+falling back to the old path. Unlike container management, where a fallback
+keeps a pre-migration device working, falling back here would mean keeping the
+password prompt and the wildcard rules alive — which is the thing being removed.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import subprocess
+import threading
+from concurrent.futures import Future
+from dataclasses import dataclass
+
+_LOGGER = logging.getLogger(__name__)
+
+HELPER_PATH = "/usr/sbin/boneio-system"
+
+_NOT_INSTALLED = (
+    f"{HELPER_PATH} is not installed. This operation used to ask for your "
+    "system password; it now goes through a privileged helper installed by a "
+    "system migration. Apply the pending system migrations and try again."
+)
+
+
+@dataclass
+class Result:
+    """Outcome of a privileged system operation.
+
+    Attributes:
+        returncode: Process exit status.
+        stdout: Captured standard output.
+        stderr: Captured standard error.
+    """
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        """Whether the operation succeeded."""
+        return self.returncode == 0
+
+    def json(self) -> dict | None:
+        """Parse the output as a JSON object.
+
+        Returns:
+            The parsed output, or None when it is not JSON.
+        """
+        try:
+            parsed = json.loads(self.stdout.strip())
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+
+_available: bool | None = None
+_available_lock = threading.Lock()
+
+
+def helper_available(recheck: bool = False) -> bool:
+    """Whether ``boneio-system`` is installed and callable without a password.
+
+    Args:
+        recheck: Ask again instead of reusing the cached answer.
+
+    Returns:
+        True when the helper can be used.
+    """
+    global _available
+    if _available is not None and not recheck:
+        return _available
+
+    # Every verb asks this first, so at startup several threads arrive before
+    # the first answer; they wait for that one rather than each probing.
+    with _available_lock:
+        if _available is not None and not recheck:
+            return _available
+        if not (os.path.isfile(HELPER_PATH) and os.access(HELPER_PATH, os.X_OK)):
+            _available = False
+            return False
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", HELPER_PATH, "--list-verbs"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            _LOGGER.warning("boneio-system is present but not callable: %s", exc)
+            _available = False
+            return False
+        _available = result.returncode == 0
+        return _available
+
+
+#: Verbs that only read, and take no stdin. Callers asking for one of these at
+#: the same time get the answer of a single helper run: each costs 2 s of CPU
+#: on a BeagleBone, and at startup the panel and the warm-up used to ask for
+#: the same state four times over, starving everything else on the one core.
+#: Only calls in flight are shared — no caching here, so a poll still sees
+#: progress. Never add a verb that changes something or reads stdin.
+_SHARED_READS = frozenset({
+    "service-password-state", "os-update-state", "os-update-log",
+    "mqtt-tls-state", "overlay-get", "ntp-get", "disk-usage",
+})
+_in_flight: dict[tuple[str, ...], Future] = {}
+_in_flight_lock = threading.Lock()
+
+
+def run(
+    verb: str, *arguments: str, timeout: int = 60, stdin: str | None = None
+) -> Result:
+    """Perform one named system operation.
+
+    Args:
+        verb: One of the helper's verbs.
+        *arguments: Its arguments; the helper validates them.
+        timeout: Seconds to allow.
+        stdin: Text to feed the helper. Used for secrets, which must not travel
+            as arguments — the process table is readable by every local account.
+
+    Returns:
+        The outcome.
+    """
+    if not helper_available():
+        return Result(1, "", _NOT_INSTALLED)
+    if stdin is not None or verb not in _SHARED_READS:
+        return _run(verb, arguments, timeout, stdin)
+
+    key = (verb, *(str(a) for a in arguments))
+    with _in_flight_lock:
+        shared = _in_flight.get(key)
+        if shared is None:
+            mine = _in_flight[key] = Future()
+    if shared is not None:
+        return shared.result()
+    try:
+        result = _run(verb, arguments, timeout, None)
+    except BaseException as exc:
+        mine.set_exception(exc)
+        raise
+    else:
+        mine.set_result(result)
+        return result
+    finally:
+        with _in_flight_lock:
+            del _in_flight[key]
+
+
+def _run(verb: str, arguments: tuple, timeout: int, stdin: str | None) -> Result:
+    argv = ["sudo", "-n", HELPER_PATH, verb, *(str(a) for a in arguments)]
+    # argv only, never stdin: that is where the secrets are.
+    _LOGGER.info("system operation: %s", " ".join(argv[3:]))
+    try:
+        completed = subprocess.run(
+            argv, input=stdin, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return Result(1, "", f"timed out after {timeout}s")
+    except OSError as exc:
+        return Result(1, "", str(exc))
+
+    if completed.returncode != 0:
+        _LOGGER.warning(
+            "system operation %s failed (rc=%d): %s",
+            verb, completed.returncode, completed.stderr.strip(),
+        )
+    return Result(completed.returncode, completed.stdout or "", completed.stderr or "")
+
+
+def can_up(interface: str, bitrate: int, timeout: int = 60) -> Result:
+    """Bring a CAN interface up at *bitrate*."""
+    return run("can-up", interface, bitrate, timeout=timeout)
+
+
+def can_down(interface: str, timeout: int = 30) -> Result:
+    """Take a CAN interface down."""
+    return run("can-down", interface, timeout=timeout)
+
+
+def can_restart(interface: str, timeout: int = 30) -> Result:
+    """Bring a CAN controller out of bus-off, keeping its bitrate."""
+    return run("can-restart", interface, timeout=timeout)
+
+
+def overlay_get(timeout: int = 30) -> Result:
+    """Read the device-tree overlay configured in uEnv.txt."""
+    return run("overlay-get", timeout=timeout)
+
+
+def overlay_set(overlay: str, timeout: int = 30) -> Result:
+    """Point uEnv.txt at one of the shipped overlays."""
+    return run("overlay-set", overlay, timeout=timeout)
+
+
+def overlay_repair(timeout: int = 60) -> Result:
+    """Copy a missing boneIO overlay into the boot kernel's directories.
+
+    Files only: the helper leaves uEnv.txt as it is. The output is the kernel
+    check's report — ``status`` ok, repaired or problem, and ``message``.
+    """
+    return run("overlay-repair", timeout=timeout)
+
+
+def mqtt_password(account: str, password: str, timeout: int = 60) -> Result:
+    """Set a broker password for one of the managed accounts.
+
+    The password goes over stdin. The rule this replaces passed it to
+    ``mosquitto_passwd -b`` as an argument, where ``ps`` could read it for as
+    long as the command ran.
+
+    Args:
+        account: ``boneio``, ``homeassistant`` or ``mqtt``.
+        password: The new password.
+        timeout: Seconds to allow.
+
+    Returns:
+        The outcome.
+    """
+    return run("mqtt-password", account, timeout=timeout, stdin=f"{password}\n")
+
+
+def service_password_state(timeout: int = 30) -> str | None:
+    """How the boneio login stands: locked, empty, shipped, set or unknown.
+
+    Returns:
+        The state, or None when the helper is not there to ask.
+    """
+    result = run("service-password-state", timeout=timeout)
+    if not result.ok:
+        return None
+    parsed = result.json() or {}
+    state = parsed.get("state")
+    return state if isinstance(state, str) else None
+
+
+def service_password_init(password: str, timeout: int = 60) -> Result:
+    """Set the boneio login password, once.
+
+    The helper allows this only while the account is still in a state the
+    factory left — locked, on the shipped password, or with none — and only the
+    first time. Anything else is the owner's password, and changing it is
+    theirs to do with ``passwd``. The password goes over stdin, never as an
+    argument.
+
+    Args:
+        password: The password the owner chose.
+        timeout: Seconds to allow.
+
+    Returns:
+        The outcome.
+    """
+    return run("service-password-init", timeout=timeout, stdin=f"{password}\n")
+
+
+def service_password_change(current: str, new: str, timeout: int = 60) -> Result:
+    """Change the boneio login password, given the current one.
+
+    ``passwd`` as root, for the fixed account: the helper checks *current*
+    against /etc/shadow and counts wrong ones where this process cannot reset
+    the count. Both go over stdin, one per line. The outcome is JSON on stdout
+    — see ``service-password-change`` in the helper.
+
+    Args:
+        current: The SSH password the account has now.
+        new: The one it should have.
+        timeout: Seconds to allow; a wrong password costs the helper two.
+
+    Returns:
+        The outcome.
+    """
+    return run("service-password-change", timeout=timeout, stdin=f"{current}\n{new}\n")
+
+
+def mqtt_reload(timeout: int = 30) -> Result:
+    """Have the broker re-read its password file."""
+    return run("mqtt-reload", timeout=timeout)
+
+
+#: The broker's TLS modes: plain only, TLS on 8883 beside plain 1883, and TLS
+#: for the network with plain 1883 kept on loopback.
+MQTT_TLS_MODES = ("off", "optional", "required")
+
+
+def mqtt_tls_state(timeout: int = 30) -> Result:
+    """The broker's TLS mode and whether it has a certificate, as JSON."""
+    return run("mqtt-tls-state", timeout=timeout)
+
+
+def mqtt_tls_cert(bundle: str, timeout: int = 90) -> Result:
+    """Install the broker's certificate chain and key.
+
+    Over stdin: the key is a secret, and the process table is readable by
+    every local account. With TLS on, the helper restarts the broker onto the
+    new pair and restores the old one if it does not come back.
+
+    Args:
+        bundle: The chain followed by the unencrypted key, in PEM.
+        timeout: Seconds to allow; a restart on a BeagleBone takes a few.
+    """
+    return run("mqtt-tls-cert", timeout=timeout, stdin=bundle)
+
+
+def mqtt_tls_cert_remove(timeout: int = 30) -> Result:
+    """Remove the broker's certificate and key; refused while TLS is on."""
+    return run("mqtt-tls-cert-remove", timeout=timeout)
+
+
+def mqtt_tls_mode(mode: str, timeout: int = 90) -> Result:
+    """Switch the broker's TLS mode. The helper validates *mode* again."""
+    if mode not in MQTT_TLS_MODES:
+        return Result(1, "", f"unknown mode {mode!r}")
+    return run("mqtt-tls-mode", mode, timeout=timeout)
+
+
+def hostname_set(name: str, timeout: int = 30) -> Result:
+    """Set the system hostname."""
+    return run("hostname-set", name, timeout=timeout)
+
+
+def ntp_get(timeout: int = 30) -> Result:
+    """Read the NTP servers boneIO has configured, as JSON on stdout."""
+    return run("ntp-get", timeout=timeout)
+
+
+def ntp_set(servers: list[str], timeout: int = 60) -> Result:
+    """Point systemd-timesyncd at *servers*; an empty list restores the defaults.
+
+    The list is joined and passed through without being trusted here. Each entry
+    is validated inside the helper, because that is the side of the boundary
+    where it matters: the value is written into a file systemd parses as root.
+    """
+    return run("ntp-set", ",".join(servers) if servers else "default", timeout=timeout)
+
+
+#: Modes the helper accepts for an operating system update.
+OS_UPDATE_MODES = ("check", "upgrade")
+
+
+def helper_supports(verb: str) -> bool:
+    """Whether the installed helper knows *verb*.
+
+    A device that has not applied the migration shipping a verb still has the
+    older helper, and the panel should say "apply the pending migration" rather
+    than show a button that can only fail. ``--list-verbs`` needs no root, so
+    this asks the binary directly instead of through sudo.
+
+    Args:
+        verb: The verb to look for.
+
+    Returns:
+        True when the helper is installed and lists it.
+    """
+    return verb in _helper_verbs()
+
+
+#: The helper's verbs, keyed by the file they came from. Starting the helper
+#: costs 1-2 s of Python start-up on a BeagleBone, and the panel asks before
+#: every call it makes — twice per poll of the OS update card. The list changes
+#: only when a migration replaces the helper, which changes this key.
+_verbs_cache: tuple[tuple[int, int, int], frozenset[str]] | None = None
+_verbs_lock = threading.Lock()
+
+
+def _helper_verbs() -> frozenset[str]:
+    try:
+        st = os.stat(HELPER_PATH)
+    except OSError:
+        return frozenset()
+    key = (st.st_ino, st.st_mtime_ns, st.st_size)
+    cached = _verbs_cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    # Concurrent first callers wait for one listing instead of each starting it.
+    with _verbs_lock:
+        cached = _verbs_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        return _list_verbs(key)
+
+
+def _list_verbs(key: tuple[int, int, int]) -> frozenset[str]:
+    global _verbs_cache
+    try:
+        completed = subprocess.run(
+            [HELPER_PATH, "--list-verbs"], capture_output=True, text=True, timeout=15
+        )
+        verbs = json.loads(completed.stdout.strip() or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return frozenset()
+    if not isinstance(verbs, list):
+        return frozenset()
+    found = frozenset(v for v in verbs if isinstance(v, str))
+    # A helper that failed to start prints nothing; do not remember that.
+    if completed.returncode == 0 and found:
+        _verbs_cache = (key, found)
+    return found
+
+
+def os_update_state(timeout: int = 30) -> Result:
+    """Last apt run, whether a reboot is needed, and the next boot's kernel."""
+    return run("os-update-state", timeout=timeout)
+
+
+def os_update_start(mode: str, timeout: int = 30) -> Result:
+    """Start ``check`` or ``upgrade`` in its own unit; returns at once.
+
+    The helper validates *mode* again. It is checked here only so a typo in the
+    application fails with a clear error instead of a refusal in the log.
+    """
+    if mode not in OS_UPDATE_MODES:
+        return Result(1, "", f"unknown mode {mode!r}")
+    return run("os-update-start", mode, timeout=timeout)
+
+
+def os_update_log(timeout: int = 30) -> Result:
+    """The end of the last apt run's log, as text on stdout."""
+    return run("os-update-log", timeout=timeout)
+
+
+def os_autoupdate_set(enabled: bool, timeout: int = 60) -> Result:
+    """Switch automatic security updates on or off. Never reboots either way."""
+    return run("os-autoupdate-set", "on" if enabled else "off", timeout=timeout)
+
+
+def disk_usage(timeout: int = 120) -> Result:
+    """Docker images, the journal and the apt cache, in bytes, as JSON."""
+    return run("disk-usage", timeout=timeout)
+
+
+def disk_clean(target: str, timeout: int = 360) -> Result:
+    """Free space in ``docker`` (unused images) or ``apt`` (the package cache)."""
+    return run("disk-clean", target, timeout=timeout)

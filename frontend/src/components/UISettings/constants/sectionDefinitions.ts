@@ -1,6 +1,21 @@
 /**
- * Section definitions for UISettings configuration editor.
- * Defines which sections require reload vs restart, icons, and other metadata.
+ * Section definitions for the settings editor.
+ *
+ * Sections are grouped by the question they answer, not by where their data
+ * lives — see SETTINGS_IA.md. The old split put the password boneIO connects
+ * with in Settings and the broker's own accounts in System, because one is in
+ * config.yaml and the other is not. Nobody asks that question; they ask how to
+ * change a password.
+ *
+ * Three lists, because "which group is it in" and "what does saving it cost"
+ * are different facts:
+ *
+ *   RELOAD_SECTIONS   config.yaml, applied without a restart
+ *   RESTART_SECTIONS  config.yaml, needs the app restarted — carries the badge
+ *   SYSTEM_SECTIONS   acts on the operating system, takes effect at once
+ *
+ * Only the group decides where an entry appears. The lists decide whether
+ * `requiresRestart` is true, which is what the badge and the save banner read.
  */
 
 export interface SectionDefinition {
@@ -9,15 +24,45 @@ export interface SectionDefinition {
   translationKey: string;
   /** Optional badge key (e.g. 'experimental') — shown next to section label. */
   badge?: string;
+<<<<<<< ours
   /** Optional group tag for visual grouping in sidebar (e.g. 'remote', 'web'). */
   group?: string;
+=======
+  /** Which sidebar group this belongs to. */
+  group?: SectionGroup;
+>>>>>>> theirs
 }
+
+export type SectionGroup =
+  | 'device'
+  | 'control'
+  | 'connections'
+  | 'services'
+  | 'access'
+  | 'maintenance'
+  | 'advanced';
+
+/**
+ * Groups in the order they appear in the sidebar, outermost concern first:
+ * what the controller is, what it drives, what it talks to, what runs on it,
+ * who may reach it, keeping it running, and the sharp tools.
+ */
+export const SECTION_GROUPS: { name: SectionGroup; icon: string; translationKey: string }[] = [
+  { name: 'device', icon: '🔧', translationKey: 'settings.group_device' },
+  { name: 'control', icon: '💡', translationKey: 'settings.group_control' },
+  { name: 'connections', icon: '🔌', translationKey: 'settings.group_connections' },
+  { name: 'services', icon: '📦', translationKey: 'settings.group_services' },
+  { name: 'access', icon: '🛡️', translationKey: 'settings.group_access' },
+  { name: 'maintenance', icon: '🧰', translationKey: 'settings.group_maintenance' },
+  { name: 'advanced', icon: '⚙️', translationKey: 'settings.group_advanced' },
+];
 
 /**
  * Sections that only require reload (hot reload supported).
  * Changes to these sections can be applied without restarting the application.
  */
 export const RELOAD_SECTIONS: SectionDefinition[] = [
+<<<<<<< ours
   { name: 'areas', icon: '🏠', translationKey: 'sections.areas' },
   { name: 'local_inputs', icon: '📥', translationKey: 'sections.local_inputs' },
   { name: 'output', icon: '💡', translationKey: 'sections.output' },
@@ -35,6 +80,45 @@ export const RELOAD_SECTIONS: SectionDefinition[] = [
   { name: 'remote_outputs', icon: '📡', translationKey: 'sections.remote_outputs', group: 'remote' },
   { name: 'binding_matrix', icon: '📊', translationKey: 'sections.binding_matrix', group: 'tools' },
   { name: 'accounts', icon: '👥', translationKey: 'sections.accounts', group: 'web' },
+=======
+  { name: 'areas', icon: '🏠', translationKey: 'sections.areas', group: 'device' },
+  // Coordinates, not hardware: everything sun-related reads them, and they
+  // hot-reload, so the section sits with Areas rather than under boneIO.
+  { name: 'location', icon: '📍', translationKey: 'sections.location', group: 'device' },
+  { name: 'oled', icon: '🖥️', translationKey: 'sections.oled', group: 'device' },
+
+  { name: 'local_inputs', icon: '📥', translationKey: 'sections.local_inputs', group: 'control' },
+  { name: 'output', icon: '💡', translationKey: 'sections.output', group: 'control' },
+  { name: 'output_group', icon: '🔗', translationKey: 'sections.output_group', group: 'control' },
+  { name: 'cover', icon: '🚪', translationKey: 'sections.cover', group: 'control' },
+  { name: 'sensor', icon: '🌡️', translationKey: 'sections.sensor', group: 'control' },
+  { name: 'adc', icon: '📊', translationKey: 'sections.adc', group: 'control' },
+  { name: 'virtual_energy_sensor', icon: '⚡', translationKey: 'sections.virtual_energy_sensor', group: 'control' },
+  // Irrigation is a template platform, edited inside this section.
+  { name: 'template', icon: '🧩', translationKey: 'sections.template', group: 'control' },
+  { name: 'binding_matrix', icon: '📊', translationKey: 'sections.binding_matrix', group: 'control' },
+  // Flags with no hardware, read by conditions and set by actions. Next to
+  // Schedules in the logic half of this group, not next to Outputs: the one
+  // thing a virtual switch never does is switch anything.
+  { name: 'virtual_switch', icon: '🏳️', translationKey: 'sections.virtual_switch', group: 'control' },
+  // Actions that fire on their own. Under Control rather than Device: it
+  // drives outputs and covers, it is not a fact about the hardware.
+  { name: 'schedule', icon: '⏰', translationKey: 'sections.schedule', group: 'control' },
+
+  { name: 'modbus_devices', icon: '📱', translationKey: 'sections.modbus_devices', group: 'connections' },
+  { name: 'remote_devices', icon: '🌐', translationKey: 'sections.remote_devices', group: 'connections' },
+  { name: 'remote_inputs', icon: '🔌', translationKey: 'sections.remote_inputs', group: 'connections' },
+  { name: 'remote_outputs', icon: '📡', translationKey: 'sections.remote_outputs', group: 'connections' },
+
+  { name: 'security', icon: '🛡️', translationKey: 'sections.security', group: 'access' },
+  { name: 'accounts', icon: '👥', translationKey: 'sections.accounts', group: 'access' },
+
+  { name: 'logger', icon: '📝', translationKey: 'sections.logger', group: 'advanced' },
+  // Generates a Home Assistant dashboard from the configured entities. It was
+  // a tab on the Tools page; it is about an integration, not about hardware.
+  { name: 'ha_dashboard', icon: '📤', translationKey: 'sections.ha_dashboard', group: 'connections' },
+  { name: 'yaml_editor', icon: '📄', translationKey: 'sections.yaml_editor', group: 'advanced' },
+>>>>>>> theirs
 ];
 
 /**
@@ -42,6 +126,7 @@ export const RELOAD_SECTIONS: SectionDefinition[] = [
  * Changes to these sections require restarting the application to take effect.
  */
 export const RESTART_SECTIONS: SectionDefinition[] = [
+<<<<<<< ours
   { name: 'boneio', icon: '🔧', translationKey: 'sections.boneio' },
   { name: 'mqtt', icon: '📡', translationKey: 'sections.mqtt' },
   { name: 'lox_udp', icon: '📨', translationKey: 'sections.lox_udp' },
@@ -50,12 +135,60 @@ export const RESTART_SECTIONS: SectionDefinition[] = [
   { name: 'can', icon: '🔗', translationKey: 'sections.can' },
   { name: 'mcp23017', icon: '🔗', translationKey: 'sections.mcp23017' },
   { name: 'board_sensors', icon: '🔌', translationKey: 'sections.board_sensors' },
+=======
+  { name: 'boneio', icon: '🔧', translationKey: 'sections.boneio', group: 'device', badge: 'restart' },
+  { name: 'board_sensors', icon: '🔌', translationKey: 'sections.board_sensors', group: 'device', badge: 'restart' },
+
+  { name: 'mqtt', icon: '📡', translationKey: 'sections.mqtt', group: 'connections', badge: 'restart' },
+  { name: 'lox_udp', icon: '📨', translationKey: 'sections.lox_udp', group: 'connections', badge: 'restart' },
+  { name: 'modbus', icon: '🔌', translationKey: 'sections.modbus', group: 'connections', badge: 'restart' },
+  { name: 'can', icon: '🔗', translationKey: 'sections.can', group: 'connections', badge: 'restart' },
+
+  { name: 'web', icon: '🌐', translationKey: 'sections.web', group: 'access', badge: 'restart' },
+
+  // Expander wiring: correct to configure, easy to break, and irrelevant to
+  // anyone who has not added one. Advanced rather than Device.
+  { name: 'mcp23017', icon: '🔗', translationKey: 'sections.mcp23017', group: 'advanced', badge: 'restart' },
+];
+
+/**
+ * Sections that act on the operating system rather than on config.yaml.
+ *
+ * They moved here from the System page. Nothing about them is saved as YAML,
+ * so they have no save button, no restore and no preview — the editor renders
+ * them through the standalone-section registry.
+ */
+export const SYSTEM_SECTIONS: SectionDefinition[] = [
+  { name: 'hostname', icon: '🏷️', translationKey: 'sections.hostname', group: 'device' },
+  { name: 'timezone', icon: '🕓', translationKey: 'sections.timezone', group: 'device' },
+
+  // The broker running on this controller, which is not the same thing as the
+  // MQTT connection under Connections. See SETTINGS_IA.md.
+  { name: 'mosquitto', icon: '📨', translationKey: 'sections.mosquitto', group: 'services' },
+  { name: 'nodered_service', icon: '🔀', translationKey: 'sections.nodered_service', group: 'services' },
+  // Deliberately absent: there is no certificate panel. Certificates come from
+  // cloud registration under Access — the wildcard is issued centrally and the
+  // device only fetches it — so there is nothing for a per-device panel to do.
+  // The panel and its /api/caddy endpoints were removed; see registration.py.
+
+  { name: 'update', icon: '⬆️', translationKey: 'sections.update', group: 'maintenance' },
+  { name: 'backup', icon: '💾', translationKey: 'sections.backup', group: 'maintenance' },
+  { name: 'migrations', icon: '🧬', translationKey: 'sections.migrations', group: 'maintenance' },
+  { name: 'power', icon: '🔄', translationKey: 'sections.power', group: 'maintenance' },
+  { name: 'device_tools', icon: '🔬', translationKey: 'sections.device_tools', group: 'maintenance' },
+  { name: 'hardware_errors', icon: '⚠️', translationKey: 'sections.hardware_errors', group: 'maintenance' },
+  { name: 'factory_reset', icon: '♻️', translationKey: 'sections.factory_reset', group: 'maintenance' },
+>>>>>>> theirs
 ];
 
 /**
  * All config sections combined.
  */
-export const ALL_SECTIONS: SectionDefinition[] = [...RELOAD_SECTIONS, ...RESTART_SECTIONS];
+export const ALL_SECTIONS: SectionDefinition[] = [
+  ...RELOAD_SECTIONS,
+  ...RESTART_SECTIONS,
+  ...SYSTEM_SECTIONS,
+];
 
 /**
  * Sections that use ArrayTableWidget (array-based data).
@@ -75,6 +208,8 @@ export const ARRAY_SECTIONS = [
   'template',
   'adc',
   'board_sensors',
+  'virtual_switch',
+  'schedule',
 ] as const;
 
 /**

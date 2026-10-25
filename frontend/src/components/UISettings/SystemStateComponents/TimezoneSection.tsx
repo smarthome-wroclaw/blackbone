@@ -1,15 +1,25 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
-  FaCheck,
-  FaClock,
   FaExclamationTriangle,
-  FaSpinner,
+  FaSearch,
   FaSync,
 } from 'react-icons/fa';
-import SettingsCard from '../components/SettingsCard';
 import { useTranslation } from '@/hooks/useTranslation';
 import axios from '@/api/axios';
+import type { AxiosError } from 'axios';
 import FixTimezoneSudoers from '../FixTimezoneSudoers';
+import NtpServersField from './NtpServersField';
+import {
+  SettingsPage,
+  SettingsCard,
+  StatGrid,
+  FormField,
+  ToggleRow,
+  NoticeCallout,
+  useSectionSave,
+} from '../ui';
+
+type ApiError = AxiosError<{ detail?: string }>;
 
 interface TimezoneInfo {
   timezone: string;
@@ -81,7 +91,6 @@ function useTickingTime(serverTime: string | undefined) {
  */
 export default function TimezoneSection() {
   const { t } = useTranslation();
-  const [isExpanded, setIsExpanded] = useState(false);
   const [info, setInfo] = useState<TimezoneInfo | null>(null);
   const [timezones, setTimezones] = useState<string[]>([]);
   const [selectedTimezone, setSelectedTimezone] = useState('');
@@ -117,12 +126,15 @@ export default function TimezoneSection() {
     fetchTimezoneInfo();
   }, [fetchTimezoneInfo]);
 
-  // Load timezone list only when section is expanded
+  // The list is ~600 entries, which is why it used to wait for the panel to be
+  // expanded. The panel does not fold any more — it has its own entry in the
+  // settings tree — so it loads on mount, but still only once.
   useEffect(() => {
-    if (isExpanded && timezones.length === 0) {
-      fetchTimezones();
+    if (timezones.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void fetchTimezones();
     }
-  }, [isExpanded, timezones.length, fetchTimezones]);
+  }, [timezones.length, fetchTimezones]);
 
   const changeTimezone = async () => {
     if (!selectedTimezone.trim()) return;
@@ -138,8 +150,9 @@ export default function TimezoneSection() {
       await axios.post('/api/timezone', { timezone: selectedTimezone });
       setResult({ status: 'success', message: t('timezone.changed_success') });
       fetchTimezoneInfo();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err.message;
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      const detail = apiErr?.response?.data?.detail || apiErr.message;
       setResult({ status: 'error', message: detail || t('timezone.change_failed') });
     } finally {
       setIsSaving(false);
@@ -160,8 +173,9 @@ export default function TimezoneSection() {
       });
       // Refresh to see NTP sync status change
       setTimeout(fetchTimezoneInfo, 2000);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err.message;
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      const detail = apiErr?.response?.data?.detail || apiErr.message;
       setResult({ status: 'error', message: detail || t('timezone.ntp_toggle_failed') });
     } finally {
       setIsTogglingNtp(false);
@@ -189,147 +203,136 @@ export default function TimezoneSection() {
     'UTC',
   ];
 
-  return (
-    <SettingsCard
-      icon={<FaClock />}
-      title={t('timezone.title')}
-      description={
-        info
-          ? `${info.timezone} — ${tickingTime}`
-          : t('timezone.description')
-      }
-      toggleButtonText={t('timezone.show_section')}
-      toggleButtonTextExpanded={t('common.close')}
-      isExpanded={isExpanded}
-      onToggle={() => setIsExpanded(!isExpanded)}
-      expandableContent={
-        <div className="space-y-4">
-          {/* Sudoers Check */}
-          <FixTimezoneSudoers />
+  // What the second group actually lists, and therefore what the count below
+  // it should say.
+  const listedTimezones = searchQuery
+    ? filteredTimezones
+    : filteredTimezones.filter((tz) => !popularTimezones.includes(tz));
 
-          {/* Current Status */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="flex flex-col gap-1">
-              <span className="text-xs opacity-70">{t('timezone.current_timezone')}</span>
-              <span className="font-mono font-bold">{info?.timezone || '...'}</span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-xs opacity-70">{t('timezone.local_time')}</span>
-              <span className="font-mono">{tickingTime || '...'}</span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-xs opacity-70">{t('timezone.ntp_status')}</span>
-              <div>
-                {info?.ntp_synchronized ? (
-                  <span className="badge badge-success badge-sm gap-1">
+  useSectionSave(
+    {
+      dirty: selectedTimezone.trim() !== '' && selectedTimezone !== info?.timezone,
+      saving: isSaving,
+      label: t('timezone.save_timezone'),
+    },
+    () => void changeTimezone(),
+  );
+
+  return (
+    <SettingsPage>
+      {/* Sudoers check — its own card, because it is a precondition for the
+          controls below rather than one of them. */}
+      <FixTimezoneSudoers />
+
+      {/* No footer: the save is registered with the shell and drawn in the
+          action bar at the bottom of the pane, like every other section. */}
+      <SettingsCard>
+        <div className="space-y-4">
+          {/* Current status */}
+          <StatGrid
+            columns={3}
+            items={[
+              {
+                label: t('timezone.current_timezone'),
+                value: info?.timezone || '…',
+                mono: true,
+              },
+              {
+                label: t('timezone.local_time'),
+                value: tickingTime || '…',
+                mono: true,
+              },
+              {
+                label: t('timezone.ntp_status'),
+                value: info?.ntp_synchronized ? (
+                  <span className="badge badge-success badge-sm gap-1.5">
                     <FaSync className="w-2.5 h-2.5" />
                     {t('timezone.synchronized')}
                   </span>
                 ) : (
-                  <span className="badge badge-warning badge-sm gap-1">
+                  <span className="badge badge-warning badge-sm gap-1.5">
                     <FaExclamationTriangle className="w-2.5 h-2.5" />
                     {t('timezone.not_synchronized')}
                   </span>
+                ),
+              },
+            ]}
+          />
+
+          {/* Timezone selection */}
+          <FormField label={t('timezone.select_timezone')} className="max-w-xl">
+            <div className="space-y-2">
+              <label className="input input-bordered flex items-center gap-2 w-full">
+                <FaSearch className="w-3.5 h-3.5 text-base-content/40 shrink-0" />
+                <input
+                  type="text"
+                  className="grow min-w-0 bg-transparent outline-hidden"
+                  placeholder={t('timezone.search_placeholder')}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </label>
+              <select
+                className="select select-bordered w-full font-mono"
+                value={selectedTimezone}
+                onChange={(e) => setSelectedTimezone(e.target.value)}
+              >
+                {/* Popular timezones group */}
+                {!searchQuery && (
+                  <optgroup label={t('timezone.popular')}>
+                    {popularTimezones
+                      .filter((tz) => timezones.includes(tz))
+                      .map((tz) => (
+                        <option key={`popular-${tz}`} value={tz}>
+                          {tz} {tz === info?.timezone ? '\u2713' : ''}
+                        </option>
+                      ))}
+                  </optgroup>
                 )}
-              </div>
-            </div>
-          </div>
-
-          <div className="divider my-1"></div>
-
-          {/* Timezone Selection */}
-          <div>
-            <label className="label">
-              <span className="label-text font-medium">{t('timezone.select_timezone')}</span>
-            </label>
-            {/* Search filter */}
-            <input
-              type="text"
-              className="input input-bordered input-sm w-full mb-2"
-              placeholder={t('timezone.search_placeholder')}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-            <select
-              className="select select-bordered w-full"
-              value={selectedTimezone}
-              onChange={(e) => setSelectedTimezone(e.target.value)}
-              size={8}
-            >
-              {/* Popular timezones group */}
-              {!searchQuery && (
-                <optgroup label={t('timezone.popular')}>
-                  {popularTimezones
-                    .filter((tz) => timezones.includes(tz))
-                    .map((tz) => (
-                      <option key={`popular-${tz}`} value={tz}>
-                        {tz} {tz === info?.timezone ? '✓' : ''}
-                      </option>
-                    ))}
+                <optgroup label={searchQuery ? t('timezone.search_results') : t('timezone.all_timezones')}>
+                  {listedTimezones.map((tz) => (
+                    <option key={tz} value={tz}>
+                      {tz} {tz === info?.timezone ? '\u2713' : ''}
+                    </option>
+                  ))}
                 </optgroup>
-              )}
-              {/* All / filtered timezones */}
-              <optgroup label={searchQuery ? t('timezone.search_results') : t('timezone.all_timezones')}>
-                {filteredTimezones.map((tz) => (
-                  <option key={tz} value={tz}>
-                    {tz} {tz === info?.timezone ? '✓' : ''}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-            <label className="label">
-              <span className="label-text-alt">
-                {filteredTimezones.length} {t('timezone.timezones_available')}
-              </span>
-            </label>
-          </div>
+              </select>
+              <p className="text-xs opacity-60">
+                {timezones.length} {t('timezone.timezones_available')}
+              </p>
+            </div>
+          </FormField>
 
-          {/* NTP Toggle */}
-          <div>
-            <label className="label cursor-pointer justify-start gap-4">
-              <input
-                type="checkbox"
-                className="toggle toggle-primary"
-                checked={ntpEnabled}
-                onChange={toggleNtp}
-                disabled={isTogglingNtp}
-              />
-              <div>
-                <span className="label-text font-medium">{t('timezone.ntp_sync')}</span>
-                <p className="text-xs opacity-60">{t('timezone.ntp_hint')}</p>
-              </div>
-              {isTogglingNtp && <FaSpinner className="animate-spin ml-2" />}
-            </label>
-          </div>
+          {/* NTP */}
+          <ToggleRow
+            checked={ntpEnabled}
+            onChange={toggleNtp}
+            busy={isTogglingNtp}
+            icon={<FaSync className="w-3.5 h-3.5" />}
+            label={t('timezone.ntp_sync')}
+            description={t('timezone.ntp_hint')}
+          />
+
+          {/* Which servers that synchronisation uses. Separate from the toggle
+              because it stays meaningful while synchronisation is off: the
+              choice is remembered and applied when it is switched back on. */}
+          <NtpServersField onChanged={fetchTimezoneInfo} />
 
           {/* Result */}
           {result && (
-            <div className={`alert ${result.status === 'success' ? 'alert-success' : result.status === 'info' ? 'alert-info' : 'alert-error'}`}>
-              {result.status === 'success' ? <FaCheck /> : <FaExclamationTriangle />}
-              <span>{result.message}</span>
-            </div>
+            <NoticeCallout
+              variant={
+                result.status === 'success'
+                  ? 'success'
+                  : result.status === 'info'
+                    ? 'info'
+                    : 'error'
+              }
+              message={result.message}
+            />
           )}
-
-          {/* Save Button */}
-          <button
-            className="btn btn-primary"
-            onClick={changeTimezone}
-            disabled={isSaving || !selectedTimezone.trim() || selectedTimezone === info?.timezone}
-          >
-            {isSaving ? (
-              <>
-                <FaSpinner className="animate-spin" />
-                {t('timezone.saving')}
-              </>
-            ) : (
-              <>
-                <FaCheck />
-                {t('timezone.save_timezone')}
-              </>
-            )}
-          </button>
         </div>
-      }
-    />
+      </SettingsCard>
+    </SettingsPage>
   );
 }

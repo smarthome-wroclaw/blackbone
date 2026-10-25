@@ -5,16 +5,44 @@ import { useTranslation } from '@/hooks/useTranslation';
 import { FaExclamationTriangle, FaInfoCircle, FaCheck, FaSpinner } from 'react-icons/fa';
 import { FormInputNumber, FormInputText } from './widgets';
 import HelpLabel from './components/HelpLabel';
-import SudoPasswordDialog from './SudoPasswordDialog';
+import { NoticeCallout } from './ui';
+
+/** The `web` section as edited here (other keys pass through untouched). */
+interface WebServerFormData {
+  [key: string]: unknown;
+  port?: number;
+  expose?: string;
+  security?: {
+    [key: string]: unknown;
+    map_tiles?: boolean;
+  };
+  cloud?: {
+    [key: string]: unknown;
+    enabled?: boolean;
+    declined?: boolean;
+  };
+}
 
 interface WebServerFormProps {
-  data: any;
-  onChange: (data: any) => void;
+  data: WebServerFormData;
+  onChange: (data: WebServerFormData) => void;
 }
 
 /**
  * Custom form for Web Server section configuration.
+<<<<<<< ours
  * Fields: port, proxy port, cloud registration, PWA name.
+=======
+ * Fields: port, exposure, location map, cloud registration, PWA name.
+ *
+ * The reverse proxy port is deliberately not among them. It only ever set the
+ * port in the link Home Assistant shows, the built-in proxy is on 8443 either
+ * way, and a device reachable only through that proxy now derives the port by
+ * itself — so the field asked a question almost nobody had, in a shape (a
+ * number) that could not answer it for the few who did. It stays in the schema
+ * and is still honoured: the validator purges unknown keys, so dropping it
+ * there would delete it from an existing config.yaml on the next save.
+>>>>>>> theirs
  *
  * Credentials are deliberately absent. From 1.6 accounts live in users.json
  * with hashed passwords and roles, managed by the Accounts section rendered
@@ -38,17 +66,13 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
   const [composeWritable, setComposeWritable] = useState(true);
   const [isDisablingCloud, setIsDisablingCloud] = useState(false);
   const [cloudActive, setCloudActive] = useState(false);
-  const [isFixingPermissions, setIsFixingPermissions] = useState(false);
-  const [fixResult, setFixResult] = useState<{ status: string; message: string } | null>(null);
-  const [showSudoDialog, setShowSudoDialog] = useState(false);
-  const [sudoError, setSudoError] = useState<string | null>(null);
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
 
-  const handleChange = (field: string, value: any) => {
+  const handleChange = (field: string, value: unknown) => {
     onChange({ ...data, [field]: value });
   };
 
-  const handleCloudChange = (field: string, value: any) => {
+  const handleCloudChange = (field: string, value: unknown) => {
     const cloud = data?.cloud || {};
     onChange({ ...data, cloud: { ...cloud, [field]: value } });
   };
@@ -85,13 +109,14 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
       const { data: res } = await axios.post('/api/pwa_name', { pwa_name: newPwaName });
       setCurrentPwaName(res.pwa_name);
       setPwaNameResult({ status: 'success', message: t('settings.pwa_name_changed') });
-    } catch (err: any) {
-      setPwaNameResult({ status: 'error', message: err.message || t('settings.pwa_name_change_failed') });
+    } catch (err) {
+      setPwaNameResult({ status: 'error', message: (err as Error).message || t('settings.pwa_name_change_failed') });
     } finally {
       setIsChangingPwaName(false);
     }
   };
 
+<<<<<<< ours
   const handleFixPermissions = async (password: string) => {
     setIsFixingPermissions(true);
     setFixResult(null);
@@ -111,9 +136,11 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
       setIsFixingPermissions(false);
     }
   };
+=======
+>>>>>>> theirs
 
   return (
-    <div className="space-y-4">
+    <div className="stg-cols">
       {/* Port */}
       <FormInputNumber
         label={t('webserver.port')}
@@ -123,22 +150,13 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
         help={t('webserver.port_help')}
       />
 
-      {/* Nginx Proxy Port */}
-      <FormInputNumber
-        label={t('webserver.proxy_port')}
-        value={data?.proxy_port ?? ''}
-        onChange={(val) => {
-          if (val === '') {
-            const { proxy_port: _, ...rest } = data || {};
-            onChange(rest);
-            return;
-          }
-          handleChange('proxy_port', val);
-        }}
-        placeholder={t('webserver.proxy_port_placeholder')}
-        help={t('webserver.proxy_port_help')}
+      <NoticeCallout
+        variant="info"
+        title={t('webserver.builtin_proxy_title')}
+        message={t('webserver.builtin_proxy')}
       />
 
+<<<<<<< ours
 
       {/* Where the username/password fields used to be, so nobody hunts for
           the web password that moved to hashed accounts in 1.6. */}
@@ -151,6 +169,56 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
           </Link>
         </span>
       </div>
+=======
+      {/* Whether the panel's own port answers on the network at all. The
+          Security section offers the same switch with a check that the proxy
+          is really serving first; here it is simply the setting, so somebody
+          looking for it finds it where the other web settings are. */}
+      <div className="form-control flex flex-col gap-2">
+        <label className="label cursor-pointer justify-start gap-3">
+          <input
+            type="checkbox"
+            className="toggle toggle-primary shrink-0"
+            checked={data?.expose === 'proxy'}
+            onChange={(e) =>
+              handleChange('expose', e.target.checked ? 'proxy' : 'all')
+            }
+          />
+          <span className="label-text font-medium">{t('webserver.expose_proxy')}</span>
+        </label>
+        <HelpLabel className="pt-0">{t('webserver.expose_proxy_help')}</HelpLabel>
+      </div>
+
+      <div className="form-control flex flex-col gap-2">
+        <label className="label cursor-pointer justify-start gap-3">
+          <input
+            type="checkbox"
+            className="toggle toggle-primary shrink-0"
+            checked={!!data?.security?.map_tiles}
+            onChange={(e) =>
+              handleChange('security', { ...data?.security, map_tiles: e.target.checked })
+            }
+          />
+          <span className="label-text font-medium">{t('webserver.map_tiles')}</span>
+        </label>
+        <HelpLabel className="pt-0">{t('webserver.map_tiles_help')}</HelpLabel>
+      </div>
+
+      {/* Where the username/password fields used to be, so nobody hunts for
+          the web password that moved to hashed accounts in 1.6. */}
+      <div className="divider">{t('webserver.auth')}</div>
+      <NoticeCallout
+        variant="info"
+        message={
+          <>
+            {t('webserver.accounts_moved')}{' '}
+            <Link to="/settings/accounts" className="link font-semibold">
+              {t('sections.accounts')}
+            </Link>
+          </>
+        }
+      />
+>>>>>>> theirs
 
       {/* Cloud Registration (PWA) */}
       <div className="divider"></div>
@@ -187,85 +255,91 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
         <HelpLabel className="pt-0">{t('boneio_config.cloud_registration_help')}</HelpLabel>
       </div>
 
+      {/* Somewhere to put "no, and stop asking".
+          Registration publishes this device's local address in DNS, so
+          refusing it is a reasonable decision — but with nowhere to record the
+          decision, the security section went on naming cloud registration as
+          the way to a trusted certificate, and that check could never be
+          settled. Offered only while registration is off: someone who has it
+          on has plainly not declined it. */}
+      {!data?.cloud?.enabled && (
+        <div className="form-control flex flex-col gap-2 ml-2">
+          <label className="label cursor-pointer justify-start gap-3">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-sm shrink-0"
+              checked={data?.cloud?.declined || false}
+              onChange={(e) => handleCloudChange('declined', e.target.checked)}
+            />
+            <span className="label-text">{t('boneio_config.cloud_declined')}</span>
+          </label>
+          <HelpLabel className="pt-0">{t('boneio_config.cloud_declined_help')}</HelpLabel>
+        </div>
+      )}
+
       {data?.cloud?.enabled && (
         <div className="space-y-3 ml-2">
           {/* DNS Rebinding Warning */}
-          <div className="alert alert-warning text-sm">
-            <FaExclamationTriangle className="shrink-0" />
-            <div>
-              <p className="font-semibold">{t('boneio_config.cloud_registration_warning_title')}</p>
-              <p className="mt-1">{t('boneio_config.cloud_registration_warning')}</p>
-            </div>
-          </div>
+          <NoticeCallout
+            variant="warning"
+            title={t('boneio_config.cloud_registration_warning_title')}
+            message={t('boneio_config.cloud_registration_warning')}
+          />
 
           {/* Permission error */}
           {!composeWritable && !isHttps && (
-            <div className="alert alert-error text-sm">
-              <FaExclamationTriangle className="shrink-0" />
-              <div>
-                <p className="font-semibold">{t('boneio_config.cloud_permission_error_title') || 'Permission error'}</p>
-                <p className="mt-1 font-mono text-xs">{t('boneio_config.cloud_permission_error') || 'docker-compose.yaml is not writable. Run via SSH: sudo chown $USER ~/docker/nodered/docker-compose.yaml'}</p>
-              </div>
-            </div>
+            <NoticeCallout
+              variant="error"
+              title={t('boneio_config.cloud_permission_error_title') || 'Permission error'}
+              message={
+                <span className="font-mono text-xs break-all">
+                  {t('boneio_config.cloud_permission_error') || 'docker-compose.yaml is not writable. Run via SSH: sudo chown $USER ~/docker/nodered/docker-compose.yaml'}
+                </span>
+              }
+            />
           )}
 
-          {/* Permission error with sudo fix (HTTPS only) */}
+          {/* The compose file is root-owned on purpose: it is what
+              `docker compose up` executes, so being able to write it is being
+              able to run a container as root. There used to be a button here
+              that asked for the sudo password and chowned it back. */}
           {!composeWritable && isHttps && (
-            <div className="alert alert-error text-sm">
-              <FaExclamationTriangle className="shrink-0" />
-              <div className="w-full">
-                <p className="font-semibold">{t('boneio_config.cloud_permission_error_title') || 'Permission error'}</p>
-                <p className="mt-1">{t('boneio_config.cloud_permission_fix_hint') || 'Enter your system password to fix file permissions automatically:'}</p>
-                <button
-                  className="btn btn-sm btn-primary mt-2"
-                  onClick={() => {
-                    setSudoError(null);
-                    setShowSudoDialog(true);
-                  }}
-                >
-                  {t('boneio_config.cloud_fix_btn') || 'Fix'}
-                </button>
-                {fixResult && (
-                  <p className={`mt-2 text-xs ${fixResult.status === 'success' ? 'text-success' : 'text-error'}`}>
-                    {fixResult.status === 'success' ? <FaCheck className="inline mr-1" /> : <FaExclamationTriangle className="inline mr-1" />}
-                    {fixResult.message}
-                  </p>
-                )}
-              </div>
-            </div>
+            <NoticeCallout
+              variant="warning"
+              title={t('boneio_config.cloud_permission_managed_title')}
+              message={t('boneio_config.cloud_permission_managed')}
+            />
           )}
 
-          <SudoPasswordDialog
-            open={showSudoDialog}
-            onOpenChange={setShowSudoDialog}
-            title={t('boneio_config.cloud_permission_error_title') || 'Fix Permissions'}
-            description={t('boneio_config.cloud_permission_fix_hint')}
-            submitLabel={t('boneio_config.cloud_fix_btn') || 'Fix'}
-            isSubmitting={isFixingPermissions}
-            error={sudoError}
-            success={fixResult?.status === 'success' ? fixResult.message : null}
-            onSubmit={handleFixPermissions}
-          />
-
-          {/* Cloud error */}
-          {cloudError && composeWritable && (
-            <div className="alert alert-error text-sm">
-              <FaExclamationTriangle className="shrink-0" />
-              <div>
-                <p className="font-semibold">{t('boneio_config.cloud_error_title') || 'Cloud configuration error'}</p>
-                <p className="mt-1 whitespace-normal wrap-break-word">{cloudError}</p>
-              </div>
-            </div>
+          {/* Why registration is not working, shown whatever else is true.
+              This used to be gated on the compose file being writable, from
+              when an unwritable compose was the usual explanation. Since 1.6
+              that file is root-owned on every device on purpose, so the gate
+              was permanently false and the real reason — a registration the
+              cloud is refusing, say — was never shown to anyone. */}
+          {cloudError && (
+            <NoticeCallout
+              variant="error"
+              title={t('boneio_config.cloud_error_title') || 'Cloud configuration error'}
+              message={<span className="wrap-break-word">{cloudError}</span>}
+            />
           )}
 
           {/* Domain info */}
-          <div className="alert alert-info text-sm">
-            <div>
-              <p>{t('boneio_config.cloud_registration_domain')}</p>
-              <p className="font-mono font-bold mt-1">https://{'<serial>'}.black.boneio.app:8443</p>
-              <p className="mt-1 opacity-70">{t('boneio_config.cloud_registration_lan_only')}</p>
-            </div>
-          </div>
+          <NoticeCallout
+            variant="info"
+            message={
+              <>
+                <span className="block">{t('boneio_config.cloud_registration_domain')}</span>
+                <span className="block font-mono font-bold mt-1">
+                  https://{'<serial>'}.black.boneio.app:8443
+                </span>
+                <span className="block mt-1 opacity-70">
+                  {t('boneio_config.cloud_registration_lan_only')}
+                </span>
+              </>
+            }
+          />
 
           {/* PWA App Name */}
           <div className="divider text-xs opacity-60">{t('settings.pwa_name_title')}</div>

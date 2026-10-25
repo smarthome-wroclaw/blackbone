@@ -14,18 +14,24 @@ from typing import TYPE_CHECKING
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketState
 
 from boneio.components.input import RemoteInputBase
+<<<<<<< ours
 from boneio.const import COVER, NONE
+=======
+from boneio.const import COVER, NONE, VIRTUAL_SWITCH
+>>>>>>> theirs
 from boneio.core.auth.migration import migrate_legacy_auth
 from boneio.core.auth.store import UserStore, UserStoreError
 from boneio.core.config import ConfigHelper
+from boneio.core.config.provenance import was_configured_before
 from boneio.core.events import GracefulExit
 from boneio.core.manager import Manager
+from boneio.webui.static_assets import HashedAssets
 from boneio.models import (
     CoverState,
     GroupState,
@@ -39,11 +45,18 @@ from boneio.models.events import (
     GroupEvent,
     InputEvent,
     ModbusDeviceEvent,
+    ModbusStatusEvent,
     OutputEvent,
     SensorEvent,
 )
 from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
+<<<<<<< ours
+=======
+from boneio.webui.middleware.csrf import CSRFMiddleware
+from boneio.webui.middleware.proxy import TrustedProxyMiddleware
+from boneio.webui import security_events
+>>>>>>> theirs
 from boneio.webui.security_headers import apply_security_headers
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
@@ -56,10 +69,12 @@ from boneio.webui.middleware.auth import (
 
 # Import routes
 from boneio.webui.routes import (
+<<<<<<< ours
     addons_router,
+=======
+>>>>>>> theirs
     accounts_router,
     auth_router,
-    caddy_router,
     can_router,
     config_router,
     covers_router,
@@ -68,6 +83,7 @@ from boneio.webui.routes import (
     irrigation_router,
     migrations_router,
     modbus_router,
+<<<<<<< ours
     onboarding_router,
     mqtt_reference_router,
     mqtt_topics_router,
@@ -75,7 +91,21 @@ from boneio.webui.routes import (
     outputs_router,
     remote_devices_router,
     schema_router,
+=======
+    nodered_router,
+    onboarding_router,
+    os_update_router,
+    proxy_router,
+    mqtt_reference_router,
+    mqtt_tls_router,
+    outputs_router,
+    remote_devices_router,
+    diagnostics_router,
+    schedule_router,
+    security_router,
+>>>>>>> theirs
     sensors_router,
+    sun_router,
     system_router,
     templates_router,
     tools_router,
@@ -83,6 +113,12 @@ from boneio.webui.routes import (
 )
 from boneio.webui.routes import config as config_module
 from boneio.webui.routes import onboarding as onboarding_module
+<<<<<<< ours
+=======
+from boneio.webui.routes import diagnostics as diagnostics_module
+from boneio.webui.routes import mqtt_tls as mqtt_tls_module
+from boneio.webui.routes import security as security_module
+>>>>>>> theirs
 from boneio.webui.routes import system as system_module
 
 # Import WebSocket manager
@@ -140,10 +176,22 @@ class BoneIOApp(FastAPI):
 
 
 # Create FastAPI application
+#
+# The interactive docs are off. AuthMiddleware only gates paths under /api, so
+# /docs, /redoc and /openapi.json sat outside it entirely and answered without
+# a token on a device that otherwise requires one — handing anyone on the
+# network a 150KB map of every route, parameter and schema. Nothing in the
+# product needs them at runtime; a developer can set BONEIO_DEV to get them
+# back.
+_DEV_MODE = bool(os.environ.get("BONEIO_DEV"))
+
 app = BoneIOApp(
     title="BoneIO API",
     description="BoneIO API for managing inputs, outputs, and sensors",
     version=__version__,
+    docs_url="/docs" if _DEV_MODE else None,
+    redoc_url="/redoc" if _DEV_MODE else None,
+    openapi_url="/openapi.json" if _DEV_MODE else None,
 )
 
 
@@ -160,7 +208,10 @@ def get_config_helper():
 
 # Include routers
 app.include_router(auth_router)
+<<<<<<< ours
 app.include_router(addons_router)
+=======
+>>>>>>> theirs
 app.include_router(accounts_router)
 app.include_router(outputs_router)
 app.include_router(covers_router)
@@ -172,16 +223,28 @@ app.include_router(update_router)
 app.include_router(modbus_router)
 app.include_router(schema_router)
 app.include_router(sensors_router)
-app.include_router(caddy_router)
+app.include_router(security_router)
+app.include_router(diagnostics_router)
 app.include_router(nodered_router)
 app.include_router(onboarding_router)
+<<<<<<< ours
+=======
+app.include_router(os_update_router)
+app.include_router(proxy_router)
+>>>>>>> theirs
 app.include_router(can_router)
 app.include_router(remote_devices_router)
 app.include_router(templates_router)
 app.include_router(tools_router)
 app.include_router(migrations_router)
 app.include_router(mqtt_reference_router)
+<<<<<<< ours
 app.include_router(mqtt_topics_router)
+=======
+app.include_router(mqtt_tls_router)
+app.include_router(sun_router)
+app.include_router(schedule_router)
+>>>>>>> theirs
 
 if os.environ.get("BONEIO_DEV"):
     app.include_router(dev_fake_device_router)
@@ -197,7 +260,9 @@ from boneio.webui.routes import mqtt_reference as mqtt_reference_module
 from boneio.webui.routes import mqtt_topics as mqtt_topics_module
 from boneio.webui.routes import outputs as outputs_module
 from boneio.webui.routes import remote_devices as remote_devices_module
+from boneio.webui.routes import schedule as schedule_module
 from boneio.webui.routes import sensors as sensors_module
+from boneio.webui.routes import sun as sun_module
 from boneio.webui.routes import templates as templates_module
 from boneio.webui.routes import tools as tools_module
 from boneio.webui.routes import update as update_module
@@ -215,7 +280,12 @@ app.dependency_overrides[migrations_module._get_manager] = get_manager
 app.dependency_overrides[templates_module.get_manager] = get_manager
 app.dependency_overrides[tools_module.get_manager] = get_manager
 app.dependency_overrides[mqtt_reference_module.get_manager] = get_manager
+<<<<<<< ours
 app.dependency_overrides[mqtt_topics_module.get_manager] = get_manager
+=======
+app.dependency_overrides[sun_module.get_manager] = get_manager
+app.dependency_overrides[schedule_module.get_manager] = get_manager
+>>>>>>> theirs
 
 if os.environ.get("BONEIO_DEV"):
     from boneio.webui.routes import dev_fake_device as dev_fake_device_module
@@ -274,11 +344,27 @@ def add_all_websocket_listeners(boneio_manager: Manager):
         target=boneio_state_changed_callback,
     )
 
+    # Schedule events (ran, re-planned, switched on or off)
+    boneio_manager.event_bus.add_event_listener(
+        event_type="schedule",
+        entity_id="",
+        listener_id="ws_schedule_global",
+        target=boneio_state_changed_callback,
+    )
+
     # Modbus device events
     boneio_manager.event_bus.add_event_listener(
         event_type="modbus_device",
         entity_id="",
         listener_id="ws_modbus_global",
+        target=boneio_state_changed_callback,
+    )
+
+    # Modbus device status (a device starts or stops failing)
+    boneio_manager.event_bus.add_event_listener(
+        event_type="modbus_status",
+        entity_id="",
+        listener_id="ws_modbus_status_global",
         target=boneio_state_changed_callback,
     )
 
@@ -298,7 +384,34 @@ def remove_all_websocket_listeners(boneio_manager: Manager):
     boneio_manager.event_bus.remove_event_listener(event_type="cover", listener_id="ws_cover_global")
     boneio_manager.event_bus.remove_event_listener(event_type="input", listener_id="ws_input_global")
     boneio_manager.event_bus.remove_event_listener(event_type="modbus_device", listener_id="ws_modbus_global")
+    boneio_manager.event_bus.remove_event_listener(event_type="modbus_status", listener_id="ws_modbus_status_global")
     boneio_manager.event_bus.remove_event_listener(event_type="sensor", listener_id="ws_sensor_global")
+    boneio_manager.event_bus.remove_event_listener(event_type="schedule", listener_id="ws_schedule_global")
+
+
+async def broadcast_initial_states(boneio_manager: Manager) -> None:
+    """Push the current state of every entity to every connected panel.
+
+    The same payloads a client receives when its socket opens, sent to the
+    clients that are already connected. Used after a configuration reload,
+    where the panels have just been told to clear the sections being reloaded
+    and have nothing to refill them with.
+
+    Never raises: a panel that has gone away must not turn a successful reload
+    into a failed request.
+
+    Args:
+        boneio_manager: Manager holding the entities to describe.
+    """
+    manager = getattr(app.state, "websocket_manager", None)
+    if manager is None:
+        return
+
+    for websocket in list(manager.active_connections):
+        try:
+            await send_initial_states(websocket, boneio_manager)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Could not send states to a panel: %s", err)
 
 
 # ============================================================================
@@ -404,6 +517,29 @@ async def send_initial_states(
             except Exception as e:
                 _LOGGER.error(f"Error preparing output state: {type(e).__name__} - {e}")
 
+        # Send virtual switches. They travel the output channel because to a
+        # viewer they are the same shape of thing — a name that is on or off —
+        # and `type` tells the panel to group them separately.
+        for switch in boneio_manager.virtual_switches.all():
+            try:
+                update = OutputEvent(
+                    entity_id=switch.id,
+                    state=OutputState(
+                        id=switch.id,
+                        name=switch.name,
+                        state=switch.state,
+                        type=VIRTUAL_SWITCH,
+                        expander_id=None,
+                        pin=None,
+                        timestamp=switch.last_timestamp,
+                        area=switch.area,
+                    ),
+                )
+                if not await send_state_update(update):
+                    return False
+            except Exception as e:
+                _LOGGER.error(f"Error preparing virtual switch state: {type(e).__name__} - {e}")
+
         # Send output groups
         for group in boneio_manager.outputs.get_all_output_groups().values():
             try:
@@ -413,6 +549,7 @@ async def send_initial_states(
                     state=group.state,
                     type=group.output_type,
                     timestamp=getattr(group, "last_timestamp", None),
+                    area=getattr(group, "area", None),
                 )
                 update = GroupEvent(entity_id=group.id, state=group_state)
                 if not await send_state_update(update):
@@ -431,6 +568,7 @@ async def send_initial_states(
                     kind=cover.kind,
                     timestamp=cover.last_timestamp,
                     current_operation=cover.current_operation,
+                    area=getattr(cover, "area", None),
                 )
                 if getattr(cover, "kind", None) == "venetian":
                     cover_state.tilt = getattr(cover, "tilt", 0)
@@ -444,6 +582,10 @@ async def send_initial_states(
         for modbus_coordinator in boneio_manager.modbus.get_all_coordinators().values():
             if not modbus_coordinator:
                 continue
+            if not await send_state_update(
+                ModbusStatusEvent(entity_id=modbus_coordinator._id, failing=modbus_coordinator.failing)
+            ):
+                return False
             for entities in modbus_coordinator.get_all_entities():
                 for entity in entities.values():
                     try:
@@ -456,6 +598,7 @@ async def send_initial_states(
                             timestamp=entity.last_timestamp,
                             device_group=modbus_coordinator.name,
                             coordinator_id=modbus_coordinator._id,
+                            area=modbus_coordinator._area,
                             step=getattr(entity, "step", None),
                         )
                         update = ModbusDeviceEvent(entity_id=entity.id, state=sensor_state)
@@ -479,6 +622,7 @@ async def send_initial_states(
                             timestamp=entity.last_timestamp if hasattr(entity, "last_timestamp") else None,
                             device_group=modbus_coordinator.name,
                             coordinator_id=modbus_coordinator._id,
+                            area=modbus_coordinator._area,
                             entity_type=entity.entity_type,
                             x_mapping=value_mapping,
                             payload_on=payload_on,
@@ -743,6 +887,26 @@ def init_app(
                 "username": migration.username,
                 "used_secret_file": migration.used_secret_file,
             }
+<<<<<<< ours
+=======
+        # Whether the first-run wizard may offer the steps that assume a blank
+        # device — the import, and the one that replaces the whole event
+        # section.
+        #
+        # This used to be read off the web.auth block alone, which was wrong in
+        # the direction that costs the owner their configuration: most 1.5.x
+        # controllers never had web authentication, so an upgraded device with
+        # a full config.yaml looked exactly like a fresh one. Freshness is now
+        # something that has to be shown, not assumed — see
+        # boneio.core.config.provenance.
+        onboarding_module.set_configured_before(
+            was_configured_before(
+                yaml_config_file,
+                had_legacy_auth=bool(migration)
+                or migration.reason == "incomplete_legacy_auth",
+            )
+        )
+>>>>>>> theirs
     except UserStoreError as err:
         # Refusing to start would brick the UI over a file the user can fix,
         # but the store must not be silently treated as empty either — that
@@ -752,6 +916,10 @@ def init_app(
 
     set_user_store(user_store)
     onboarding_module.set_user_store(user_store)
+<<<<<<< ours
+=======
+    onboarding_module.set_config_dir(os.path.dirname(os.path.abspath(yaml_config_file)))
+>>>>>>> theirs
     onboarding_module.set_legacy_migration(migration_info)
 
     # Explicit opt-out of authentication. Never exposed in the UI: see the note
@@ -771,27 +939,53 @@ def init_app(
 
     # Set app state
     app.state.manager = manager
+    # Password guessing and the sessions signed out for it go to Home
+    # Assistant through the manager's MQTT link.
+    security_alert = getattr(manager, "security_alert", None)
+    security_events.set_publisher(
+        security_alert.publish_event if security_alert is not None else None
+    )
     app.state.auth_config = auth_config
     app.state.yaml_config_file = yaml_config_file
     app.state.web_server = web_server
     app.state.config_helper = config_helper
+<<<<<<< ours
     app.state.addon_token_secret = jwt_secret.encode("utf-8")
     app.state.user_store = user_store
     app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=auth_required)
+=======
+    app.state.user_store = user_store
+    # The function, not its value: this runs before anybody has an account on
+    # a fresh device, and the answer changes the moment the first-run wizard
+    # creates one. Passing the boolean left the socket refusing to negotiate
+    # the token subprotocol for the rest of the process's life.
+    app.state.websocket_manager = WebSocketManager(
+        jwt_secret=jwt_secret, auth_required=is_auth_required
+    )
+>>>>>>> theirs
 
     # Configure route modules with app state
     config_module.set_app_state(app.state)
     config_module.set_websocket_manager(app.state.websocket_manager)
+    config_module.set_state_broadcaster(broadcast_initial_states)
     system_module.set_app_state(app.state)
+    security_module.set_app_state(app.state)
+    security_module.warm_system_state()
+    diagnostics_module.set_app_state(app.state)
+    mqtt_tls_module.set_app_state(app.state)
 
     # Pre-populate config cache if initial_config provided
     if initial_config is not None:
         # NOTE: no local `import os` here. The module already imports it, and a
         # function-local import makes `os` local to this whole function, so any
         # earlier use in init_app raises UnboundLocalError.
+<<<<<<< ours
         from boneio.webui.routes.config import _config_cache, _get_config_mtime
+=======
+        from boneio.webui.routes.config_core import _config_cache, _get_config_mtime, api_shape
+>>>>>>> theirs
 
-        _config_cache["data"] = initial_config
+        _config_cache["data"] = api_shape(initial_config)
         _config_cache["mtime"] = _get_config_mtime(yaml_config_file)
         _LOGGER.info("Config cache pre-populated from initial_config")
 
@@ -803,7 +997,14 @@ def init_app(
 
     # Keep the legacy pair reachable for a device whose web.auth could not be
     # migrated (an unrepresentable username, say), so it can still log in.
+<<<<<<< ours
     if auth_config:
+=======
+    # Only the login pair counts: the schema's defaults (allow_anonymous) make
+    # web.auth non-empty on every device, which made this an error on each
+    # fresh controller.
+    if auth_config.get("username") or auth_config.get("password"):
+>>>>>>> theirs
         if auth_config.get("username") and auth_config.get("password"):
             set_auth_config(auth_config)
         else:
@@ -857,6 +1058,11 @@ def init_app(
         ]
         _LOGGER.info("CORS: dev mode — allowing origins: %s", cors_origins)
 
+    # Refuses cross-site state changes, trusting exactly the origins CORS
+    # trusts. Added before CORS so CORS ends up outermost and its headers are
+    # still attached to the refusal, which is what lets the browser show it.
+    app.add_middleware(CSRFMiddleware, allowed_origins=cors_origins)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -865,6 +1071,7 @@ def init_app(
         allow_headers=["*"],
     )
 
+<<<<<<< ours
     # Security headers middleware (F-13).
     # NOTE: still no X-Frame-Options — boneIO must be embeddable in an HA
     # ingress iframe, and that header cannot name an allowed origin. Framing is
@@ -872,16 +1079,39 @@ def init_app(
     frame_ancestors = (web_security or {}).get("frame_ancestors")
     if isinstance(frame_ancestors, list):
         frame_ancestors = " ".join(str(item) for item in frame_ancestors)
+=======
+    # Security headers middleware.
+    # NOTE: still no X-Frame-Options — boneIO must be embeddable in an HA
+    # ingress iframe, and that header cannot name an allowed origin. Framing is
+    # expressed through CSP frame-ancestors instead. Unset means the secure
+    # default, which the HA add-on satisfies because it proxies; see
+    # security_headers for why.
+    # Passed through as configured — a list or, from an older config, a
+    # string. build_csp reads both; joining here would only lose the shape.
+    frame_ancestors = (web_security or {}).get("frame_ancestors")
+    # Off unless the operator asked for it: the map picker is the only thing
+    # that needs a third-party host in img-src, and most devices never open it.
+    map_tiles = bool((web_security or {}).get("map_tiles"))
+    cloud_url = config_helper.cloud_url
+>>>>>>> theirs
 
     @app.middleware("http")
     async def security_headers_middleware(request, call_next):
         """Add security headers to all responses."""
         response = await call_next(request)
+<<<<<<< ours
         apply_security_headers(request, response, frame_ancestors)
+=======
+        apply_security_headers(request, response, frame_ancestors, map_tiles, cloud_url)
+>>>>>>> theirs
         return response
 
     # Add GZip compression
     app.add_middleware(GZipMiddleware, minimum_size=500)
+
+    # Last added runs first: the real client address has to be in place before
+    # anything reads it — the login throttle, the logs, the auth middleware.
+    app.add_middleware(TrustedProxyMiddleware)
 
     return app
 
@@ -895,7 +1125,12 @@ FRONTEND_DIR = APP_DIR / "frontend-dist"
 
 if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
     _LOGGER.info(f"Frontend found at {FRONTEND_DIR}, mounting static files")
+<<<<<<< ours
     app.mount("/assets", StaticFiles(directory=f"{FRONTEND_DIR}/assets"), name="assets")
+=======
+    app.mount("/assets", HashedAssets(directory=f"{FRONTEND_DIR}/assets"), name="assets")
+    app.mount("/schema", StaticFiles(directory=f"{APP_DIR}/schema"), name="schema")
+>>>>>>> theirs
 
     @app.get("/manifest.webmanifest")
     async def serve_manifest():
@@ -960,22 +1195,29 @@ if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
+    #: FastAPI's own schema and docs routes. In dev mode they are registered
+    #: ahead of this catch-all and answer first; otherwise nothing should.
+    _API_DOC_PATHS = frozenset(
+        {"docs", "docs/oauth2-redirect", "redoc", "openapi.json", "openapi.yaml"}
+    )
+
     @app.get("/{filename:path}")
     async def serve_react_app(filename: str):
         """Serve static files from frontend-dist, fallback to index.html for SPA routing.
 
-        Hashed assets (in /assets/) are immutable and cached long-term.
-        index.html (SPA fallback) is never cached to prevent stale versions
-        being served through Cloudflare Tunnel or other caching proxies.
+        Hashed assets never get here: the /assets mount (HashedAssets) serves
+        them. index.html (SPA fallback) is never cached to prevent stale
+        versions being served through Cloudflare Tunnel or other caching proxies.
         """
+        # Matched loosely — a trailing slash or capitals reach the same
+        # fallback, and a scanner tries both.
+        if filename.strip("/").lower() in _API_DOC_PATHS:
+            # The schema is off outside dev mode, and these names answering
+            # with the panel's index.html read to a scanner as an exposed API
+            # schema. Saying "not here" is the truth.
+            return Response(status_code=404)
         file_path = (FRONTEND_DIR / filename).resolve()
         if filename and file_path.is_relative_to(FRONTEND_DIR.resolve()) and file_path.exists() and file_path.is_file():
-            # Hashed assets can be cached forever
-            if filename.startswith("assets/"):
-                return FileResponse(
-                    str(file_path),
-                    headers={"Cache-Control": "public, max-age=31536000, immutable"},
-                )
             return FileResponse(str(file_path))
         # SPA fallback — never cache index.html
         return FileResponse(

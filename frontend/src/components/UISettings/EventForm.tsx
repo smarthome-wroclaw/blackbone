@@ -1,3 +1,4 @@
+import { NoticeCallout } from './ui';
 import React, { useState } from 'react';
 import { FaPlus } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
@@ -6,6 +7,7 @@ import AiConfigAssistant from './AiConfigAssistant';
 import { getInputAvailability, buildInputOptions } from './helpers/inputFilterUtils';
 import SimpleTimePeriodInput from './widgets/SimpleTimePeriodInput';
 import AreaSelect from './widgets/AreaSelect';
+import PinAvailabilityHint from './widgets/PinAvailabilityHint';
 import { TabsBox } from '@/components/ui/tabs-box';
 import { convertTimeperiodToMilliseconds } from './helpers/configSchemaUtils';
 import {
@@ -22,7 +24,10 @@ import type {
   CoverEntity,
   BinarySensorEntity,
   RemoteDeviceEntity,
+  Action,
 } from '@/types/config';
+import type { JsonSchema } from '@/types/jsonSchema';
+import type { ActionInput, OutputGroupRecord } from './ActionFields/types';
 
 interface EventFormProps {
   /** Current event entity data being edited */
@@ -36,7 +41,7 @@ interface EventFormProps {
   /** Whether this is a new entity */
   isNew: boolean;
   /** JSON Schema for validation */
-  schema?: any;
+  schema?: JsonSchema;
   /** All binary sensors for input filtering */
   allBinarySensors?: BinarySensorEntity[];
   /** All events for input filtering */
@@ -46,7 +51,7 @@ interface EventFormProps {
   /** All outputs for action dropdowns */
   allOutputs?: OutputEntity[];
   /** All output groups for action dropdowns */
-  allOutputGroups?: any[];
+  allOutputGroups?: OutputGroupRecord[];
   /** All covers for action dropdowns */
   allCovers?: CoverEntity[];
   /** All areas for area dropdown */
@@ -55,6 +60,8 @@ interface EventFormProps {
   allRemoteDevices?: RemoteDeviceEntity[];
   /** Remote inputs for condition entity picker */
   allRemoteInputs?: Array<Record<string, unknown>>;
+  /** Virtual switches — flags with no hardware, usable in conditions. */
+  allVirtualSwitches?: Array<Record<string, unknown>>;
   /** Callback when validation state changes */
   onValidationChange?: (hasErrors: boolean) => void;
   /** Whether user attempted to submit (shows validation errors) */
@@ -62,7 +69,7 @@ interface EventFormProps {
   /** Saved (committed) outputs for comparison */
   savedOutputs?: OutputEntity[];
   /** Saved (committed) output groups for comparison */
-  savedOutputGroups?: any[];
+  savedOutputGroups?: OutputGroupRecord[];
   /** Saved (committed) covers for comparison */
   savedCovers?: CoverEntity[];
   /** Initial tab to open (e.g. 'single' when clicking from binding matrix cell) */
@@ -81,6 +88,7 @@ const EventForm: React.FC<EventFormProps> = ({
   allAreas = [],
   allRemoteDevices = [],
   allRemoteInputs = [],
+  allVirtualSwitches = [],
   editingIndex,
   onValidationChange,
   attemptedSubmit = false,
@@ -96,27 +104,27 @@ const EventForm: React.FC<EventFormProps> = ({
   );
 
   // Extract enums from schema for dropdowns
-  const allBoneioInputs = schema?.items?.properties?.boneio_input?.enum || [];
+  const allBoneioInputs = (schema?.items?.properties?.boneio_input?.enum as string[] | undefined) || [];
   
   // Filter out already used inputs from both binary_sensor and event (except current one)
   // Case-insensitive comparison — see inputFilterUtils.ts for details
-  const { usedInputs, availableInputs } = getInputAvailability(
+  const { availableInputs } = getInputAvailability(
     allBoneioInputs, allBinarySensors, allEvents, editingIndex, 'event',
   );
   const boneioInputOptions = buildInputOptions(availableInputs, data.boneio_input);
-  const rawActionTypeOptions = schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action?.enum || [
+  const rawActionTypeOptions = (schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action?.enum as string[] | undefined) || [
     'mqtt', 'output', 'cover', 'output_over_mqtt', 'cover_over_mqtt', 'remote_output', 'remote_cover'
   ];
   // Deduplicate: schema may provide both uppercase and lowercase variants
   const actionTypeOptions = [...new Set(rawActionTypeOptions.map((o: string) => o.toLowerCase()))] as string[];
-  const actionCoverOptions = schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_cover?.enum || [
-    'TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'TILT', 'TILT_OPEN', 'TILT_CLOSE'
+  const actionCoverOptions = (schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_cover?.enum as string[] | undefined) || [
+    'TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'SET_POSITION', 'TILT', 'TILT_OPEN', 'TILT_CLOSE'
   ];
-  const actionOutputOptions = schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_output?.enum || [
+  const actionOutputOptions = (schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_output?.enum as string[] | undefined) || [
     'TOGGLE', 'ON', 'OFF', 'BRIGHTNESS_UP', 'BRIGHTNESS_DOWN', 'BRIGHTNESS_UP_CYCLE', 'BRIGHTNESS_DOWN_CYCLE', 'SET_BRIGHTNESS', 'CYCLE_COLOR', 'CYCLE_PRESET'
   ];
 
-  const updateField = (field: string, value: any) => {
+  const updateField = (field: string, value: unknown) => {
     console.log('updateField', field, value, data);
     onChange({ ...data, [field]: value });
   };
@@ -129,7 +137,7 @@ const EventForm: React.FC<EventFormProps> = ({
     
     ['single', 'double', 'triple', 'long', 'double_then_long', 'single_then_long', 'double_then_single'].forEach((type) => {
       const actions = data.actions?.[type] || [];
-      actions.forEach((action: any, index: number) => {
+      actions.forEach((action: Action, index: number) => {
         const error = validateAction(action, t);
         if (error) {
           errors.push(`${type.charAt(0).toUpperCase() + type.slice(1)} action ${index + 1}: ${error}`);
@@ -147,35 +155,38 @@ const EventForm: React.FC<EventFormProps> = ({
     onValidationChange?.(validationErrors.length > 0);
   }, [validationErrors.length, onValidationChange]);
 
-  const updateAction = (actionType: 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single', index: number, field: string, value: any) => {
+  const updateAction = (actionType: 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single', index: number, field: string, value: unknown) => {
     const newActions = { ...data.actions };
     if (!newActions[actionType]) {
       newActions[actionType] = [];
     }
     
+    // The editor writes raw records into the list (the same array, edited in place).
+    const list: ActionInput[] = newActions[actionType];
+
     // When changing action type, clean fields to only keep valid ones for new type
     if (field === 'action') {
-      const currentAction = newActions[actionType][index];
-      newActions[actionType][index] = cleanActionFields(value, currentAction) as any;
+      const currentAction = list[index];
+      list[index] = cleanActionFields(value as string, currentAction);
     } else if (field === '__batch') {
       // Batch update: value is an object with multiple fields to set at once
-      const current = { ...newActions[actionType][index] };
-      for (const [k, v] of Object.entries(value)) {
+      const current: Record<string, unknown> = { ...list[index] };
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         if (v === undefined) {
-          delete (current as any)[k];
+          delete current[k];
         } else {
-          (current as any)[k] = v;
+          current[k] = v;
         }
       }
-      newActions[actionType][index] = current;
+      list[index] = current;
     } else if (field === 'remote_device') {
       // Clear dependent fields when changing remote device
-      newActions[actionType][index] = { ...newActions[actionType][index], [field]: value, output_id: undefined, cover_id: undefined, presets: undefined, colors: undefined };
+      list[index] = { ...list[index], [field]: value, output_id: undefined, cover_id: undefined, presets: undefined, colors: undefined };
     } else if (field === 'output_id') {
       // Clear presets/colors when changing output
-      newActions[actionType][index] = { ...newActions[actionType][index], [field]: value, presets: undefined, colors: undefined };
+      list[index] = { ...list[index], [field]: value, presets: undefined, colors: undefined };
     } else {
-      newActions[actionType][index] = { ...newActions[actionType][index], [field]: value };
+      list[index] = { ...list[index], [field]: value };
     }
     
     console.log('newActions', newActions, data);
@@ -194,7 +205,7 @@ const EventForm: React.FC<EventFormProps> = ({
   const removeAction = (actionType: 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single', index: number) => {
     const newActions = { ...data.actions };
     if (newActions[actionType]) {
-      newActions[actionType] = newActions[actionType].filter((_: any, i: number) => i !== index);
+      newActions[actionType] = newActions[actionType].filter((_: Action, i: number) => i !== index);
     }
     onChange({ ...data, actions: newActions });
   };
@@ -205,7 +216,7 @@ const EventForm: React.FC<EventFormProps> = ({
     onChange({ ...data, mqtt_sequences: newMqttSequences });
   };
 
-  const renderActionFields = (type: 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single', action: any, index: number) => {
+  const renderActionFields = (type: 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single', action: Action, index: number) => {
     return (
       <ActionFields
         key={index}
@@ -228,6 +239,8 @@ const EventForm: React.FC<EventFormProps> = ({
         clickType={type}
         allBinarySensors={allBinarySensors}
         allRemoteInputs={allRemoteInputs}
+      allVirtualSwitches={allVirtualSwitches}
+        
         preferredArea={data.area}
       />
     );
@@ -237,16 +250,18 @@ const EventForm: React.FC<EventFormProps> = ({
     <div className="space-y-4 py-2">
       {/* Validation Errors - sticky at top */}
       {validationErrors.length > 0 && (
-        <div className="alert alert-warning sticky top-0 z-10 shadow-lg">
-          <div>
-            <h3 className="font-bold">{t('validation.errors')} ({validationErrors.length}):</h3>
+        <NoticeCallout
+          variant="warning"
+          className="sticky top-0 z-10 shadow-sm bg-base-100"
+          title={`${t('validation.errors')} (${validationErrors.length}):`}
+          message={
             <ul className="list-disc list-inside max-h-24 overflow-y-auto">
               {validationErrors.map((error, index) => (
                 <li key={index}>{error}</li>
               ))}
             </ul>
-          </div>
-        </div>
+          }
+        />
       )}
 
       <AiConfigAssistant
@@ -293,14 +308,14 @@ const EventForm: React.FC<EventFormProps> = ({
 
               <div className="form-control">
                 <label className="label">
-                  <span className="label-text font-medium">boneIO Input</span>
+                  <span className="label-text font-medium">{t('inputs.boneio_input')}</span>
                 </label>
                 <Select
                   value={data.boneio_input || ''}
                   onValueChange={(value) => updateField('boneio_input', value)}
                 >
-                  <SelectTrigger className={`w-full uppercase ${usedInputs.length > 0 && boneioInputOptions.length === 0 ? 'border-warning' : ''}`}>
-                    <SelectValue placeholder="Select input..." />
+                  <SelectTrigger className={`w-full uppercase ${!data.boneio_input && boneioInputOptions.length === 0 ? 'border-warning' : ''}`}>
+                    <SelectValue placeholder={t('inputs.select_input')} />
                   </SelectTrigger>
                   <SelectContent>
                     {boneioInputOptions.map((input: string) => (
@@ -310,30 +325,18 @@ const EventForm: React.FC<EventFormProps> = ({
                     ))}
                   </SelectContent>
                 </Select>
-                {usedInputs.length > 0 && boneioInputOptions.length === 1 && (
-                  <label className="label max-w-full">
-                    <span className="label-text-alt text-warning whitespace-normal break-all">
-                      {t('inputs.all_inputs_used')}
-                    </span>
-                  </label>
-                )}
-                {usedInputs.length > 0 && (
-                  <label className="label max-w-full">
-                    <span className="label-text-alt text-info whitespace-normal break-all">
-                      {t('inputs.used_inputs')}: {usedInputs.length > 5 
-                        ? `${usedInputs.slice(0, 3).join(', ')}, ... (+${usedInputs.length - 3} more)`
-                        : usedInputs.join(', ')
-                      }
-                    </span>
-                  </label>
-                )}
+                <PinAvailabilityHint
+                  available={availableInputs}
+                  total={allBoneioInputs.length}
+                  current={data.boneio_input}
+                  allUsedMessage={t('inputs.all_inputs_used')}
+                />
               </div>
 
               <AreaSelect
                 value={data.area}
                 onChange={(areaId) => updateField('area', areaId)}
                 areas={allAreas}
-                className="md:col-span-2"
               />
 
             </div>
@@ -358,7 +361,7 @@ const EventForm: React.FC<EventFormProps> = ({
           </div>
           
           {data.actions?.single && data.actions.single.length > 0 ? (
-            data.actions.single.map((action: any, index: number) => 
+            data.actions.single.map((action: Action, index: number) => 
               renderActionFields('single', action, index)
             )
           ) : (
@@ -388,7 +391,7 @@ const EventForm: React.FC<EventFormProps> = ({
           </div>
           
           {data.actions?.double && data.actions.double.length > 0 ? (
-            data.actions.double.map((action: any, index: number) => 
+            data.actions.double.map((action: Action, index: number) => 
               renderActionFields('double', action, index)
             )
           ) : (
@@ -419,14 +422,14 @@ const EventForm: React.FC<EventFormProps> = ({
           
           {/* Warning if triple actions exist but enable_triple_click is off */}
           {data.actions?.triple && data.actions.triple.length > 0 && !data.enable_triple_click && (
-            <div className="alert alert-warning">
-              <svg xmlns="http://www.w3.org/2000/svg" className="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-              <span>{t('event_form.triple_click_disabled_warning')}</span>
-            </div>
+            <NoticeCallout
+              variant="warning"
+              message={t('event_form.triple_click_disabled_warning')}
+            />
           )}
           
           {data.actions?.triple && data.actions.triple.length > 0 ? (
-            data.actions.triple.map((action: any, index: number) => 
+            data.actions.triple.map((action: Action, index: number) => 
               renderActionFields('triple', action, index)
             )
           ) : (
@@ -456,7 +459,7 @@ const EventForm: React.FC<EventFormProps> = ({
           </div>
           
           {data.actions?.long && data.actions.long.length > 0 ? (
-            data.actions.long.map((action: any, index: number) => 
+            data.actions.long.map((action: Action, index: number) => 
               renderActionFields('long', action, index)
             )
           ) : (
@@ -474,13 +477,11 @@ const EventForm: React.FC<EventFormProps> = ({
             badge: ((data.actions?.double_then_long?.length || 0) + (data.actions?.single_then_long?.length || 0) + (data.actions?.double_then_single?.length || 0)) || undefined,
             content: (
         <div className="space-y-6">
-          <div className="alert alert-info">
-            <span>{t('event_form.sequences_hint')}</span>
-          </div>
+          <NoticeCallout variant="info" message={t('event_form.sequences_hint')} />
 
           {/* Double then Long */}
-          <div className="card bg-base-200">
-            <div className="card-body">
+          <div className="stg-inset">
+            <div className="card-body p-4">
               <div className="flex justify-between items-center">
                 <h4 className="card-title text-base">{t('event_form.double_then_long')}</h4>
                 <div className="flex items-center gap-2">
@@ -505,7 +506,7 @@ const EventForm: React.FC<EventFormProps> = ({
               <p className="text-sm text-base-content/60">{t('event_form.double_then_long_hint')}</p>
               
               {data.actions?.double_then_long && data.actions.double_then_long.length > 0 ? (
-                data.actions.double_then_long.map((action: any, index: number) => 
+                data.actions.double_then_long.map((action: Action, index: number) => 
                   renderActionFields('double_then_long', action, index)
                 )
               ) : (
@@ -517,8 +518,8 @@ const EventForm: React.FC<EventFormProps> = ({
           </div>
 
           {/* Single then Long */}
-          <div className="card bg-base-200">
-            <div className="card-body">
+          <div className="stg-inset">
+            <div className="card-body p-4">
               <div className="flex justify-between items-center">
                 <h4 className="card-title text-base">{t('event_form.single_then_long')}</h4>
                 <div className="flex items-center gap-2">
@@ -543,7 +544,7 @@ const EventForm: React.FC<EventFormProps> = ({
               <p className="text-sm text-base-content/60">{t('event_form.single_then_long_hint')}</p>
               
               {data.actions?.single_then_long && data.actions.single_then_long.length > 0 ? (
-                data.actions.single_then_long.map((action: any, index: number) => 
+                data.actions.single_then_long.map((action: Action, index: number) => 
                   renderActionFields('single_then_long', action, index)
                 )
               ) : (
@@ -555,8 +556,8 @@ const EventForm: React.FC<EventFormProps> = ({
           </div>
 
           {/* Double then Single */}
-          <div className="card bg-base-200">
-            <div className="card-body">
+          <div className="stg-inset">
+            <div className="card-body p-4">
               <div className="flex justify-between items-center">
                 <h4 className="card-title text-base">{t('event_form.double_then_single')}</h4>
                 <div className="flex items-center gap-2">
@@ -581,7 +582,7 @@ const EventForm: React.FC<EventFormProps> = ({
               <p className="text-sm text-base-content/60">{t('event_form.double_then_single_hint')}</p>
               
               {data.actions?.double_then_single && data.actions.double_then_single.length > 0 ? (
-                data.actions.double_then_single.map((action: any, index: number) => 
+                data.actions.double_then_single.map((action: Action, index: number) => 
                   renderActionFields('double_then_single', action, index)
                 )
               ) : (
@@ -660,7 +661,7 @@ const EventForm: React.FC<EventFormProps> = ({
                   value={data.sequence_mode || 'exclusive'}
                   onValueChange={(value) => updateField('sequence_mode', value)}  
                 >
-                  <SelectTrigger className={`w-full uppercase ${usedInputs.length > 0 && boneioInputOptions.length === 0 ? 'border-warning' : ''}`}>
+                  <SelectTrigger className="w-full uppercase">
                     <SelectValue placeholder="Select sequence mode..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -738,9 +739,11 @@ const EventForm: React.FC<EventFormProps> = ({
             const longMs = convertTimeperiodToMilliseconds(data.long_press_duration);
             if (doubleMs > 0 && longMs > 0 && doubleMs >= longMs) {
               return (
-                <div className="alert alert-warning mt-2">
-                  <span>{t('event_form.timing_validation_error')}</span>
-                </div>
+                <NoticeCallout
+                  variant="warning"
+                  className="mt-2"
+                  message={t('event_form.timing_validation_error')}
+                />
               );
             }
             return null;

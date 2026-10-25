@@ -60,6 +60,7 @@ class CoverState(BaseModel):
     timestamp: float | None = None
     tilt: int = 0  # Tilt position (0-100)
     kind: str
+    area: str | None = None
 
 
 class SensorState(BaseModel):
@@ -86,6 +87,7 @@ class ModbusDeviceState(BaseModel):
     payload_off: str | None = None  # For switch entities
     step: float | str | None = None  # Step value for numeric inputs
     custom_label: str | None = None  # User-defined custom label from YAML config
+    area: str | None = None  # Area id of the device the entity belongs to
 
 class HostSensorState(BaseModel):
     """Host sensor state model."""
@@ -102,6 +104,36 @@ class GroupState(BaseModel):
     state: str
     type: str
     timestamp: float | None = None
+    area: str | None = None
+
+
+class ScheduleRunState(BaseModel):
+    """One past run of a schedule."""
+    at: str
+    source: str
+    outcome: str
+    actions: int
+    duration_ms: int
+    error: str | None = None
+
+
+class ScheduleState(BaseModel):
+    """A schedule as the running controller sees it.
+
+    ``last_fire`` is when the timer last fired, whatever came of it — a
+    schedule stopped by its own condition has fired.
+    """
+    id: str
+    name: str
+    enabled: bool
+    config_enabled: bool | None = None
+    actions: int = 0
+    next_fire: str | None = None
+    last_fire: str | None = None
+    last_outcome: str | None = None
+    last_error: str | None = None
+    last_duration_ms: int | None = None
+    history: list[ScheduleRunState] = []
 
 
 # Response models for API endpoints

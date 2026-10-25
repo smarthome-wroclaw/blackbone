@@ -31,6 +31,7 @@ from boneio.const import (
     OPEN,
     OPENING,
     OUTPUT,
+    SCHEDULE,
     SELECT,
     SENSOR,
     SINGLE,
@@ -82,11 +83,9 @@ def ha_availabilty_message(
     topic = config_helper.topic_prefix if topic is None else topic
     device_name = config_helper.name if device_name is None else device_name
     model = f"boneIO Black {config_helper.device_type.title().replace('X', 'x')}"
-    if config_helper.cloud_registration and config_helper.serial_number:
-        # PWA-registered device: use the public PWA domain with TLS
-        web_url = f"https://{config_helper.serial_number}.black.boneio.app:8443"
-    elif config_helper.is_web_active and config_helper.network_info and IP in config_helper.network_info:
-        web_url = f"{config_helper.http_proto}://{config_helper.network_info[IP]}:{config_helper.web_configuration_port}"
+    # Decided in one place, which the panel reads too. Built here, the panel's
+    # description of it drifted out of date within a day.
+    web_url = config_helper.configuration_url or web_url
     
     web_url_dict = {
         "configuration_url": web_url
@@ -571,6 +570,99 @@ def ha_switch_availabilty_message(id: str, config_helper: ConfigHelper, device_t
 
 
 
+def _ha_schedule_entity(
+    entity_id: str,
+    schedule_id: str,
+    name: str,
+    entity_type: str,
+    config_helper: ConfigHelper,
+    area: str | None = None,
+) -> dict[str, Any]:
+    """Shared skeleton for a schedule's entities.
+
+    Every entity a schedule publishes reads the same retained JSON from one
+    state topic. One message then updates the switch and all three sensors at
+    once, and they cannot disagree with each other — which they would if each
+    had its own topic and one publish failed.
+
+    Hence the two ids. ``entity_id`` separates the entities from each other in
+    Home Assistant; ``schedule_id`` names the one topic they all read. Deriving
+    the topic from the entity id instead pointed each sensor at a topic nothing
+    publishes to, and they sat unknown forever.
+    """
+    msg = ha_availabilty_message(
+        device_type=SCHEDULE,
+        config_helper=config_helper,
+        entity_type=entity_type,
+        id=entity_id,
+        name=name,
+        area=area,
+    )
+    msg["state_topic"] = f"{config_helper.topic_prefix}/{SCHEDULE}/{schedule_id}"
+    return msg
+
+
+def ha_schedule_switch_message(
+    id: str,
+    name: str,
+    config_helper: ConfigHelper,
+    area: str | None = None,
+) -> dict[str, Any]:
+    """The switch that turns one schedule on or off from Home Assistant."""
+    msg = _ha_schedule_entity(id, id, name, "switch", config_helper, area)
+    msg["command_topic"] = f"{config_helper.topic_prefix}/cmd/{SCHEDULE}/{id}/set"
+    msg["payload_off"] = OFF
+    msg["payload_on"] = ON
+    msg["value_template"] = "{{ value_json.state }}"
+    msg["icon"] = "mdi:calendar-clock"
+    return msg
+
+
+def ha_schedule_sensor_message(
+    id: str,
+    name: str,
+    suffix: str,
+    key: str,
+    config_helper: ConfigHelper,
+    device_class: str | None = None,
+    icon: str | None = None,
+    area: str | None = None,
+) -> dict[str, Any]:
+    """One diagnostic sensor off a schedule's state topic.
+
+    Marked ``diagnostic`` on purpose: three sensors times a couple of dozen
+    schedules would otherwise bury the controls on the device page.
+
+    Args:
+        id: The schedule's id.
+        name: The schedule's display name.
+        suffix: Entity id suffix, e.g. ``next_fire``.
+        key: Which key of the state JSON this sensor reads.
+        config_helper: For topics and device info.
+        device_class: HA device class, e.g. ``timestamp``.
+        icon: Optional mdi icon.
+        area: Optional area id.
+    """
+    msg = _ha_schedule_entity(
+        f"{id}_{suffix}",
+        id,
+        f"{name} {suffix.replace('_', ' ')}",
+        "sensor",
+        config_helper,
+        area,
+    )
+    # An empty string, not the word "None": that is how the irrigation
+    # countdown already says "no time to show", and HA reads it as unknown
+    # rather than failing to parse a timestamp.
+    msg["value_template"] = "{{ value_json.%s }}" % key
+    msg["entity_category"] = "diagnostic"
+    if device_class:
+        msg["device_class"] = device_class
+    if icon:
+        msg["icon"] = icon
+    return msg
+
+
 def ha_output_duration_number_message(
     id: str,
     name: str,
@@ -820,6 +912,99 @@ def ha_sensor_system_availabilty_message(
     if icon:
         msg["icon"] = icon
 
+    return msg
+
+
+def ha_sun_sensor_message(
+    id: str,
+    name: str,
+    config_helper: ConfigHelper,
+    unit_of_measurement: str | None = None,
+    device_class: str | None = None,
+    state_class: str | None = None,
+    icon: str | None = None,
+    **kwargs,
+):
+    """Discovery message for a sun sensor.
+
+    Deliberately not the system-sensor helper: those carry
+    ``entity_category: diagnostic``, which hides them from a dashboard. Where
+    the Sun is belongs on the dashboard, not in the device's diagnostics.
+
+    Args:
+        id: Sensor ID.
+        name: Sensor name.
+        config_helper: ConfigHelper instance.
+        unit_of_measurement: Unit, e.g. "°".
+        device_class: HA device class, e.g. "timestamp".
+        state_class: HA state class, e.g. "measurement".
+        icon: MDI icon.
+        **kwargs: Additional fields.
+
+    Returns:
+        HA discovery message dict.
+    """
+    msg = ha_availabilty_message(
+        device_type=SENSOR,
+        config_helper=config_helper,
+        id=id,
+        name=name,
+        entity_type="sensor",
+        **kwargs,
+    )
+    msg["value_template"] = "{{ value_json.state }}"
+    state_topic = msg.get("state_topic", f"{config_helper.topic_prefix}/{SENSOR}/{id}")
+    msg["json_attributes_topic"] = state_topic
+    msg["json_attributes_template"] = "{{ value_json | tojson }}"
+    if unit_of_measurement:
+        msg["unit_of_measurement"] = unit_of_measurement
+    if device_class:
+        msg["device_class"] = device_class
+    if state_class:
+        msg["state_class"] = state_class
+    if icon:
+        msg["icon"] = icon
+    return msg
+
+
+def ha_sun_binary_sensor_message(
+    id: str,
+    name: str,
+    config_helper: ConfigHelper,
+    icon: str | None = None,
+    **kwargs,
+):
+    """Discovery message for "the Sun is up", as a binary_sensor.
+
+    The value is published on an ordinary sensor topic — so it also shows up in
+    the panel's sensor list — and read back here through a value template. That
+    is why this does not reuse ``ha_binary_sensor_availabilty_message``, whose
+    pressed/released payloads belong to GPIO inputs.
+
+    Args:
+        id: Sensor ID, matching the topic the sensor publishes on.
+        name: Entity name.
+        config_helper: ConfigHelper instance.
+        icon: MDI icon.
+        **kwargs: Additional fields.
+
+    Returns:
+        HA discovery message dict.
+    """
+    msg = ha_availabilty_message(
+        device_type=SENSOR,
+        config_helper=config_helper,
+        id=id,
+        name=name,
+        entity_type="binary_sensor",
+        **kwargs,
+    )
+    msg["state_topic"] = f"{config_helper.topic_prefix}/{SENSOR}/{id}"
+    msg["value_template"] = "{{ value_json.state }}"
+    msg["payload_on"] = "on"
+    msg["payload_off"] = "off"
+    if icon:
+        msg["icon"] = icon
     return msg
 
 
@@ -1280,6 +1465,81 @@ def ha_migration_alert_availability_message(
     return msg
 
 
+def ha_security_alert_availability_message(
+    config_helper: ConfigHelper,
+    **kwargs,
+) -> HomeAssistantDiscoveryMessage:
+    """Create the Security binary_sensor (diagnostic) for HA.
+
+    ``device_class: problem``, ON while any security check is failing. The
+    failures themselves ride on the JSON attributes topic, so Home Assistant
+    can show what is wrong without boneIO inventing an entity per check — the
+    set of checks grows between releases, and entities that come and go leave
+    orphans in HA's registry.
+
+    Args:
+        config_helper: ConfigHelper instance.
+        **kwargs: Additional fields forwarded to ``ha_availabilty_message``.
+
+    Returns:
+        HA discovery message dict for the security binary_sensor.
+    """
+    topic = config_helper.topic_prefix
+
+    msg = ha_availabilty_message(
+        id="security_alert",
+        name="Security",
+        entity_type="binary_sensor",
+        config_helper=config_helper,
+        device_type="update",
+        **kwargs,
+    )
+    msg["state_topic"] = f"{topic}/security/state"
+    msg["value_template"] = "{{ value_json.state }}"
+    msg["payload_on"] = "ON"
+    msg["payload_off"] = "OFF"
+    msg["json_attributes_topic"] = f"{topic}/security/attributes"
+    msg["icon"] = "mdi:shield-alert"
+    msg["entity_category"] = "diagnostic"
+    msg["device_class"] = "problem"
+
+    return msg
+
+
+def ha_security_event_message(
+    config_helper: ConfigHelper,
+    **kwargs,
+) -> HomeAssistantDiscoveryMessage:
+    """Create the Security events entity (diagnostic) for HA.
+
+    An ``event`` entity, like a button's: it fires when somebody guesses a
+    password, so an automation can turn that into a notification. The types
+    are the ones boneio.webui.security_events sends, and HA refuses any other.
+
+    Args:
+        config_helper: ConfigHelper instance.
+        **kwargs: Additional fields forwarded to ``ha_availabilty_message``.
+
+    Returns:
+        HA discovery message dict for the event entity.
+    """
+    from boneio.webui.security_events import EVENT_TYPES
+
+    msg = ha_availabilty_message(
+        id="security_event",
+        name="Security events",
+        entity_type="event",
+        config_helper=config_helper,
+        device_type="update",
+        **kwargs,
+    )
+    msg["state_topic"] = f"{config_helper.topic_prefix}/security/event"
+    msg["event_types"] = list(EVENT_TYPES)
+    msg["icon"] = "mdi:shield-key"
+    msg["entity_category"] = "diagnostic"
+    return msg
+
+
 def ha_climate_availability_message(
     id: str,
     name: str,
@@ -1345,6 +1605,49 @@ def ha_climate_availability_message(
         "temperature_unit": "C",
         "precision": 0.1,
     }
+
+
+
+def ha_alarm_code_lock_message(
+    id: str,
+    name: str,
+    config_helper: ConfigHelper,
+    area: str | None = None,
+) -> HomeAssistantDiscoveryMessage:
+    """Discovery for an alarm panel's "codes locked" binary_sensor.
+
+    On while the panel refuses codes after too many wrong ones in a row, so
+    an automation can react to someone guessing the PIN — a push to the
+    owner, or the siren. It is ``tamper`` because that is what it reports:
+    someone working at the code, not a fault in the panel.
+
+    Args:
+        id: Alarm panel ID.
+        name: Alarm panel name; the entity is named after it.
+        config_helper: ConfigHelper instance.
+        area: Optional area, the same as the panel's.
+
+    Returns:
+        HA discovery message for the binary_sensor.
+    """
+    from boneio.const import ALARM_CONTROL_PANEL
+
+    topic = config_helper.topic_prefix
+    msg = ha_availabilty_message(
+        device_type=ALARM_CONTROL_PANEL,
+        entity_type="binary_sensor",
+        config_helper=config_helper,
+        id=f"{id}_code_lock",
+        name=f"{name} code lockout",
+        area=area,
+    )
+    msg["state_topic"] = f"{topic}/alarm/{id}/code_lock"
+    msg["payload_on"] = "ON"
+    msg["payload_off"] = "OFF"
+    msg["device_class"] = "tamper"
+    # The panel's own attributes carry the count and the seconds left.
+    msg["json_attributes_topic"] = f"{topic}/alarm/{id}/attributes"
+    return msg
 
 
 def ha_alarm_panel_availability_message(

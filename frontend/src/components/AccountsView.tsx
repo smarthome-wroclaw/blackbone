@@ -3,9 +3,29 @@ import type { AxiosError } from 'axios';
 import axios from '@/api/axios';
 import { useAuth, type Role } from '../hooks/useAuth';
 import { useTranslation } from '../hooks/useTranslation';
+<<<<<<< ours
 
 /** Mirrors the backend minimum in boneio/core/auth/store.py. */
 const MIN_PASSWORD_LENGTH = 8;
+=======
+import {
+  MIN_PASSWORD_LENGTH,
+  PASSWORD_PROBLEM_KEYS,
+  checkPassword,
+} from '@/utils/passwordPolicy';
+import { FaUsers, FaUserPlus } from 'react-icons/fa';
+import AccountPasswordDialog from './AccountPasswordDialog';
+import AccountDeleteDialog from './AccountDeleteDialog';
+import SshPasswordCard from './SshPasswordCard';
+import {
+  SettingsPage,
+  SettingsCard,
+  FormField,
+  FormActions,
+  NoticeCallout,
+} from './UISettings/ui';
+import { LoadingState } from '@/components/ui/LoadingState';
+>>>>>>> theirs
 
 interface Account {
   username: string;
@@ -48,6 +68,20 @@ export default function AccountsView() {
   const [newRole, setNewRole] = useState<Role>('viewer');
   const [isCreating, setIsCreating] = useState(false);
 
+<<<<<<< ours
+=======
+  // Which account a dialog is open for; null when none is.
+  const [passwordFor, setPasswordFor] = useState<string | null>(null);
+  const [deleteFor, setDeleteFor] = useState<string | null>(null);
+
+  // The backend applies the same rules, so this only means the admin hears
+  // about a doomed password before submitting rather than after.
+  const newPasswordIssue = newPassword ? checkPassword(newPassword, newUsername) : null;
+  const newPasswordProblem = newPasswordIssue
+    ? t(PASSWORD_PROBLEM_KEYS[newPasswordIssue], { min: MIN_PASSWORD_LENGTH })
+    : null;
+
+>>>>>>> theirs
   const load = useCallback(async () => {
     try {
       const { data } = await axios.get('/api/accounts');
@@ -89,6 +123,7 @@ export default function AccountsView() {
     }
   };
 
+<<<<<<< ours
   const handleDelete = async (account: Account) => {
     if (!window.confirm(t('accounts.confirm_delete', { username: account.username }))) return;
     setError(null);
@@ -99,6 +134,19 @@ export default function AccountsView() {
       await load();
     } catch (err: unknown) {
       setError(errorMessage(err, t('accounts.delete_failed')));
+=======
+  const handleDelete = async (username: string) => {
+    setError(null);
+    setNotice(null);
+    try {
+      await axios.delete(`/api/accounts/${encodeURIComponent(username)}`);
+      setNotice(t('accounts.deleted', { username }));
+      await load();
+    } catch (err: unknown) {
+      setError(errorMessage(err, t('accounts.delete_failed')));
+    } finally {
+      setDeleteFor(null);
+>>>>>>> theirs
     }
   };
 
@@ -114,6 +162,7 @@ export default function AccountsView() {
     }
   };
 
+<<<<<<< ours
   const handleReset = async (account: Account) => {
     const password = window.prompt(
       t('accounts.prompt_new_password', { username: account.username }),
@@ -145,10 +194,26 @@ export default function AccountsView() {
           </div>
         </div>
       </div>
+=======
+  const handlePasswordChanged = (username: string) => {
+    setPasswordFor(null);
+    setError(null);
+    setNotice(t('accounts.password_reset', { username }));
+  };
+
+  const isSelf = (username: string) => username.toLowerCase() === (me ?? '').toLowerCase();
+
+  if (!isAdmin) {
+    return (
+      <SettingsPage width="wide">
+        <NoticeCallout variant="warning" message={t('accounts.admin_only')} />
+      </SettingsPage>
+>>>>>>> theirs
     );
   }
 
   return (
+<<<<<<< ours
     <div className="container mx-auto p-4">
       <div className="card bg-base-200 shadow-xl">
       <div className="card-body space-y-6">
@@ -267,5 +332,150 @@ export default function AccountsView() {
       </div>
       </div>
     </div>
+=======
+    <SettingsPage width="wide">
+      {error && <NoticeCallout variant="error" message={error} />}
+      {notice && <NoticeCallout variant="success" message={notice} />}
+
+      {/* Accounts list */}
+      <SettingsCard icon={<FaUsers />} title={t('accounts.title')}>
+        {isLoading ? (
+          <LoadingState className="py-6" />
+        ) : (
+          // A list, not a table: three columns of controls do not fit a phone,
+          // and a table that scrolls sideways hides the delete button off-screen.
+          <ul className="stg-inset divide-y divide-base-content/10">
+            {accounts.map((account) => {
+              const isMe = isSelf(account.username);
+              return (
+                <li
+                  key={account.username}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5"
+                >
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className="font-medium font-mono truncate">{account.username}</span>
+                    {isMe && (
+                      <span className="badge badge-ghost badge-xs shrink-0">
+                        {t('accounts.you')}
+                      </span>
+                    )}
+                  </div>
+                  <select
+                    className="select select-xs select-bordered w-auto"
+                    aria-label={t('accounts.role')}
+                    value={account.role}
+                    disabled={isMe}
+                    onChange={(e) => handleRoleChange(account, e.target.value as Role)}
+                  >
+                    <option value="admin">{t('accounts.role_admin')}</option>
+                    <option value="viewer">{t('accounts.role_viewer')}</option>
+                  </select>
+                  <div className="flex justify-end gap-1 w-full sm:w-auto">
+                    <button
+                      className="btn btn-ghost btn-xs"
+                      onClick={() => {
+                        setNotice(null);
+                        setPasswordFor(account.username);
+                      }}
+                    >
+                      {t('accounts.reset_password')}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-xs text-error"
+                      disabled={isMe}
+                      onClick={() => setDeleteFor(account.username)}
+                    >
+                      {t('accounts.delete')}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </SettingsCard>
+
+      {/* Add account */}
+      <form onSubmit={handleCreate}>
+        <SettingsCard
+          icon={<FaUserPlus />}
+          title={t('accounts.add_title')}
+          description={t('accounts.add_intro')}
+          footer={
+            <FormActions>
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm gap-2"
+                disabled={isCreating || !newUsername || !newPassword || !!newPasswordProblem}
+              >
+                {isCreating && <span className="loading loading-spinner loading-xs" />}
+                {t('accounts.add_button')}
+              </button>
+            </FormActions>
+          }
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3">
+            <FormField label={t('accounts.username')}>
+              <input
+                type="text"
+                className="input input-bordered w-full font-mono"
+                placeholder={t('accounts.username')}
+                autoComplete="off"
+                required
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+              />
+            </FormField>
+
+            <FormField
+              label={t('accounts.password')}
+              error={newPasswordProblem || undefined}
+            >
+              <input
+                type="password"
+                className={`input input-bordered w-full font-mono ${newPasswordProblem ? 'input-error' : ''}`}
+                placeholder={t('accounts.password')}
+                autoComplete="new-password"
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+                aria-invalid={newPasswordProblem ? true : undefined}
+                aria-describedby={newPasswordProblem ? 'accounts-password-error' : undefined}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </FormField>
+
+            <FormField label={t('accounts.role')} className="sm:w-40">
+              <select
+                className="select select-bordered w-full"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value as Role)}
+              >
+                <option value="viewer">{t('accounts.role_viewer')}</option>
+                <option value="admin">{t('accounts.role_admin')}</option>
+              </select>
+            </FormField>
+          </div>
+        </SettingsCard>
+      </form>
+
+      {/* Not a panel account: the Linux login behind SSH and sudo. */}
+      <SshPasswordCard />
+
+      {/* Keyed by account: a fresh form, nothing typed for the last one. */}
+      <AccountPasswordDialog
+        key={passwordFor ?? ''}
+        username={passwordFor}
+        isSelf={passwordFor !== null && isSelf(passwordFor)}
+        onClose={() => setPasswordFor(null)}
+        onChanged={handlePasswordChanged}
+      />
+      <AccountDeleteDialog
+        username={deleteFor}
+        onClose={() => setDeleteFor(null)}
+        onConfirm={handleDelete}
+      />
+    </SettingsPage>
+>>>>>>> theirs
   );
 }

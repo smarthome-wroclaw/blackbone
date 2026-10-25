@@ -2,7 +2,7 @@ type: dict
 schema:
   action:
     type: string
-    allowed: ['mqtt', 'output', 'cover', 'output_over_mqtt', 'cover_over_mqtt', 'remote_output', 'remote_cover']
+    allowed: ['mqtt', 'output', 'cover', 'virtual_switch', 'output_over_mqtt', 'cover_over_mqtt', 'remote_output', 'remote_cover']
     coerce: lower
     case_insensitive: true
   boneio_output:
@@ -21,6 +21,16 @@ schema:
       label: Cover ID
       description: |
         ID of the cover to control. This should match the id defined in your cover configuration.
+  boneio_virtual_switch:
+    type: string
+    required_if:
+      action: ['virtual_switch']
+    meta:
+      label: Virtual switch ID
+      description: |
+        ID of the virtual switch to set. Matches an entry in the
+        `virtual_switch:` section — a flag with no relay behind it, which
+        conditions can then read. See docs/VIRTUAL_SWITCHES.md.
   topic:
     type: string
     required_if:
@@ -35,7 +45,7 @@ schema:
       action: ['cover', 'cover_over_mqtt', 'remote_cover']
     forbidden_if:
       action: ['output', 'mqtt', 'mqtt_output', 'remote_output']
-    allowed: ['TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'TILT', 'TILT_OPEN', 'TILT_CLOSE']
+    allowed: ['TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'SET_POSITION', 'TILT', 'TILT_OPEN', 'TILT_CLOSE']
     coerce: action_field
     default: TOGGLE
     case_insensitive: true
@@ -46,13 +56,15 @@ schema:
     required: False
     default: {}
     meta:
-      label: Extra data to send to function. Currently used only for cover tilt.
+      label: Extra data for cover actions (position, tilt, smart toggle threshold).
     schema:
       position:
         type: integer
         required: False
+        min: 0
+        max: 100
         meta:
-          label: Position to set cover to
+          label: Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.
       tilt_position:
         type: integer
         required: False
@@ -83,7 +95,7 @@ schema:
   action_output:
     type: string
     required_if:
-      action: ['output', 'output_over_mqtt', 'remote_output']
+      action: ['output', 'output_over_mqtt', 'remote_output', 'virtual_switch']
     forbidden_if:
       action: ['cover', 'mqtt', 'cover_over_mqtt', 'remote_cover']
     allowed: ['TOGGLE', 'ON', 'OFF', 'BRIGHTNESS_UP', 'BRIGHTNESS_DOWN', 'BRIGHTNESS_UP_CYCLE', 'BRIGHTNESS_DOWN_CYCLE', 'SET_BRIGHTNESS', 'CYCLE_COLOR', 'CYCLE_PRESET']
@@ -93,6 +105,9 @@ schema:
     meta:
       label: If output action chosen then what action to perform.
       description: |
+        Reused by the virtual_switch action, which takes the same three verbs:
+        ON, OFF and TOGGLE. One concept, not two near-identical fields.
+
         For ESPHome lights, additional actions are available:
         - BRIGHTNESS_UP: Increase brightness by 10% (turns on at 10% if OFF)
         - BRIGHTNESS_DOWN: Decrease brightness by 10% (turns off at 10%)
@@ -250,6 +265,25 @@ schema:
         Minimum: 200ms (matches periodic event interval).
 
   # Delayed action execution (cancelable timer)
+  probability:
+    type: float
+    required: False
+    min: 0
+    max: 1
+    meta:
+      label: Chance of running
+      description: |
+        Run this action only some of the time. 1 (the default) always, 0.7
+        seven times out of ten, 0 never.
+
+        For presence simulation. `jitter` on a schedule randomises *when* a
+        step happens; this randomises *whether* it happens at all, which is
+        the difference between lights on a timer and somebody living there —
+        three evenings of the same four steps is a pattern an observer can
+        read.
+
+        Drawn per firing, after the conditions: a `probability` of 0.5 on an
+        action whose condition is false still never runs.
   delay:
     type: timeperiod
     coerce: positive_time_period

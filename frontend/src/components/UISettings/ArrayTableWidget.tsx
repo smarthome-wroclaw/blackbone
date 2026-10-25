@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from '@/api/axios';
 import { copyToClipboard } from '@/utils/clipboard';
-import { FaPlus, FaDownload, FaUpload } from 'react-icons/fa';
+import { FaPlus, FaDownload, FaUpload, FaCheck, FaWandMagicSparkles } from 'react-icons/fa6';
 import { useTranslation } from '../../hooks/useTranslation';
 
 // Extracted components & hooks
@@ -15,43 +15,64 @@ import ImportDialog from './components/ImportDialog';
 import TemplatePicker from './components/TemplatePicker';
 import { AddModbusDeviceWizard } from './AddModbusDeviceWizard';
 import type { AffectedAction } from './hooks/useItemActions';
+import type { AutodiscoveredDevice } from './tables/RemoteDeviceTable';
+import type { OutputGroupRecord } from './ActionFields/types';
+import type { BinarySensorEntity, CoverEntity, EventEntity, OutputEntity, RemoteDeviceEntity } from '@/types/config';
+import { isRecord, type ConfigRecord, type JsonSchema } from '@/types/jsonSchema';
 
 interface Area {
   id: string;
   name: string;
 }
 
+/** The keys this widget reads by name on an item of any section. */
+interface ItemKeys {
+  id?: string;
+  name?: string;
+  boneio_input?: string;
+  boneio_output?: string;
+  open_relay?: string;
+  close_relay?: string;
+  address?: string | number;
+  model?: string;
+}
+
 export interface ArrayTableWidgetProps {
-  value: any[];
-  onChange: (value: any[]) => void;
-  schema: any;
+  value: ConfigRecord[];
+  onChange: (value: ConfigRecord[]) => void;
+  schema: JsonSchema;
   title?: string;
-  uiSchema?: any;
-  sectionType?: 'binary_sensor' | 'event' | 'local_inputs' | 'remote_inputs' | 'remote_outputs' | 'output' | 'output_group' | 'cover' | 'modbus_devices' | 'areas' | 'sensor' | 'virtual_energy_sensor' | 'remote_devices' | 'template' | 'adc' | 'board_sensors' | 'other';
+  uiSchema?: ConfigRecord;
+  /** True while the section has unsaved edits; forwarded to the table. */
+  isDirty?: boolean;
+  /** Section-specific controls rendered next to "Add new", e.g. a wizard. */
+  extraActions?: React.ReactNode;
+  sectionType?: 'binary_sensor' | 'event' | 'local_inputs' | 'remote_inputs' | 'remote_outputs' | 'output' | 'output_group' | 'cover' | 'modbus_devices' | 'areas' | 'sensor' | 'virtual_energy_sensor' | 'remote_devices' | 'template' | 'adc' | 'board_sensors' | 'virtual_switch' | 'schedule' | 'other';
   deviceType?: string;
-  allBinarySensors?: any[];
-  allEvents?: any[];
-  allOutputs?: any[];
-  allOutputGroups?: any[];
-  allCovers?: any[];
+  allBinarySensors?: BinarySensorEntity[];
+  allEvents?: EventEntity[];
+  allOutputs?: OutputEntity[];
+  allOutputGroups?: OutputGroupRecord[];
+  allCovers?: CoverEntity[];
   allAreas?: Area[];
-  allSensors?: any[];
-  allModbusDevices?: any[];
-  allVirtualEnergySensors?: any[];
-  allRemoteDevices?: any[];
-  allRemoteInputs?: any[];
+  allSensors?: ConfigRecord[];
+  allModbusDevices?: ConfigRecord[];
+  allVirtualEnergySensors?: ConfigRecord[];
+  allRemoteDevices?: RemoteDeviceEntity[];
+  allRemoteInputs?: ConfigRecord[];
+  allVirtualSwitches?: ConfigRecord[];
   /** Saved (committed) data for comparison - items not in saved are shown as disabled */
-  savedOutputs?: any[];
-  savedOutputGroups?: any[];
-  savedCovers?: any[];
+  savedOutputs?: OutputEntity[];
+  savedOutputGroups?: OutputGroupRecord[];
+  savedCovers?: CoverEntity[];
   /** Callback to update events when orphaned actions need to be removed */
-  onUpdateEvents?: (newEvents: any[]) => void;
+  onUpdateEvents?: (newEvents: EventEntity[]) => void;
   /** Callback to update binary_sensors when orphaned actions need to be removed */
-  onUpdateBinarySensors?: (newBinarySensors: any[]) => void;
+  onUpdateBinarySensors?: (newBinarySensors: BinarySensorEntity[]) => void;
   /** Callback to save a section after orphaned actions are removed.
    * If data is provided, it will be saved directly instead of using formData.
    */
-  onSaveSection?: (sectionName: string, data?: any) => Promise<void>;
+  onSaveSection?: (sectionName: string, data?: unknown[]) => Promise<void>;
   /** Name of item to auto-open for editing (from URL query param) */
   editItemName?: string;
   /** Callback when edit item has been opened (to clear URL query param) */
@@ -66,12 +87,14 @@ const isInputSection = (s: string) => s === 'binary_sensor' || s === 'event' || 
  * Uses regular table with Edit buttons, @rjsf form only appears in modal.
  * This prevents automatic onChange calls during editing.
  */
-const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChange, schema, title: _title, uiSchema, sectionType = 'other', deviceType, allBinarySensors = [], allEvents = [], allOutputs = [], allOutputGroups = [], allCovers = [], allAreas = [], allSensors = [], allModbusDevices = [], allVirtualEnergySensors = [], allRemoteDevices = [], allRemoteInputs = [], savedOutputs, savedOutputGroups, savedCovers, onUpdateEvents, onUpdateBinarySensors, onSaveSection, editItemName, onEditItemOpened }) => {
+const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChange, schema, title: _title, uiSchema, sectionType = 'other', isDirty = false, extraActions, deviceType, allBinarySensors = [], allEvents = [], allOutputs = [], allOutputGroups = [], allCovers = [], allAreas = [], allSensors = [], allModbusDevices = [], allVirtualEnergySensors = [], allRemoteDevices = [], allRemoteInputs = [], allVirtualSwitches = [], savedOutputs, savedOutputGroups, savedCovers, onUpdateEvents, onUpdateBinarySensors, onSaveSection, editItemName, onEditItemOpened }) => {
   const { t } = useTranslation();
 
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [editingItem, setEditingItem] = useState<any>(null);
+  const [editingItem, setEditingItem] = useState<ConfigRecord | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  // Set while an input committed from the modal is on its way to the device.
+  const [inputSaving, setInputSaving] = useState(false);
   const [hasValidationErrors, setHasValidationErrors] = useState(false);
   const [attemptedSubmit, setAttemptedSubmit] = useState(false);
   const [interlockGroups, setInterlockGroups] = useState<string[]>([]);
@@ -111,7 +134,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
 
     // 1. Extract groups from all config items (local + remote outputs)
     const configGroups = new Set<string>();
-    const scanItem = (item: any) => {
+    const scanItem = (item: { interlock_group?: unknown }) => {
       const g = item?.interlock_group;
       if (Array.isArray(g)) {
         g.forEach((name: string) => { if (name) configGroups.add(name); });
@@ -159,7 +182,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
   useEffect(() => {
     if (!editItemName || value.length === 0 || editItemProcessedRef.current === editItemName) return;
 
-    const index = value.findIndex((item: any) => {
+    const index = value.findIndex((item: ItemKeys) => {
       if (item.name === editItemName || item.id === editItemName) return true;
       if (item.boneio_input === editItemName || item.boneio_output === editItemName) return true;
       if (sectionType === 'cover' && item.open_relay && item.close_relay) {
@@ -191,7 +214,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
   // ─── CRUD Handlers ──────────────────────────────────────────────
 
   const handleEdit = (index: number) => {
-    const item = JSON.parse(JSON.stringify(value[index]));
+    const item: ConfigRecord = JSON.parse(JSON.stringify(value[index]));
     if (isInputSection(sectionType) && item.id && !item.name) {
       item.name = item.id;
       delete item.id;
@@ -209,13 +232,13 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
    * then open it as a new item for editing.
    */
   const handleDuplicate = (index: number) => {
-    const item = JSON.parse(JSON.stringify(value[index]));
+    const item: ConfigRecord = JSON.parse(JSON.stringify(value[index]));
     // Append suffix to avoid id/name collision
     if (item.id) item.id = `${item.id}_copy`;
     if (item.name) item.name = `${item.name} (copy)`;
     // For irrigation zones, also reset zone IDs to avoid conflicts
     if (item.zones && Array.isArray(item.zones)) {
-      item.zones = item.zones.map((z: any) => ({
+      item.zones = item.zones.map((z: ConfigRecord) => ({
         ...z,
         id: z.id ? `${z.id}_copy` : undefined,
       }));
@@ -241,6 +264,15 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
       return;
     } else if (sectionType === 'local_inputs') {
       setEditingItem({ _type: 'event' });
+    } else if (sectionType === 'board_sensors') {
+      // The form shows LM75 at 0x48 for an item with no type, but the save
+      // sorts items into lm75/ina219/... by _type and drops one without it.
+      setEditingItem({ _type: 'lm75', address: 0x48 });
+    } else if (sectionType === 'schedule') {
+      // A clock trigger rather than sunset: it is valid on every device,
+      // including one with no coordinates, where a sun trigger can never
+      // resolve and the schedule would look configured and never fire.
+      setEditingItem({ enabled: true, trigger: { type: 'time', at: '20:00', days: 'daily' }, actions: [] });
     } else {
       setEditingItem({});
     }
@@ -259,7 +291,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
     setIsModalOpen(true);
   };
 
-  const handleAddFromDiscovery = (device: any) => {
+  const handleAddFromDiscovery = (device: AutodiscoveredDevice) => {
     setEditingIndex(null);
     if (device.protocol === 'esphome_api' || device.esphome_api) {
       setEditingItem({
@@ -296,22 +328,35 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
   };
 
   const handleCancel = () => {
+    // Closing mid-save would let another edit start on the list it replaces.
+    if (inputSaving) return;
     setIsModalOpen(false);
     setEditingItem(null);
     setEditingIndex(null);
   };
 
-  const handleSave = (e?: any) => {
+  const handleSave = async (e?: { formData?: ConfigRecord }) => {
+    if (inputSaving) return;
     setAttemptedSubmit(true);
     if (hasValidationErrors) {
       alert(t('array_table_widget.fix_validation_errors_before_saving'));
       return;
     }
 
-    const dataToSave = e?.formData || editingItem;
+    // Save is only offered while an item is open, so this is never null.
+    const dataToSave = (e?.formData || editingItem) as ConfigRecord;
     const { isValid, errorMessage } = validateItem(sectionType, dataToSave, t);
     if (!isValid) {
       alert(errorMessage);
+      return;
+    }
+
+    // Two entities with one id share MQTT topics and HA entity: the second
+    // silently replaces the first. A cover keeps the id generated from its
+    // first relays, so changing the relays or copying it is enough to collide.
+    const newId = getItemId(dataToSave);
+    if (newId && value.some((item, i) => i !== editingIndex && getItemId(item) === newId)) {
+      alert(t('array_table_widget.id_duplicate', { id: newId }));
       return;
     }
 
@@ -325,8 +370,8 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
     if (sectionType === 'template') {
       delete cleanedData._autoId;
       if (!cleanedData.id) {
-        const baseName = (cleanedData.name || cleanedData.platform || 'template').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-        const existingIds = new Set(value.filter((_: any, i: number) => i !== editingIndex).map((item: any) => item.id));
+        const baseName = ((cleanedData.name || cleanedData.platform || 'template') as string).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+        const existingIds = new Set(value.filter((_, i) => i !== editingIndex).map((item) => item.id));
         let candidateId = baseName;
         let suffix = 2;
         while (existingIds.has(candidateId)) { candidateId = `${baseName}_${suffix}`; suffix++; }
@@ -341,6 +386,22 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
       newValue.push(cleanedData);
     }
     onChange(newValue);
+
+    // An input is committed by its own Save: the device applies it in place,
+    // so making the user confirm it again on the section bar bought nothing.
+    // The modal stays open until it lands, which keeps the next edit from
+    // starting on a list the finishing save is about to replace.
+    if (isInputSection(sectionType) && onSaveSection) {
+      setInputSaving(true);
+      try {
+        await onSaveSection(sectionType, newValue);
+      } catch (err) {
+        console.warn('Saving input section failed:', err);
+      } finally {
+        setInputSaving(false);
+      }
+    }
+
     setIsModalOpen(false);
     setEditingItem(null);
     setEditingIndex(null);
@@ -348,7 +409,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
 
   // ─── Delete Logic ───────────────────────────────────────────────
 
-  const getItemId = (item: any): string => {
+  const getItemId = (item: ItemKeys): string => {
     if (sectionType === 'output') return item.id || item.boneio_output || '';
     if (sectionType === 'output_group') return item.id || '';
     if (sectionType === 'cover') return item.id || (item.open_relay && item.close_relay ? `cover_${item.open_relay}_${item.close_relay}`.toLowerCase() : '');
@@ -361,7 +422,8 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
 
 
     if (sectionType === 'areas') {
-      const affected = findItemsUsingArea(item.id);
+      // An area entry always carries its id; nothing else is keyed by it.
+      const affected = findItemsUsingArea(item.id as string);
       if (affected.length > 0) {
         setDeleteIndex(index);
         setAffectedActions(affected);
@@ -429,7 +491,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
     try {
       const { buildAiWizardPrompt } = await import('./helpers/aiWizardPrompt');
       const entityType = sectionType === 'event' ? 'event' : 'binary_sensor';
-      const getEnum = (path: string) => path.split('.').reduce((o: any, k: string) => o?.[k], schema) || [];
+      const getEnum = (path: string) => (path.split('.').reduce<unknown>((o, k) => (isRecord(o) ? o[k] : undefined), schema) || []) as string[];
       const actionTypeOptions = getEnum('items.properties.actions.properties.single.items.properties.action.enum') ||
         getEnum('items.properties.actions.properties.pressed.items.properties.action.enum') ||
         ['mqtt', 'output', 'cover', 'output_over_mqtt', 'cover_over_mqtt', 'remote_output', 'remote_cover'];
@@ -438,10 +500,10 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
         ['TOGGLE', 'ON', 'OFF', 'BRIGHTNESS_UP', 'BRIGHTNESS_DOWN', 'BRIGHTNESS_UP_CYCLE', 'BRIGHTNESS_DOWN_CYCLE', 'SET_BRIGHTNESS', 'CYCLE_COLOR', 'CYCLE_PRESET'];
       const actionCoverOptions = getEnum('items.properties.actions.properties.single.items.properties.action_cover.enum') ||
         getEnum('items.properties.actions.properties.pressed.items.properties.action_cover.enum') ||
-        ['TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'TILT', 'TILT_OPEN', 'TILT_CLOSE'];
+        ['TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'SET_POSITION', 'TILT', 'TILT_OPEN', 'TILT_CLOSE'];
 
       const prompt = buildAiWizardPrompt({
-        entityType: entityType as any, data: {} as any, schema,
+        entityType, data: {}, schema,
         allOutputs, allOutputGroups, allCovers, allAreas, allRemoteDevices,
         allConfiguredInputs: value,
         actionTypeOptions, actionOutputOptions, actionCoverOptions,
@@ -478,22 +540,39 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
             </button>
           </div>
 
+          {/* Same shape as the two beside it: an icon always, the label only
+              where there is room. As a full-width outline button it was the
+              one text control in a row of icons, and on a phone it squeezed
+              "Add new" until its label wrapped. The icon carries the copied
+              confirmation so the feedback survives without the label. */}
           {isInputSection(sectionType) && (
             <div className="tooltip tooltip-bottom" data-tip={t('event_form.ai_wizard_description')}>
-              <button onClick={handleAiWizard} className="btn btn-outline btn-sm">
-                {wizardCopied ? t('event_form.ai_prompt_copied_short') : t('event_form.ai_copy_wizard')}
+              <button
+                onClick={handleAiWizard}
+                className="btn btn-ghost btn-sm gap-2 max-sm:btn-square"
+              >
+                {wizardCopied ? <FaCheck className="text-success" /> : <FaWandMagicSparkles />}
+                <span className="hidden sm:inline">
+                  {wizardCopied ? t('event_form.ai_prompt_copied_short') : t('event_form.ai_copy_wizard')}
+                </span>
               </button>
             </div>
           )}
         </div>
 
-        {/* Add New — primary action */}
-        <div className={`tooltip tooltip-left ${allUsed ? 'tooltip-warning' : 'tooltip-info'}`}
-          data-tip={allUsed ? (sectionType === 'output' ? t('outputs.all_outputs_used') : t('inputs.all_inputs_used')) : t('settings.add_new')}>
-          <button onClick={handleAdd} className="btn btn-primary btn-sm" disabled={allUsed}>
-            <FaPlus className="mr-1" />
-            {t('settings.add_new')}
-          </button>
+        {/* Section-specific actions sit beside Add New, not adrift in the
+            middle of the row where justify-between would put a third child. */}
+        <div className="flex items-center gap-2">
+          {extraActions}
+
+          {/* Add New — primary action */}
+          <div className={`tooltip tooltip-left ${allUsed ? 'tooltip-warning' : 'tooltip-info'}`}
+            data-tip={allUsed ? (sectionType === 'output' ? t('outputs.all_outputs_used') : t('inputs.all_inputs_used')) : t('settings.add_new')}>
+            <button onClick={handleAdd} className="btn btn-primary btn-sm" disabled={allUsed}>
+              <FaPlus className="mr-1" />
+              {t('settings.add_new')}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -510,6 +589,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
           onDelete={handleDelete}
           onDuplicate={sectionType === 'template' ? handleDuplicate : undefined}
           onAddFromDiscovery={handleAddFromDiscovery}
+          isDirty={isDirty}
         />
       ) : (
         <div className="text-center py-8 text-base-content/60">
@@ -524,7 +604,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
       {/* Edit Modal */}
       <EditItemDialog
         open={isModalOpen}
-        onOpenChange={setIsModalOpen}
+        onOpenChange={(open) => { if (!inputSaving) setIsModalOpen(open); }}
         editingItem={editingItem}
         editingIndex={editingIndex}
         sectionType={sectionType}
@@ -541,6 +621,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
         allModbusDevices={allModbusDevices}
         allRemoteDevices={allRemoteDevices}
         allRemoteInputs={allRemoteInputs}
+        allVirtualSwitches={allVirtualSwitches}
         savedOutputs={savedOutputs}
         savedOutputGroups={savedOutputGroups}
         savedCovers={savedCovers}
@@ -549,6 +630,7 @@ const ArrayTableWidget: React.FC<ArrayTableWidgetProps> = ({ value = [], onChang
         availableDallasSensors={availableDallasSensors}
         onChange={setEditingItem}
         onSave={handleSave}
+        isSaving={inputSaving}
         onCancel={handleCancel}
         onValidationChange={setHasValidationErrors}
         onInterlockGroupCreated={handleInterlockGroupCreated}

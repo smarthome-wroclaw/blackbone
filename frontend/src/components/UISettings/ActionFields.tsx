@@ -1,3 +1,4 @@
+import { NoticeCallout } from './ui';
 import React, { useState } from 'react';
 import { NumericInput } from '@/components/ui/NumericInput';
 import {
@@ -7,11 +8,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { FaTrash, FaPlay, FaLightbulb, FaCloud, FaWifi, FaSort } from 'react-icons/fa';
+import { FaTrash, FaPlay, FaLightbulb, FaCloud, FaWifi, FaSort, FaToggleOn } from 'react-icons/fa';
 import { useTranslation } from '@/hooks/useTranslation';
 import axios from '@/api/axios';
 import type { CoverEntity, OutputEntity, BinarySensorEntity } from '@/types/config';
 import ActionConditions from './ActionFields/ActionConditions';
+import { getDeviceCovers, getDeviceEntities } from './ActionFields/helpers';
+import { normalizeCovers } from './helpers/coverUtils';
 import SimpleTimePeriodInput from './widgets/SimpleTimePeriodInput';
 
 // Helper to render distinct theme icons for each action type
@@ -51,6 +54,8 @@ const getActionTypeIcon = (type: string) => {
           <FaSort className="text-blue-500 text-[10px]" />
         </div>
       );
+    case 'virtual_switch':
+      return <FaToggleOn className="text-secondary shrink-0 text-sm" />;
     default:
       return null;
   }
@@ -61,6 +66,7 @@ import {
   validateAction as validate,
   cleanActionFields as cleanFields,
   OutputAction,
+  VirtualSwitchAction,
   CoverAction,
   MqttAction,
   OutputOverMqttAction,
@@ -68,19 +74,27 @@ import {
   RemoteOutputAction,
   RemoteCoverAction,
 } from './ActionFields/index';
-import type { Area, RemoteDevice } from './ActionFields/types';
+import type { ActionDef, ActionInput, ActionUpdate, Area, OutputGroupRecord, RemoteDevice } from './ActionFields/types';
 
 // Re-export helper functions for use in parent components
 export const validateAction = validate;
 export const cleanActionFields = cleanFields;
 
-interface ActionFieldsProps {
-  action: any;
+/** Read `obj[key]` if `obj` is an object; `undefined` otherwise. */
+const fieldOf = (obj: unknown, key: string): unknown =>
+  typeof obj === 'object' && obj !== null ? (obj as Record<string, unknown>)[key] : undefined;
+
+export interface ActionFieldsProps {
+  action: ActionInput;
   index: number;
-  onUpdate: (field: string, value: any) => void;
-  onRemove: () => void;
+  onUpdate: ActionUpdate;
+  /** Omitted where the action is the whole form (Teach Mode, the quick
+   *  action): there is no list to remove it from, so no trash button. */
+  onRemove?: () => void;
+  /** Header text. Defaults to "Action N". */
+  title?: string;
   allOutputs: OutputEntity[];
-  allOutputGroups: any[];
+  allOutputGroups: OutputGroupRecord[];
   allCovers: CoverEntity[];
   allAreas: Area[];
   allRemoteDevices?: RemoteDevice[];
@@ -89,12 +103,14 @@ interface ActionFieldsProps {
   actionCoverOptions: string[];
   showValidation?: boolean;
   savedOutputs?: OutputEntity[];
-  savedOutputGroups?: any[];
+  savedOutputGroups?: OutputGroupRecord[];
   savedCovers?: CoverEntity[];
   clickType?: 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single' | 'pressed' | 'released';
   allBinarySensors?: BinarySensorEntity[];
   /** Remote inputs (binary sensors from ESPHome/CAN devices) for condition entity selection */
   allRemoteInputs?: Array<Record<string, unknown>>;
+  /** Virtual switches — flags with no hardware, usable in conditions. */
+  allVirtualSwitches?: Array<Record<string, unknown>>;
   /** Entity ID to exclude from condition binary_sensor list (prevents self-reference) */
   excludeEntityId?: string;
   /** Area ID of the input being configured — used to prioritize same-area entities in pickers. */
@@ -106,10 +122,11 @@ interface ActionFieldsProps {
  * Supports multiple action types: output, cover, mqtt, output_over_mqtt, cover_over_mqtt, remote_output, remote_cover.
  */
 const ActionFields: React.FC<ActionFieldsProps> = ({
-  action,
+  action: actionInput,
   index,
   onUpdate,
   onRemove,
+  title,
   allOutputs,
   allOutputGroups,
   allCovers,
@@ -125,10 +142,23 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
   clickType,
   allBinarySensors = [],
   allRemoteInputs = [],
+  allVirtualSwitches = [],
   excludeEntityId,
   preferredArea,
 }) => {
   const { t } = useTranslation();
+  // The forms hold actions as plain records; every field they put there is
+  // one ActionDef declares, so this is where the editor starts reading it typed.
+  const action = actionInput as ActionDef;
+
+  // Action types that need something configured to aim at; the rest
+  // (MQTT topics, outputs) always have a target.
+  const targetsExist: Record<string, boolean> = {
+    virtual_switch: allVirtualSwitches.length > 0,
+    cover: normalizeCovers(allCovers).length > 0,
+    remote_output: allRemoteDevices.some((d) => getDeviceEntities(d).length > 0),
+    remote_cover: allRemoteDevices.some((d) => getDeviceCovers(d).length > 0),
+  };
   const actionType = action.action || 'output';
   const isLongPress = clickType === 'long' || clickType === 'double_then_long' || clickType === 'single_then_long';
   const hasDurationThresholds = !!(action.min_duration || action.max_duration);
@@ -141,7 +171,9 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
    */
   const isCoverSaved = (coverId: string): boolean => {
     if (!savedCovers) return true;
-    return savedCovers.some((c: any) => c.id === coverId || c === coverId);
+    // Older callers passed bare ids here, hence the string branch.
+    return savedCovers.some((c: CoverEntity | string) =>
+      typeof c === 'string' ? c === coverId : c.id === coverId);
   };
 
   const [testStatus, setTestStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -158,9 +190,12 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
       await axios.post('/api/test-action', { action });
       setTestStatus('success');
       setTimeout(() => setTestStatus('idle'), 2000);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err.message || 'Unknown error';
-      setTestError(detail);
+    } catch (err: unknown) {
+      const detail = fieldOf(fieldOf(fieldOf(err, 'response'), 'data'), 'detail')
+        || fieldOf(err, 'message')
+        || 'Unknown error';
+      // Only ever shown as a title attribute, which stringifies it anyway.
+      setTestError(String(detail));
       setTestStatus('error');
       setTimeout(() => { setTestStatus('idle'); setTestError(null); }, 4000);
     }
@@ -169,7 +204,7 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
   return (
     <div className="border border-base-300 rounded-lg p-4 mb-3 bg-base-100">
       <div className="flex justify-between items-center mb-3">
-        <span className="font-medium">{t('event_form.action')} {index + 1}</span>
+        <span className="font-medium">{title ?? `${t('event_form.action')} ${index + 1}`}</span>
         <div className="flex items-center gap-1">
           {testStatus === 'success' && (
             <span className="text-success text-xs font-medium mr-1">{t('event_form.test_action_success')}</span>
@@ -194,20 +229,20 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
               <FaPlay className="w-3 h-3" />
             )}
           </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm text-error"
-            onClick={onRemove}
-          >
-            <FaTrash />
-          </button>
+          {onRemove && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm text-error"
+              onClick={onRemove}
+            >
+              <FaTrash />
+            </button>
+          )}
         </div>
       </div>
 
       {validationError && (
-        <div className="alert alert-error mb-3 py-2">
-          <span className="text-sm">{validationError}</span>
-        </div>
+        <NoticeCallout variant="error" className="mb-3" message={validationError} />
       )}
 
       {/* Action Type Selection */}
@@ -244,11 +279,17 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
               const label = translated !== typeKey
                 ? translated
                 : opt.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+              // Nothing to point this action at yet: say so here rather than
+              // let the pick lead to an empty list.
+              const unavailable = targetsExist[opt] === false && actionType !== opt;
               return (
-                <SelectItem key={opt} value={opt}>
+                <SelectItem key={opt} value={opt} disabled={unavailable}>
                   <span className="flex items-center gap-2">
                     {getActionTypeIcon(opt)}
                     {label}
+                    {unavailable && (
+                      <span className="text-xs text-base-content/60">— {t('actions.type_none_defined')}</span>
+                    )}
                   </span>
                 </SelectItem>
               );
@@ -285,6 +326,17 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
           savedOutputs={savedOutputs}
           savedOutputGroups={savedOutputGroups}
           preferredArea={preferredArea}
+        />
+      )}
+
+      {/* Virtual switch action — sets a flag other conditions read. */}
+      {actionType === 'virtual_switch' && (
+        <VirtualSwitchAction
+          action={action}
+          onUpdate={onUpdate}
+          t={t}
+          allVirtualSwitches={allVirtualSwitches}
+          actionOutputOptions={actionOutputOptions}
         />
       )}
 
@@ -346,9 +398,11 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
       {/* Duration thresholds - only for long press actions, hidden when repeat is enabled */}
       {isLongPress && !hasRepeat && (
         <div className="form-control mb-3">
-          <label className="label">
+          {/* Wraps: the hint is a sentence, and in a narrow column (Teach
+              Mode, the quick action) it pushed the card into a sideways scroll. */}
+          <label className="label flex-wrap gap-x-2 gap-y-0.5">
             <span className="label-text font-medium">{t('event_form.duration_thresholds')}</span>
-            <span className="label-text-alt">{t('event_form.duration_thresholds_hint')}</span>
+            <span className="label-text-alt whitespace-normal">{t('event_form.duration_thresholds_hint')}</span>
           </label>
           <div className="flex gap-2">
             <div className="flex-1">
@@ -477,6 +531,7 @@ const ActionFields: React.FC<ActionFieldsProps> = ({
         allCovers={allCovers}
         allBinarySensors={allBinarySensors}
         allRemoteInputs={allRemoteInputs}
+        allVirtualSwitches={allVirtualSwitches}
         allAreas={allAreas}
         showValidation={showValidation}
         excludeEntityId={excludeEntityId}

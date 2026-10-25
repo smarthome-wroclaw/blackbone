@@ -32,11 +32,20 @@ from boneio.core.auth.store import UserStore, UserStoreError, validate_password
 _LOGGER = logging.getLogger(__name__)
 
 
+<<<<<<< ours
 def _prompt_password(prompt: str) -> str | None:
+=======
+def _prompt_password(prompt: str, username: str | None = None) -> str | None:
+>>>>>>> theirs
     """Ask for a password twice, with echo off.
 
     Args:
         prompt: Text for the first prompt.
+<<<<<<< ours
+=======
+        username: Account the password is for, so the same policy the store
+            applies is reported here rather than after the second prompt.
+>>>>>>> theirs
 
     Returns:
         The password, or None if the two entries differed, it was empty, or the
@@ -48,7 +57,11 @@ def _prompt_password(prompt: str) -> str | None:
         return None
 
     try:
+<<<<<<< ours
         validate_password(first)
+=======
+        validate_password(first, username)
+>>>>>>> theirs
     except UserStoreError as err:
         print(f"Rejected: {err}", file=sys.stderr)
         return None
@@ -125,7 +138,13 @@ def run_accounts_command(args: argparse.Namespace) -> int:
         return 0
 
     if action == "add":
+<<<<<<< ours
         password = _prompt_password(f"New password for '{args.username}'")
+=======
+        password = _prompt_password(
+            f"New password for '{args.username}'", args.username
+        )
+>>>>>>> theirs
         if password is None:
             return 1
         try:
@@ -141,7 +160,13 @@ def run_accounts_command(args: argparse.Namespace) -> int:
         if store.get_user(args.username) is None:
             print(f"No such account: {args.username}", file=sys.stderr)
             return 1
+<<<<<<< ours
         password = _prompt_password(f"New password for '{args.username}'")
+=======
+        password = _prompt_password(
+            f"New password for '{args.username}'", args.username
+        )
+>>>>>>> theirs
         if password is None:
             return 1
         try:
@@ -195,9 +220,38 @@ def add_accounts_parser(subparsers: argparse._SubParsersAction) -> None:
 
     actions = accounts_parser.add_subparsers(dest="accounts_action", required=True)
 
+<<<<<<< ours
     actions.add_parser("list", help="List accounts and their roles")
 
     add_action = actions.add_parser("add", help="Create an account")
+=======
+    def _with_config(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """Accept -c after the subcommand as well as before it.
+
+        argparse only looks for an option on the parser that is parsing at the
+        time, so `accounts add pawel -c cfg.yaml` — the order everyone reaches
+        for — is rejected unless each action accepts it too. SUPPRESS keeps the
+        action's default from overwriting a value already given to `accounts`.
+
+        Args:
+            parser: Action subparser to extend.
+
+        Returns:
+            The same parser, for chaining.
+        """
+        parser.add_argument(
+            "-c",
+            "--config",
+            metavar="path_to_config",
+            default=argparse.SUPPRESS,
+            help="boneIO config file; users.json lives next to it",
+        )
+        return parser
+
+    _with_config(actions.add_parser("list", help="List accounts and their roles"))
+
+    add_action = _with_config(actions.add_parser("add", help="Create an account"))
+>>>>>>> theirs
     add_action.add_argument("username", help="Username to create")
     add_action.add_argument(
         "--role",
@@ -206,8 +260,15 @@ def add_accounts_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Role to grant (default: viewer)",
     )
 
+<<<<<<< ours
     reset_action = actions.add_parser("reset", help="Set a new password")
     reset_action.add_argument("username", help="Account to change")
 
     delete_action = actions.add_parser("delete", help="Remove an account")
+=======
+    reset_action = _with_config(actions.add_parser("reset", help="Set a new password"))
+    reset_action.add_argument("username", help="Account to change")
+
+    delete_action = _with_config(actions.add_parser("delete", help="Remove an account"))
+>>>>>>> theirs
     delete_action.add_argument("username", help="Account to remove")

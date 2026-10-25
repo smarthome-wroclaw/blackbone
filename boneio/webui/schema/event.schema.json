@@ -28,43 +28,6 @@
             "description": "PIN to use.",
             "title": "Pin"
           },
-          "gpio_mode": {
-            "type": "string",
-            "default": "gpio",
-            "enum": [
-              "gpio",
-              "gpio_pu",
-              "gpio_pd",
-              "gpio_input"
-            ],
-            "examples": [
-              "gpio"
-            ],
-            "description": "[Deprecated] GPIO mode \u2014 now handled by kernel overlay. Ignored at runtime.",
-            "title": "Gpio mode"
-          },
-          "clear_message": {
-            "oneOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "string",
-                "enum": [
-                  "yes",
-                  "no",
-                  "true",
-                  "false",
-                  "on",
-                  "off"
-                ],
-                "x-yaml-boolean": true
-              }
-            ],
-            "default": false,
-            "description": "Decide if after press/release callback send empty message to mqtt. Same as Zigbee2Mqtt is doing in button actions.",
-            "title": "Clear message"
-          },
           "bounce_time": {
             "type": [
               "number",
@@ -368,13 +331,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -389,6 +355,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -406,6 +377,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -428,7 +400,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -448,7 +420,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -608,6 +580,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -649,7 +629,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -667,6 +648,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -674,6 +706,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -743,7 +776,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -761,6 +795,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -768,6 +853,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"
@@ -841,13 +927,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -862,6 +951,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -879,6 +973,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -901,7 +996,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -921,7 +1016,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -1081,6 +1176,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -1122,7 +1225,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -1140,6 +1244,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -1147,6 +1302,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -1216,7 +1372,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -1234,6 +1391,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -1241,6 +1449,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"
@@ -1314,13 +1523,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -1335,6 +1547,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -1352,6 +1569,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -1374,7 +1592,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -1394,7 +1612,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -1554,6 +1772,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -1595,7 +1821,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -1613,6 +1840,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -1620,6 +1898,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -1689,7 +1968,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -1707,6 +1987,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -1714,6 +2045,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"
@@ -1787,13 +2119,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -1808,6 +2143,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -1825,6 +2165,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -1847,7 +2188,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -1867,7 +2208,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -2027,6 +2368,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -2068,7 +2417,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -2086,6 +2436,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -2093,6 +2494,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -2162,7 +2564,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -2180,6 +2583,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -2187,6 +2641,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"
@@ -2260,13 +2715,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -2281,6 +2739,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -2298,6 +2761,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -2320,7 +2784,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -2340,7 +2804,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -2500,6 +2964,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -2541,7 +3013,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -2559,6 +3032,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -2566,6 +3090,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -2635,7 +3160,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -2653,6 +3179,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -2660,6 +3237,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"
@@ -2733,13 +3311,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -2754,6 +3335,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -2771,6 +3357,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -2793,7 +3380,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -2813,7 +3400,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -2973,6 +3560,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -3014,7 +3609,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -3032,6 +3628,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -3039,6 +3686,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -3108,7 +3756,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -3126,6 +3775,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -3133,6 +3833,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"
@@ -3206,13 +3907,16 @@
                         "REMOTE_OUTPUT",
                         "Remote_Cover",
                         "Remote_Output",
+                        "VIRTUAL_SWITCH",
+                        "Virtual_Switch",
                         "cover",
                         "cover_over_mqtt",
                         "mqtt",
                         "output",
                         "output_over_mqtt",
                         "remote_cover",
-                        "remote_output"
+                        "remote_output",
+                        "virtual_switch"
                       ],
                       "examples": [
                         "mqtt"
@@ -3227,6 +3931,11 @@
                       "type": "string",
                       "description": "Cover ID",
                       "title": "Boneio cover"
+                    },
+                    "boneio_virtual_switch": {
+                      "type": "string",
+                      "description": "Virtual switch ID",
+                      "title": "Boneio virtual switch"
                     },
                     "topic": {
                       "type": "string",
@@ -3244,6 +3953,7 @@
                         "TOGGLE_OPEN",
                         "TOGGLE_CLOSE",
                         "SMART_TOGGLE",
+                        "SET_POSITION",
                         "TILT",
                         "TILT_OPEN",
                         "TILT_CLOSE"
@@ -3266,7 +3976,7 @@
                             "integer",
                             "string"
                           ],
-                          "description": "Position to set cover to",
+                          "description": "Position to set cover to for SET_POSITION. 0 means closed, 100 means opened.",
                           "title": "Position"
                         },
                         "tilt_position": {
@@ -3286,7 +3996,7 @@
                           "title": "Always open till"
                         }
                       },
-                      "description": "Extra data to send to function. Currently used only for cover tilt.",
+                      "description": "Extra data for cover actions (position, tilt, smart toggle threshold).",
                       "title": "Data"
                     },
                     "restore_tilt": {
@@ -3446,6 +4156,14 @@
                       "description": "Repeat Interval",
                       "title": "Repeat interval"
                     },
+                    "probability": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Chance of running",
+                      "title": "Probability"
+                    },
                     "delay": {
                       "type": [
                         "number",
@@ -3487,7 +4205,8 @@
                           "enum": [
                             "time",
                             "date",
-                            "state"
+                            "state",
+                            "sun"
                           ],
                           "examples": [
                             "time"
@@ -3505,6 +4224,57 @@
                           "description": "Before (end of range)",
                           "title": "Before"
                         },
+                        "after_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'after' anchor (sun only)",
+                          "title": "After offset"
+                        },
+                        "before_offset": {
+                          "type": [
+                            "number",
+                            "string"
+                          ],
+                          "description": "Offset from the 'before' anchor (sun only)",
+                          "title": "Before offset"
+                        },
+                        "phase": {
+                          "type": "string",
+                          "enum": [
+                            "day",
+                            "civil_twilight",
+                            "nautical_twilight",
+                            "astronomical_twilight",
+                            "night",
+                            "golden_hour",
+                            "blue_hour"
+                          ],
+                          "examples": [
+                            "day"
+                          ],
+                          "description": "Sun phase (sun only)",
+                          "title": "Phase"
+                        },
+                        "above": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation above (degrees, sun only)",
+                          "title": "Above"
+                        },
+                        "below": {
+                          "type": [
+                            "integer",
+                            "number",
+                            "string"
+                          ],
+                          "description": "Sun elevation below (degrees, sun only)",
+                          "title": "Below"
+                        },
                         "entity": {
                           "type": "string",
                           "enum": [
@@ -3512,6 +4282,7 @@
                             "cover",
                             "output",
                             "light",
+                            "virtual_switch",
                             "remote_input",
                             "remote_output",
                             "remote_cover"
@@ -3581,7 +4352,8 @@
                                 "enum": [
                                   "time",
                                   "date",
-                                  "state"
+                                  "state",
+                                  "sun"
                                 ],
                                 "examples": [
                                   "time"
@@ -3599,6 +4371,57 @@
                                 "description": "Before (end of range)",
                                 "title": "Before"
                               },
+                              "after_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'after' anchor (sun only)",
+                                "title": "After offset"
+                              },
+                              "before_offset": {
+                                "type": [
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Offset from the 'before' anchor (sun only)",
+                                "title": "Before offset"
+                              },
+                              "phase": {
+                                "type": "string",
+                                "enum": [
+                                  "day",
+                                  "civil_twilight",
+                                  "nautical_twilight",
+                                  "astronomical_twilight",
+                                  "night",
+                                  "golden_hour",
+                                  "blue_hour"
+                                ],
+                                "examples": [
+                                  "day"
+                                ],
+                                "description": "Sun phase (sun only)",
+                                "title": "Phase"
+                              },
+                              "above": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation above (degrees, sun only)",
+                                "title": "Above"
+                              },
+                              "below": {
+                                "type": [
+                                  "integer",
+                                  "number",
+                                  "string"
+                                ],
+                                "description": "Sun elevation below (degrees, sun only)",
+                                "title": "Below"
+                              },
                               "entity": {
                                 "type": "string",
                                 "enum": [
@@ -3606,6 +4429,7 @@
                                   "cover",
                                   "output",
                                   "light",
+                                  "virtual_switch",
                                   "remote_input",
                                   "remote_output",
                                   "remote_cover"

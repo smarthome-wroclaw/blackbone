@@ -10,10 +10,14 @@ import asyncio
 import contextlib
 import logging
 import os
+import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from boneio.core.atomic_file import write_atomically
+from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
 from boneio.hardware.can.client import CANOPEN_AVAILABLE, CANopenClient
 from boneio.hardware.can.node import (
     BoneIOCANNode,
@@ -31,6 +35,65 @@ HEARTBEAT_INTERVAL = 1.0
 
 # Node timeout in seconds (consider offline if no heartbeat)
 NODE_TIMEOUT = 5.0
+
+# A bus nobody acknowledges (no other node, no termination) goes bus-off again
+# seconds after every restart. Restarts back off from 2s up to this, and the
+# count resets once the bus has stayed out of bus-off this long after one.
+BUS_OFF_RESTART_MAX_DELAY = 300.0
+BUS_OFF_HEALTHY_RESET = 60.0
+
+
+def _store_sdo_config(config_path: str, config_str: str) -> bool:
+    """Replace config.yaml with a payload pushed over CAN, if it would load.
+
+    Anything on the bus can write this object, and whatever lands in
+    config.yaml is what the controller boots from. So the payload goes
+    through the same validation as a startup first — as a file in the config
+    directory, so its ``!include`` and ``!secret`` resolve the way they will
+    for real — and the file it replaces is kept beside it.
+
+    Args:
+        config_path: The controller's config.yaml.
+        config_str: The pushed configuration.
+
+    Returns:
+        True if config.yaml now holds the payload, False if it was refused.
+    """
+    from boneio.core.config.yaml_util import load_config_from_file
+
+    config_dir = os.path.dirname(config_path)
+    fd, candidate = tempfile.mkstemp(dir=config_dir, prefix=".sdo-config.", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(config_str)
+        # Outside the lock: validation takes seconds, and other saves would
+        # wait for all of it.
+        try:
+            loaded = load_config_from_file(candidate)
+        except Exception as err:
+            _LOGGER.error("Rejected configuration pushed over CAN: %s", err)
+            return False
+        if not loaded:
+            _LOGGER.error("Rejected configuration pushed over CAN: it is empty")
+            return False
+    finally:
+        # The validation also leaves a cache next to the file it read.
+        for leftover in (candidate, candidate + ".cache.pkl"):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(leftover)
+
+    backup = config_path + ".sdo.bak"
+    with CONFIG_WRITE_LOCK:
+        if os.path.exists(config_path):
+            shutil.copy2(config_path, backup)
+        write_atomically(config_path, config_str)
+    _LOGGER.warning(
+        "Replaced %s with a configuration pushed over CAN. The previous one "
+        "is at %s.",
+        config_path,
+        backup,
+    )
+    return True
 
 
 class CANopenManager:
@@ -72,6 +135,9 @@ class CANopenManager:
         self._mode = self._config.get("mode", "master")
         self._auto_setup = self._config.get("auto_setup", True)
         self._restart_on_error = self._config.get("restart_on_error", True)
+        self._bus_off_restarts = 0
+        self._last_bus_off_restart = 0.0
+        self._next_bus_off_restart = 0.0
 
         self._client: CANopenClient | None = None
         self._nodes: dict[int, BoneIOCANNode] = {}
@@ -79,6 +145,7 @@ class CANopenManager:
 
         self._heartbeat_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task] = set()
         self._bridge = None  # CANMQTTBridge, initialized in start() for master mode
 
         # Callbacks for external handlers
@@ -209,6 +276,39 @@ class CANopenManager:
             _LOGGER.error("Failed to start CANopen manager: %s", e)
             self._running = False
             return False
+
+    async def _handle_bus_state(self, can_state: str, now: float) -> None:
+        """Restart a bus-off interface, backing off while it keeps failing.
+
+        Args:
+            can_state: State reported by the interface (e.g. ``BUS-OFF``).
+            now: Monotonic time of the check.
+        """
+        if can_state != "BUS-OFF":
+            if self._bus_off_restarts and now - self._last_bus_off_restart >= BUS_OFF_HEALTHY_RESET:
+                _LOGGER.info("CAN bus on %s is healthy again", self._channel)
+                self._bus_off_restarts = 0
+            return
+        if now < self._next_bus_off_restart:
+            return
+
+        self._bus_off_restarts += 1
+        delay = min(2.0**self._bus_off_restarts, BUS_OFF_RESTART_MAX_DELAY)
+        self._last_bus_off_restart = now
+        self._next_bus_off_restart = now + delay
+        _LOGGER.warning(
+            "CAN bus-off detected on %s (%d in a row), restarting interface; next restart no sooner than in %.0fs. "
+            "Repeated bus-off usually means no other node acknowledges: check wiring and termination.",
+            self._channel,
+            self._bus_off_restarts,
+            delay,
+        )
+        from boneio.hardware.can.interface import restart_can_interface
+
+        if await restart_can_interface(self._channel, self._bitrate):
+            _LOGGER.info("CAN interface %s restarted successfully", self._channel)
+        else:
+            _LOGGER.error("Failed to restart CAN interface %s", self._channel)
 
     async def _check_node_id_collision(self, listen_seconds: float = 3.0) -> bool:
         """Check if another node on the bus uses the same node_id.
@@ -443,17 +543,7 @@ class CANopenManager:
                     from boneio.hardware.can.interface import get_can_state
 
                     can_state = await get_can_state(self._channel)
-                    if can_state == "BUS-OFF":
-                        _LOGGER.warning(
-                            "CAN bus-off detected on %s, restarting interface",
-                            self._channel,
-                        )
-                        from boneio.hardware.can.interface import restart_can_interface
-
-                        if await restart_can_interface(self._channel, self._bitrate):
-                            _LOGGER.info("CAN interface %s restarted successfully", self._channel)
-                        else:
-                            _LOGGER.error("Failed to restart CAN interface %s", self._channel)
+                    await self._handle_bus_state(can_state, time.monotonic())
 
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
@@ -492,7 +582,9 @@ class CANopenManager:
     def _on_sdo_config_write(self, config_str: str) -> None:
         """Handle SDO request to update configuration.
 
-        Saves the YAML payload to disk and triggers application reload.
+        Called on the event loop as the frame arrives. Checking the payload
+        takes a full validation — a couple of seconds on a BeagleBone — so
+        the work runs in the background.
         """
         if self._mode == "master":
             _LOGGER.warning("Master received SDO Config Update request, ignoring.")
@@ -500,20 +592,32 @@ class CANopenManager:
 
         _LOGGER.info("Received SDO command to update configuration.")
 
-        if self._manager is not None:
-            config_dir = os.path.dirname(self._manager._config_file_path)
-            # The SDO payload should be the full config to overwrite
-            config_path = self._manager._config_file_path
-            try:
-                # Optionally backup old config?
-                with open(config_path, "w") as f:
-                    f.write(config_str)
-                _LOGGER.info("Successfully overwrote config at %s", config_path)
+        if self._manager is None:
+            return
+        task = asyncio.create_task(self._apply_sdo_config(config_str))
+        # The loop holds tasks weakly; without this one could be collected
+        # halfway through replacing the configuration.
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
-                # Signal manager to reload config
-                asyncio.create_task(self._manager.reload_config())
-            except Exception as e:
-                _LOGGER.error("Failed to write new config: %s", e)
+    async def _apply_sdo_config(self, config_str: str) -> None:
+        """Validate, store and load a configuration pushed over CAN."""
+        if self._manager is None:
+            return
+        config_path = self._manager._config_file_path
+        try:
+            stored = await asyncio.to_thread(
+                _store_sdo_config, config_path, config_str
+            )
+        except Exception as err:
+            _LOGGER.error("Failed to write new config: %s", err, exc_info=True)
+            return
+        if not stored:
+            return
+        try:
+            await self._manager.reload_config()
+        except Exception as err:
+            _LOGGER.error("Reload after SDO config update failed: %s", err, exc_info=True)
 
     async def _restart_canopen_manager(self) -> None:
         """Restart the CANopen manager with the newly persisted Node ID."""

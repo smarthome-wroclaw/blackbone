@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from contextlib import suppress
 from typing import Optional
 
 from smbus2 import SMBus, i2c_msg
+
+from boneio.hardware.udev_wait import RETRY_SECONDS, STARTUP_WAIT_SECONDS, NodeWait, is_not_ready
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,17 +32,55 @@ class SMBus2I2C:
         bus_number: I2C bus number (typically 2 for BeagleBone Black)
     """
 
-    def __init__(self, bus_number: int = 2):
+    def __init__(self, bus_number: int = 2, startup_wait: float = STARTUP_WAIT_SECONDS):
         """Initialize I2C bus wrapper.  
         
         Args:
             bus_number: I2C bus number (default 2 for BBB I2C-2)
+            startup_wait: Seconds to keep retrying while the device node is
+                missing or not accessible yet, within the startup budget it
+                shares with the GPIO chips, see
+                :data:`boneio.hardware.udev_wait.STARTUP_WAIT_SECONDS`.
         """
         self._bus_number = bus_number
         self._bus: SMBus | None = None
         self._lock = threading.RLock()  # Reentrant lock for thread safety
-        self._open_bus()
+        self._open_bus_when_ready(startup_wait)
         _LOGGER.info("Initialized I2C wrapper on bus %d (smbus2)", bus_number)
+
+    def _open_bus_when_ready(self, wait: float) -> None:
+        """Open the bus for the first time, waiting for udev if it has to.
+
+        Only construction waits. A reopen later on (``__enter__``,
+        ``try_lock``) runs on the event loop, where blocking for a minute
+        would stall everything else; there the device node has long been set
+        up, so a failure is a real one.
+
+        Only "not there" and "not ours yet" are waited out - the two states
+        udev leaves the node in before its rule has run. Anything else fails
+        at once, as before, and so does the last attempt: the original error
+        is re-raised, so the crash reads the same as it always did.
+        """
+        path = f"/dev/i2c-{self._bus_number}"
+        # The clock is looked up here, not in NodeWait, so a test that swaps
+        # this module's ``time`` moves the deadline and the sleep together.
+        node = NodeWait(path, _LOGGER, wait=wait, clock=time.monotonic)
+        while True:
+            try:
+                # Not _open_bus(): that logs an ERROR per failure, and a wait
+                # would fill the journal with them.
+                self._bus = SMBus(self._bus_number)
+                break
+            except OSError as err:
+                if node.retry(err):
+                    time.sleep(RETRY_SECONDS)
+                    continue
+                if node.waiting and is_not_ready(err):
+                    _LOGGER.error("%s still not accessible after %.0f s: %s", path, node.elapsed, err)
+                else:
+                    _LOGGER.error(f"Failed to open I2C bus {self._bus_number}: {err}")
+                raise
+        node.opened()
 
     def _open_bus(self) -> None:
         """Open I2C bus if not already open."""

@@ -3,10 +3,12 @@ import { useTranslation } from '../../../hooks/useTranslation';
 import { useTableSort } from '@/hooks/useTableSort';
 import TableActions from './TableActions';
 import FilterInput from './FilterInput';
+import { areaMatches } from './areaFilter';
 import MobileCard from './MobileCard';
 import SortableHeader, { ResetSortButton } from './SortableHeader';
 import { Table, Td, Tr, Th, Thead, Tbody } from '@/components/ui/table';
 import { formatTimeperiod } from '@/utils/formatters';
+import type { CoverEntity } from '@/types/config';
 
 interface Area {
   id: string;
@@ -14,7 +16,7 @@ interface Area {
 }
 
 interface CoverTableProps {
-  items: any[];
+  items: CoverEntity[];
   allAreas: Area[];
   onEdit: (index: number) => void;
   onDelete: (index: number) => void;
@@ -35,19 +37,31 @@ const CoverTable: React.FC<CoverTableProps> = ({ items, allAreas, onEdit, onDele
         (item.id?.toLowerCase().includes(lowerFilter)) ||
         (item.open_relay?.toLowerCase().includes(lowerFilter)) ||
         (item.close_relay?.toLowerCase().includes(lowerFilter)) ||
+<<<<<<< ours
         (item.stop_relay?.toLowerCase().includes(lowerFilter))
+=======
+        areaMatches(item.area, allAreas, lowerFilter)
+>>>>>>> theirs
       );
-  }, [items, filter]);
+  }, [items, filter, allAreas]);
 
   // Sort filtered items
   const sortedItems = useMemo(() => {
     return sortItems(filteredItems, {
+<<<<<<< ours
       name: (item: any) => (item.name || item.id || '').toLowerCase(),
       platform: (item: any) => (item.platform || (item.tilt_duration ? 'venetian' : 'time_based')).toLowerCase(),
       open_relay: (item: any) => (item.open_relay || '').toLowerCase(),
       close_relay: (item: any) => (item.close_relay || '').toLowerCase(),
       stop_relay: (item: any) => (item.stop_relay || '').toLowerCase(),
       area: (item: any) => {
+=======
+      name: (item) => (item.name || item.id || '').toLowerCase(),
+      platform: (item) => (item.platform || (item.tilt_duration ? 'venetian' : 'time_based')).toLowerCase(),
+      open_relay: (item) => (item.open_relay || '').toLowerCase(),
+      close_relay: (item) => (item.close_relay || '').toLowerCase(),
+      area: (item) => {
+>>>>>>> theirs
         const area = allAreas.find(a => a.id === item.area);
         return (area?.name || item.area || '').toLowerCase();
       },

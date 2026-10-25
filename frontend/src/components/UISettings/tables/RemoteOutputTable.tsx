@@ -8,10 +8,12 @@ import { useTranslation } from '@/hooks/useTranslation';
 import { useTableSort } from '@/hooks/useTableSort';
 import TableActions from './TableActions';
 import FilterInput from './FilterInput';
+import { areaMatches } from './areaFilter';
 import MobileCard from './MobileCard';
 import SortableHeader, { ResetSortButton } from './SortableHeader';
 import { Table, Td, Tr, Th, Thead, Tbody } from '@/components/ui/table';
 import { FaWifi } from 'react-icons/fa';
+import type { OutputEntity, RemoteDeviceEntity } from '@/types/config';
 
 interface Area {
   id: string;
@@ -19,9 +21,9 @@ interface Area {
 }
 
 interface RemoteOutputTableProps {
-  items: any[];
+  items: OutputEntity[];
   allAreas: Area[];
-  allRemoteDevices: any[];
+  allRemoteDevices: RemoteDeviceEntity[];
   onEdit: (index: number) => void;
   onDelete: (index: number) => void;
 }
@@ -38,8 +40,8 @@ const RemoteOutputTable: React.FC<RemoteOutputTableProps> = ({
   const { sortConfig, toggleSort, resetSort, sortItems, isSorted } = useTableSort('remote_outputs');
 
   /** Resolve device name from ID. */
-  const getDeviceName = (deviceId: string) => {
-    const device = allRemoteDevices.find((d: any) => d.id === deviceId);
+  const getDeviceName = (deviceId?: string) => {
+    const device = allRemoteDevices.find((d) => d.id === deviceId);
     return device?.name || deviceId || '-';
   };
 
@@ -54,23 +56,24 @@ const RemoteOutputTable: React.FC<RemoteOutputTableProps> = ({
         (item.id?.toLowerCase().includes(lowerFilter)) ||
         (item.device_id?.toLowerCase().includes(lowerFilter)) ||
         (item.output_id?.toLowerCase().includes(lowerFilter)) ||
-        (getDeviceName(item.device_id)?.toLowerCase().includes(lowerFilter))
+        (getDeviceName(item.device_id)?.toLowerCase().includes(lowerFilter)) ||
+        areaMatches(item.area, allAreas, lowerFilter)
       );
-  }, [items, filter, allRemoteDevices]);
+  }, [items, filter, allRemoteDevices, allAreas]);
 
   // Sort filtered items
   const sortedItems = useMemo(() => {
     return sortItems(filteredItems, {
-      name: (item: any) => (item.name || item.id || '').toLowerCase(),
-      device: (item: any) => getDeviceName(item.device_id).toLowerCase(),
-      output_id: (item: any) => (item.output_id || '').toLowerCase(),
-      output_type: (item: any) => (item.output_type || '').toLowerCase(),
-      interlock_group: (item: any) => {
+      name: (item) => (item.name || item.id || '').toLowerCase(),
+      device: (item) => getDeviceName(item.device_id).toLowerCase(),
+      output_id: (item) => (item.output_id || '').toLowerCase(),
+      output_type: (item) => (item.output_type || '').toLowerCase(),
+      interlock_group: (item) => {
         const groups = item.interlock_group;
         if (Array.isArray(groups)) return (groups[0] || '').toLowerCase();
         return (groups || '').toLowerCase();
       },
-      area: (item: any) => {
+      area: (item) => {
         const area = allAreas.find(a => a.id === item.area);
         return (area?.name || item.area || '').toLowerCase();
       },

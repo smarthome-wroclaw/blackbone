@@ -7,6 +7,8 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Union
 
+from pymodbus.pdu import ExceptionResponse
+
 from boneio.const import (
     ADDRESS,
     BASE,
@@ -51,7 +53,7 @@ from boneio.modbus.entities.writeable.numeric import (
     ModbusNumericWriteableEntity,
     ModbusNumericWriteableEntityDiscrete,
 )
-from boneio.models.events import ModbusDeviceEvent, SensorEvent
+from boneio.models.events import ModbusDeviceEvent, ModbusStatusEvent, SensorEvent
 from boneio.models.state import SensorState
 
 from .client import VALUE_TYPES, Modbus
@@ -135,6 +137,12 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
         self._additional_data = additional_data
         self._update_cycle_count = 0
         self._failed_groups: set[int] = set()  # Track register group indices that failed last read
+        # Groups whose current run of failures has already been logged at
+        # WARNING. Separate from _failed_groups, which is also filled to force
+        # a re-read and so does not mean "a failure was reported".
+        self._reported_groups: set[int] = set()
+        # Last ``failing`` sent to the panel, so it hears only the changes.
+        self._published_failing = False
         self._polling_enabled: bool = True  # Runtime toggle for temporarily disabling polling
 
         self.__init_modbus_entities__()
@@ -168,6 +176,12 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
         
         self._event_bus = manager.event_bus
         self._event_bus.add_haonline_listener(target=self.set_payload_offline)
+
+        # Discovery goes out once the device has answered, which may be long
+        # after startup or never. Until then the entities still belong to
+        # this controller, and their retained configs must outlive the
+        # cleanup of unused ones.
+        self._reserve_discovery_for_all_registers()
 
     def __init_modbus_entities__(self):
         # Standard sensors
@@ -647,13 +661,8 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
         except Exception as e:
             _LOGGER.debug("Could not send online status for %s: %s", self._name, e)
 
-    def _send_polling_switch_discovery(self) -> None:
-        """Send HA MQTT autodiscovery for the polling enable/disable switch.
-
-        The switch appears under the Modbus device in HA with entity_category
-        'config' and allows the user to temporarily stop/start register polling.
-        """
-
+    def _polling_switch_discovery(self) -> tuple[str, dict]:
+        """Topic and payload of the polling enable/disable switch."""
         payload = modbus_polling_switch_message(
             device_id=self._id,
             device_name=self._name,
@@ -662,7 +671,15 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
             config_helper=self.manager.config_helper,
             area=self._area,
         )
-        topic = payload.pop("_topic")
+        return payload.pop("_topic"), payload
+
+    def _send_polling_switch_discovery(self) -> None:
+        """Send HA MQTT autodiscovery for the polling enable/disable switch.
+
+        The switch appears under the Modbus device in HA with entity_category
+        'config' and allows the user to temporarily stop/start register polling.
+        """
+        topic, payload = self._polling_switch_discovery()
         self.manager.config_helper.add_autodiscovery_msg(
             topic=topic, payload=payload, ha_type="switch",
         )
@@ -673,6 +690,14 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
             payload={"state": ON if self._polling_enabled else OFF},
             retain=True,
         )
+
+    def _reserve_discovery_for_all_registers(self) -> None:
+        """Claim every discovery topic of this device without announcing it."""
+        for entities in (*self._modbus_entities, *self._additional_entities):
+            for entity in entities.values():
+                entity.reserve_ha_discovery()
+        topic, _ = self._polling_switch_discovery()
+        self.manager.config_helper.reserve_autodiscovery_msg(ha_type="switch", topic=topic)
 
     def _send_discovery_for_all_registers(self) -> datetime:
         """Send discovery message to HA for each register."""
@@ -860,6 +885,7 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
             coordinator_id=self._id,
             entity_type=entity.entity_type,
             custom_label=custom_label,
+            area=self._area,
             **type_info
         )
 
@@ -1024,7 +1050,25 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
         
         return output
 
+    @property
+    def failing(self) -> bool:
+        """A register group of this device fails to read right now."""
+        return bool(self._reported_groups)
+
     async def async_update(self, timestamp: float) -> float | None:
+        """Fetch state periodically and tell the panel when the device
+        starts or stops failing.
+
+        A dead device sends no entity events at all, so the panel cannot tell
+        it from a quiet one without this.
+        """
+        interval = await self._poll(timestamp)
+        if self.failing != self._published_failing:
+            self._published_failing = self.failing
+            self._event_bus.trigger_event(ModbusStatusEvent(entity_id=self._id, failing=self.failing))
+        return interval
+
+    async def _poll(self, timestamp: float) -> float | None:
         """Fetch state periodically and send to MQTT."""
         # Skip update when polling is disabled by user
         if not self._polling_enabled:
@@ -1061,7 +1105,26 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
                 count=data[LENGTH],
                 method=data.get("register_type", "input"),
             )
-            
+            # The client hands an exception response back as is, because the
+            # modbus CLI prints its code. Here it is a failed read of this
+            # group: pymodbus 3.x gives it an empty ``registers``, so taken as
+            # data it marked the device ONLINE and every sensor then failed to
+            # decode it, at ERROR, on every poll. It is not "no response"
+            # either - the device answered, it just refuses this block (a
+            # model variant without it, a wrong register map) - so the other
+            # groups are still read, nothing backs off, and only a real read
+            # brings the device ONLINE.
+            if isinstance(values, ExceptionResponse):
+                self._failed_groups.add(index)
+                level = logging.INFO if index in self._reported_groups else logging.WARNING
+                self._reported_groups.add(index)
+                _LOGGER.log(
+                    level,
+                    "Modbus device %s refused register group %d (base=%s): %s",
+                    self.id, index, data.get(BASE), values,
+                )
+                continue
+
             # Handle online/offline status
             if self._payload_online == OFFLINE and values:
                 _LOGGER.info("Sending online payload about device %s.", self._name)
@@ -1084,10 +1147,16 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
             if not values:
                 # Mark this group as failed so it retries next cycle
                 self._failed_groups.add(index)
+                # A dead device fails every cycle, forever. Warn when the
+                # failure starts, then drop to INFO until it answers, so
+                # anything read at warning level is not buried by it.
+                level = logging.INFO if index in self._reported_groups else logging.WARNING
+                self._reported_groups.add(index)
                 
                 # For groups with update_every_n, just skip — don't abort entire update
                 if update_every_n:
-                    _LOGGER.warning(
+                    _LOGGER.log(
+                        level,
                         "Can't fetch data from modbus device %s (group %d, base=%s, update_every_n=%d). "
                         "Will retry next cycle.",
                         self.id, index, data.get(BASE), update_every_n,
@@ -1106,7 +1175,8 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
                         retain=True,
                     )
                     self._discovery_sent = False
-                _LOGGER.warning(
+                _LOGGER.log(
+                    level,
                     "Can't fetch data from modbus device %s (group %d, base=%s). Will sleep for %s seconds",
                     self.id,
                     index,
@@ -1117,6 +1187,7 @@ class ModbusCoordinator(BasicMqtt, AsyncUpdater, Filter):
             else:
                 # Read succeeded — clear failed flag for this group
                 self._failed_groups.discard(index)
+                self._reported_groups.discard(index)
                 if update_interval != self._update_interval.total_in_seconds:
                     update_interval = self._update_interval.total_in_seconds
                 

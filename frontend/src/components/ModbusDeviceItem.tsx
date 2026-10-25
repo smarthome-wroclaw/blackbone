@@ -83,14 +83,14 @@ function ModbusDeviceItemBase({ device, isGrid, historyPoints, onValueChange, ac
     }));
 
     return (
-      <div className={`bg-base-100 shadow-sm rounded-lg p-4 ${isGrid ? 'border-l-4 min-h-[88px] h-full' : 'border-l-8 min-h-[72px]'} ${accentColor} transition-all duration-300`}>
-        <div className={`flex ${isGrid ? 'flex-col gap-3' : 'justify-between items-center'}`}>
-          <div>
-            <h3 className="font-semibold text-lg">{device.custom_label || device.name}</h3>
-            <p className="text-sm text-base-content/70">{device.id}</p>
+      <div className={`stg-inset-bare p-4 ${isGrid ? 'border-l-4 min-h-[88px] h-full' : 'border-l-8 min-h-[72px]'} ${accentColor} transition-all duration-300`}>
+        <div className={`flex ${isGrid ? 'flex-col gap-3' : 'flex-col gap-3 sm:flex-row sm:justify-between sm:items-center'}`}>
+          <div className="min-w-0">
+            <h3 className="font-semibold text-lg wrap-break-word">{device.custom_label || device.name}</h3>
+            <p className="text-sm text-base-content/70 wrap-break-word">{device.id}</p>
           </div>
           <div 
-            className={`${isGrid ? 'w-full' : 'w-[280px] shrink-0'}`}
+            className={`${isGrid ? 'w-full' : 'w-full sm:w-[280px] sm:shrink-0'}`}
             onMouseDown={(e) => e.stopPropagation()}
             onMouseUp={(e) => e.stopPropagation()}
             onTouchStart={(e) => e.stopPropagation()}
@@ -117,11 +117,11 @@ function ModbusDeviceItemBase({ device, isGrid, historyPoints, onValueChange, ac
 
   if (isSwitch) {
     return (
-      <div className={`bg-base-100 shadow-sm rounded-lg p-4 ${isGrid ? 'border-l-4 min-h-[88px] h-full' : 'border-l-8 min-h-[72px]'} ${accentColor} transition-all duration-300`}>
-        <div className={`flex ${isGrid ? 'flex-col gap-3' : 'justify-between items-center'}`}>
-          <div>
-            <h3 className="font-semibold text-lg">{device.custom_label || device.name}</h3>
-            <p className="text-sm text-base-content/70">{device.id}</p>
+      <div className={`stg-inset-bare p-4 ${isGrid ? 'border-l-4 min-h-[88px] h-full' : 'border-l-8 min-h-[72px]'} ${accentColor} transition-all duration-300`}>
+        <div className={`flex ${isGrid ? 'flex-col gap-3' : 'flex-col gap-3 sm:flex-row sm:justify-between sm:items-center'}`}>
+          <div className="min-w-0">
+            <h3 className="font-semibold text-lg wrap-break-word">{device.custom_label || device.name}</h3>
+            <p className="text-sm text-base-content/70 wrap-break-word">{device.id}</p>
           </div>
           <div 
             className={`${isGrid ? 'w-full' : 'flex flex-col items-end gap-2'}`}
@@ -177,14 +177,14 @@ function ModbusDeviceItemBase({ device, isGrid, historyPoints, onValueChange, ac
     };
 
     return (
-      <div className={`bg-base-100 shadow-sm rounded-lg p-4 ${isGrid ? 'border-l-4 min-h-[88px] h-full' : 'border-l-8 min-h-[72px]'} ${accentColor} transition-all duration-300`}>
-        <div className={`flex ${isGrid ? 'flex-col gap-3' : 'justify-between items-center'}`}>
-          <div>
-            <h3 className="font-semibold text-lg">{device.custom_label || device.name}</h3>
-            <p className="text-sm text-base-content/70">{device.id}</p>
+      <div className={`stg-inset-bare p-4 ${isGrid ? 'border-l-4 min-h-[88px] h-full' : 'border-l-8 min-h-[72px]'} ${accentColor} transition-all duration-300`}>
+        <div className={`flex ${isGrid ? 'flex-col gap-3' : 'flex-col gap-3 sm:flex-row sm:justify-between sm:items-center'}`}>
+          <div className="min-w-0">
+            <h3 className="font-semibold text-lg wrap-break-word">{device.custom_label || device.name}</h3>
+            <p className="text-sm text-base-content/70 wrap-break-word">{device.id}</p>
           </div>
           <div 
-            className={`${isGrid ? 'w-full' : 'w-[280px] shrink-0'}`}
+            className={`${isGrid ? 'w-full' : 'w-full sm:w-[280px] sm:shrink-0'}`}
             onMouseDown={(e) => e.stopPropagation()}
             onMouseUp={(e) => e.stopPropagation()}
             onTouchStart={(e) => e.stopPropagation()}
@@ -222,10 +222,10 @@ function ModbusDeviceItemBase({ device, isGrid, historyPoints, onValueChange, ac
   if (isGrid) {
     if (!device.unit) {
       return (
-        <div className={`bg-base-100 shadow-sm rounded-lg p-4 border-l-4 min-h-[88px] h-full ${accentColor} transition-all duration-300`}>
-          <div className="flex justify-between items-start">
-            <div>
-              <h3 className="font-semibold text-lg">{device.custom_label || device.name}</h3>
+        <div className={`stg-inset-bare p-4 border-l-4 min-h-[88px] h-full ${accentColor} transition-all duration-300`}>
+          <div className="flex justify-between items-start gap-2">
+            <div className="min-w-0">
+              <h3 className="font-semibold text-lg wrap-break-word">{device.custom_label || device.name}</h3>
               <p className="text-sm text-base-content/70 break-all">{device.id}</p>
             </div>
             <div className="text-right shrink-0">
@@ -253,7 +253,7 @@ function ModbusDeviceItemBase({ device, isGrid, historyPoints, onValueChange, ac
     }
 
     return (
-      <div className={`overflow-hidden rounded-lg border-l-4 ${accentColor} bg-base-100 p-4 shadow-sm transition-all duration-300 min-h-[166px] h-full flex flex-col`}>
+      <div className={`overflow-hidden stg-inset-bare border-l-4 ${accentColor} p-4 transition-all duration-300 min-h-[166px] h-full flex flex-col`}>
         <div className="grid grid-cols-[1fr_auto] gap-4 min-h-[78px]">
           <div className="min-w-0">
             <h3 className="font-semibold text-lg leading-tight truncate">{device.custom_label || device.name}</h3>
@@ -294,14 +294,16 @@ function ModbusDeviceItemBase({ device, isGrid, historyPoints, onValueChange, ac
   }
 
   return (
-    <div className={`relative overflow-hidden bg-base-100 shadow-sm rounded-lg p-4 border-l-8 min-h-[84px] ${accentColor} transition-all duration-300`}>
+    <div className={`relative overflow-hidden stg-inset-bare p-4 border-l-8 min-h-[84px] ${accentColor} transition-all duration-300`}>
       <div className="relative z-10 flex items-center gap-4">
         <div className="min-w-0 flex-1">
-          <h3 className="font-semibold text-lg">{device.custom_label || device.name}</h3>
-          <p className="text-sm text-base-content/70">{device.id}</p>
+          <h3 className="font-semibold text-lg wrap-break-word">{device.custom_label || device.name}</h3>
+          <p className="text-sm text-base-content/70 wrap-break-word">{device.id}</p>
         </div>
+        {/* No room for it next to the name on a phone; the grid and the
+            long-press card still show it. */}
         {device.unit && (
-          <div className="relative h-[56px] w-[180px] shrink-0 overflow-hidden opacity-85">
+          <div className="relative hidden sm:block h-[56px] w-[180px] shrink-0 overflow-hidden opacity-85">
             <Sparkline points={points} strokeColor={strokeColor} fillColor={fillColor} />
           </div>
         )}

@@ -15,7 +15,10 @@ import {
   FaBroadcastTower,
 } from 'react-icons/fa';
 import axios from '@/api/axios';
+import type { AxiosError } from 'axios';
 import { copyToClipboard } from '@/utils/clipboard';
+
+type ApiError = AxiosError<{ detail?: string }>;
 
 interface CANStatus {
   interface: string;
@@ -31,7 +34,6 @@ export default function CANHelper() {
   // Interface state
   const [canInterface, setCanInterface] = useState('can0');
   const [bitrate, setBitrate] = useState(125000);
-  const [sudoPassword, setSudoPassword] = useState('');
   const [status, setStatus] = useState<CANStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [ifUpResult, setIfUpResult] = useState<{ status: string; message: string } | null>(null);
@@ -77,26 +79,24 @@ export default function CANHelper() {
 
   // Bring interface up
   const handleInterfaceUp = useCallback(async () => {
-    if (!sudoPassword) return;
     setIfUpLoading(true);
     setIfUpResult(null);
     try {
       const { data } = await axios.post('/api/can/interface-up', {
         interface: canInterface,
         bitrate,
-        password: sudoPassword,
       });
       setIfUpResult(data);
       if (data.status === 'success') {
-        setSudoPassword('');
         checkStatus();
       }
-    } catch (err: any) {
-      setIfUpResult({ status: 'error', message: err.message || 'Request failed' });
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      setIfUpResult({ status: 'error', message: apiErr.message || 'Request failed' });
     } finally {
       setIfUpLoading(false);
     }
-  }, [canInterface, bitrate, sudoPassword, checkStatus]);
+  }, [canInterface, bitrate, checkStatus]);
 
   // Start candump SSE stream
   const startDump = useCallback(() => {
@@ -178,8 +178,9 @@ export default function CANHelper() {
         frame: sendFrame,
       });
       setSendResult(data);
-    } catch (err: any) {
-      setSendResult({ status: 'error', message: err.response?.data?.detail || err.message });
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      setSendResult({ status: 'error', message: apiErr.response?.data?.detail || apiErr.message });
     } finally {
       setSendLoading(false);
     }
@@ -204,7 +205,7 @@ export default function CANHelper() {
   return (
     <div className="space-y-6">
       {/* Interface Status & Configuration */}
-      <div className="card bg-base-200">
+      <div className="stg-card">
         <div className="card-body">
           <h2 className="card-title text-lg">
             <FaPlug className="text-primary" /> CAN Interface
@@ -243,7 +244,7 @@ export default function CANHelper() {
             </div>
 
             <button
-              className={`btn btn-sm btn-ghost gap-1 ${statusLoading ? 'loading' : ''}`}
+              className={`btn btn-sm gap-1 ${statusLoading ? 'loading' : ''}`}
               onClick={checkStatus}
               disabled={statusLoading}
             >
@@ -271,25 +272,18 @@ export default function CANHelper() {
           {/* Bring up section */}
           {status && !status.is_up && (
             <div className="mt-3 p-3 bg-base-300 rounded-lg">
+              {/* No password here any more: interface setup goes through the
+                  privileged helper, which takes an interface from a list of two
+                  and a bitrate from a list of nine. */}
               <p className="text-sm mb-2">
-                Enter sudo password to bring <code className="font-mono">{canInterface}</code> up:
+                Bring <code className="font-mono">{canInterface}</code> up at{' '}
+                <code className="font-mono">{bitrate}</code> bps:
               </p>
               <div className="flex gap-2 items-center">
-                <input
-                  type="password"
-                  className="input input-bordered input-sm flex-1"
-                  placeholder="sudo password"
-                  value={sudoPassword}
-                  onChange={(e) => setSudoPassword(e.target.value)}
-                  disabled={ifUpLoading}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && sudoPassword) handleInterfaceUp();
-                  }}
-                />
                 <button
                   className={`btn btn-sm btn-primary gap-1 ${ifUpLoading ? 'loading' : ''}`}
                   onClick={handleInterfaceUp}
-                  disabled={!sudoPassword || ifUpLoading}
+                  disabled={ifUpLoading}
                 >
                   {ifUpLoading ? <FaSpinner className="animate-spin" /> : <FaPlug />}
                   Bring Up
@@ -313,7 +307,7 @@ export default function CANHelper() {
       </div>
 
       {/* candump */}
-      <div className="card bg-base-200">
+      <div className="stg-card">
         <div className="card-body">
           <h2 className="card-title text-lg">candump</h2>
           <p className="text-sm text-base-content/70">
@@ -391,7 +385,7 @@ export default function CANHelper() {
       </div>
 
       {/* cansend */}
-      <div className="card bg-base-200">
+      <div className="stg-card">
         <div className="card-body">
           <h2 className="card-title text-lg">cansend</h2>
           <p className="text-sm text-base-content/70">

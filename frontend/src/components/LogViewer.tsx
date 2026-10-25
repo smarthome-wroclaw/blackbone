@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from '@/api/axios';
-import { FaSync, FaArrowUp, FaArrowDown, FaCopy, FaFilter, FaEyeSlash, FaSearch, FaDiscord, FaBug, FaCalendarAlt } from 'react-icons/fa';
+import { FaSync, FaArrowUp, FaArrowDown, FaCopy, FaFilter, FaEyeSlash, FaSearch, FaDiscord, FaBug, FaCalendarAlt, FaSlidersH } from 'react-icons/fa';
 import { useTranslation } from '../hooks/useTranslation';
 import { copyToClipboard } from '@/utils/clipboard';
+import { aggregateLogs, type AggregatedLog } from '../utils/logAggregation';
+import { useCaptureWindow } from '../hooks/useCaptureWindow';
 
 // Create formatter once, not on every function call
 const dateFormatter = new Intl.DateTimeFormat('sv-SE', {
@@ -36,17 +38,6 @@ interface LogEntry {
  * Aggregated log entry — collapses consecutive identical messages
  * into a single entry with a repeat count (like Home Assistant).
  */
-interface AggregatedLog {
-  /** First occurrence timestamp */
-  timestamp: string;
-  /** Last occurrence timestamp (differs from timestamp when count > 1) */
-  lastTimestamp: string;
-  message: string;
-  level: string;
-  /** Number of consecutive identical messages collapsed into this entry */
-  count: number;
-}
-
 const LOG_LEVELS: { value: string; label: string; color: string; activeColor: string }[] = [
   { value: '3', label: 'ERROR', color: 'var(--log-error)', activeColor: 'var(--log-error-bg)' },
   { value: '4', label: 'WARNING', color: 'var(--log-warning)', activeColor: 'var(--log-warning-bg)' },
@@ -77,11 +68,23 @@ export default function LogViewer() {
   const [moduleDropdownOpen, setModuleDropdownOpen] = useState(false);
   const moduleDropdownRef = useRef<HTMLDivElement>(null);
   const [excludedModules, setExcludedModules] = useState<Set<string>>(new Set());
+  // On a phone the filter toolbar would push the log under the fold, so it
+  // stays folded behind one button until asked for.
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [excludeDropdownOpen, setExcludeDropdownOpen] = useState(false);
   const excludeDropdownRef = useRef<HTMLDivElement>(null);
   const [selectedLevels, setSelectedLevels] = useState<Set<string>>(new Set());
-  const [debugActive, setDebugActive] = useState(false);
-  const [debugLoading, setDebugLoading] = useState(false);
+  // Shared with the support card on the same page: one piece of process-global
+  // state, so one control. The window closes itself, which the old toggle did
+  // not — a device left at debug logs ~21 MQTT publishes a second.
+  const {
+    state: capture,
+    clock: captureClock,
+    busy: debugLoading,
+    open: openCapture,
+    close: closeCapture,
+  } = useCaptureWindow();
+  const debugActive = capture.active;
   const [logSource, setLogSource] = useState<'systemd' | 'standalone' | null>(null);
   const [serverPriority, setServerPriority] = useState<string | null>(null);
   const [dateFrom, setDateFrom] = useState('');
@@ -109,12 +112,25 @@ export default function LogViewer() {
     return params.toString();
   }, [serverPriority, dateFrom, dateTo, debouncedGrep]);
 
-  const fetchLogs = useCallback(async () => {
+  /**
+   * Fetch the newest page. With `append`, keep what is shown and add only
+   * entries newer than the last one held, so a reader scrolled up does not
+   * have the lines shift under them or lose older pages they loaded.
+   */
+  const fetchLogs = useCallback(async (append = false) => {
     try {
       setIsLoading(true);
       const response = await axios.get(`/api/logs?${buildLogParams()}`, { timeout: 30000 });
-      setLogs(response.data.logs);
-      setHasMore(response.data.has_more);
+      const fresh: LogEntry[] = response.data.logs;
+      setLogs(prev => {
+        const last = prev[prev.length - 1];
+        if (!append || !last) return fresh;
+        let at = fresh.length - 1;
+        while (at >= 0 && !(fresh[at].timestamp === last.timestamp && fresh[at].message === last.message)) at--;
+        const added = at >= 0 ? fresh.slice(at + 1) : fresh.filter(l => l.timestamp > last.timestamp);
+        return added.length ? [...prev, ...added] : prev;
+      });
+      if (!append) setHasMore(response.data.has_more);
       setLogSource(response.data.source || 'standalone');
     } catch (error) {
       console.error('Error fetching logs:', error);
@@ -157,39 +173,20 @@ export default function LogViewer() {
     }
   }, [isLoadingMore, hasMore, logs, buildLogParams]);
 
-  const fetchLogLevel = useCallback(async () => {
-    try {
-      const response = await axios.get('/api/log-level');
-      setDebugActive(response.data.debug_active);
-    } catch (error) {
-      console.error('Error fetching log level:', error);
-    }
-  }, []);
-
-  const toggleDebug = useCallback(async () => {
-    setDebugLoading(true);
-    try {
-      const newLevel = debugActive ? 'RESTORE' : 'DEBUG';
-      await axios.post('/api/log-level', { level: newLevel });
-      setDebugActive(!debugActive);
-    } catch (error) {
-      console.error('Error toggling debug:', error);
-    } finally {
-      setDebugLoading(false);
-    }
-  }, [debugActive]);
+  const toggleDebug = useCallback(() => {
+    void (debugActive ? closeCapture() : openCapture());
+  }, [debugActive, openCapture, closeCapture]);
 
   useEffect(() => {
     fetchLogs();
-    fetchLogLevel();
   }, []);
 
   useEffect(() => {
     if (autoRefresh) {
-      const interval = setInterval(fetchLogs, 5000);
+      const interval = setInterval(() => fetchLogs(!autoScroll), 5000);
       return () => clearInterval(interval);
     }
-  }, [fetchLogs, autoRefresh]);
+  }, [fetchLogs, autoRefresh, autoScroll]);
 
   // Close dropdowns when clicking outside + track mouseup globally
   useEffect(() => {
@@ -271,29 +268,11 @@ export default function LogViewer() {
 
   /**
    * Create a normalised "fingerprint" of a log message for fuzzy matching.
-   * Strips parts that change between otherwise-identical repetitions:
-   *   - thread names in parentheses, e.g. "(modbus_worker_0)" → "(…)"
-   *   - ISO-ish timestamps and bare numbers that look like durations / IDs
-   */
-  const fingerprint = useCallback((msg: string): string => {
-    return msg
-      // Strip thread name: "(MainThread)" / "(modbus_worker_0)" → "(…)"
-      .replace(/\([A-Za-z_]+[\w]*\)/g, '(…)')
-      // Strip float durations like "45.0 seconds" → "… seconds"
-      .replace(/\d+\.\d+\s*(seconds?|s\b)/gi, '… $1')
-      // Keep the rest — module names, actual error text, etc.
-      ;
-  }, []);
-
   /**
    * Logs filtered by selected modules and log levels, then aggregated.
    *
-   * Aggregation works in two passes:
-   *  1. Consecutive lines with identical (level, fingerprint) are collapsed
-   *     (original behaviour, covers the simple case).
-   *  2. Repeating *sequences* of N lines (N = 2..5) are detected and collapsed.
-   *     E.g. [ERROR, WARNING, ERROR, WARNING, …] where each pair has the same
-   *     fingerprints → shown once with ×count.
+   * The folding itself lives in utils/logAggregation — see there for why
+   * consecutive-run detection was not enough.
    */
   const filteredLogs = useMemo((): AggregatedLog[] => {
     const filtered = logs.filter(log => {
@@ -311,89 +290,8 @@ export default function LogViewer() {
       return true;
     });
 
-    // --- Pass 1: collapse identical consecutive lines (fast path) ----------
-    const pass1: AggregatedLog[] = [];
-    for (const log of filtered) {
-      const last = pass1[pass1.length - 1];
-      if (last && last.message === log.message && last.level === log.level) {
-        last.count += 1;
-        last.lastTimestamp = log.timestamp;
-      } else {
-        pass1.push({
-          timestamp: log.timestamp,
-          lastTimestamp: log.timestamp,
-          message: log.message,
-          level: log.level,
-          count: 1,
-        });
-      }
-    }
-
-    // --- Pass 2: detect repeating sequences (seqLen = 2..5) ----------------
-    // Build fingerprint keys once
-    const keys = pass1.map(e => `${e.level}\x00${fingerprint(e.message)}`);
-
-    /**
-     * Check if a sequence of length `seqLen` starting at `start` repeats
-     * at `start + seqLen`. Returns the number of consecutive full repetitions
-     * (minimum 1 = the original, so 2 means one repeat).
-     */
-    const countSequenceRepeats = (start: number, seqLen: number): number => {
-      let reps = 1;
-      let pos = start + seqLen;
-      while (pos + seqLen <= keys.length) {
-        let match = true;
-        for (let j = 0; j < seqLen; j++) {
-          if (keys[pos + j] !== keys[start + j]) {
-            match = false;
-            break;
-          }
-        }
-        if (!match) break;
-        reps++;
-        pos += seqLen;
-      }
-      return reps;
-    };
-
-    const result: AggregatedLog[] = [];
-    let i = 0;
-    while (i < pass1.length) {
-      let collapsed = false;
-
-      // Try sequence lengths 2..5 (longest first for greedier grouping)
-      for (let seqLen = 5; seqLen >= 2; seqLen--) {
-        if (i + seqLen * 2 > pass1.length) continue; // not enough room
-
-        const reps = countSequenceRepeats(i, seqLen);
-        if (reps >= 2) {
-          // Collapse: keep the first occurrence of each line in the sequence,
-          // but multiply their counts by the number of repetitions.
-          for (let j = 0; j < seqLen; j++) {
-            const entry = pass1[i + j];
-            const totalCount = entry.count * reps;
-            // Find last timestamp across all repetitions for this slot
-            const lastEntry = pass1[i + (reps - 1) * seqLen + j];
-            result.push({
-              ...entry,
-              count: totalCount,
-              lastTimestamp: lastEntry.lastTimestamp,
-            });
-          }
-          i += seqLen * reps;
-          collapsed = true;
-          break;
-        }
-      }
-
-      if (!collapsed) {
-        result.push(pass1[i]);
-        i++;
-      }
-    }
-
-    return result;
-  }, [logs, selectedModules, excludedModules, selectedLevels, fingerprint]);
+    return aggregateLogs(filtered);
+  }, [logs, selectedModules, excludedModules, selectedLevels]);
 
   // Clear selection when filter criteria change (indices become stale)
   useEffect(() => {
@@ -500,8 +398,8 @@ export default function LogViewer() {
   const handleScroll = () => {
     if (logContainerRef.current) {
       const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
-      // If we're near the bottom (within 100px), enable auto-scroll
-      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+      // If we're near the bottom (within 30px), enable auto-scroll
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 30;
       setAutoScroll(isNearBottom);
       
       // Check if we're in the top half of the content
@@ -647,59 +545,19 @@ export default function LogViewer() {
     }
   };
 
+  const activeFilterCount = [dateFrom || dateTo, selectedModules.size > 0, excludedModules.size > 0, debugActive].filter(Boolean).length;
+
   return (
-    <div className="h-[calc(100vh-8rem)] flex flex-col bg-base-100 overflow-hidden">
-      <div className="bg-base-200 p-2 sm:p-4 border-b border-base-content/10 flex flex-wrap items-center gap-2 sm:gap-4">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            className="toggle toggle-sm"
-            checked={autoRefresh}
-            onChange={(e) => setAutoRefresh(e.target.checked)}
-          />
-          <span className="text-sm">{t('log_viewer.auto_refresh')}</span>
-        </label>
-
-        <button
-            className={`btn btn-sm ${autoScroll ? 'btn-primary' : 'btn-ghost'}`}
-            onClick={() => setAutoScroll(!autoScroll)}
-          >
-            {autoScroll ? t('log_viewer.auto_scroll_on') : t('log_viewer.auto_scroll_off')}
-          </button>
-
-        <div className="flex items-center gap-1" title={!isSystemd && logSource !== null ? t('log_viewer.filter_client_only') : ''}>
-          {LOG_LEVELS.map(level => {
-            const isActive = isSystemd
-              ? serverPriority === level.value
-              : selectedLevels.has(level.value);
-            return (
-              <button
-                key={level.value}
-                onClick={() => toggleLevel(level.value)}
-                className={`btn btn-xs font-mono ${isActive ? '' : 'btn-ghost opacity-50'}`}
-                style={isActive ? {
-                  color: level.color,
-                  borderColor: level.color,
-                  backgroundColor: level.activeColor,
-                } : {}}
-                title={isSystemd
-                  ? `${level.label} (${t('log_viewer.filter_server')})`
-                  : logSource === null
-                    ? level.label
-                    : `${level.label} (${t('log_viewer.filter_client_only')})`
-                }
-              >
-                {level.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="relative flex items-center">
-          <FaSearch className="absolute left-2 w-3 h-3 text-base-content/40 pointer-events-none" />
+    <div className="h-full min-h-0 flex flex-col overflow-hidden">
+      {/* Search gets its own full-width row above everything else. It was a
+          36px-wide box in the middle of a crowded toolbar, which is the one
+          control people reach for first on a page of thousands of lines. */}
+      <div className="bg-base-200 px-2 sm:px-4 pt-2 sm:pt-4 flex items-center gap-2 max-sm:pb-2 max-sm:border-b max-sm:border-base-content/10">
+        <div className="relative flex items-center flex-1 min-w-0">
+          <FaSearch className="absolute left-3 z-10 w-4 h-4 text-base-content/40 pointer-events-none" />
           <input
             type="text"
-            className="input input-sm input-bordered pl-7 w-36 sm:w-48 font-mono text-xs"
+            className="input input-bordered pl-9 w-full font-mono text-sm"
             placeholder={t('log_viewer.search_placeholder')}
             value={searchQuery}
             onChange={(e) => {
@@ -724,17 +582,82 @@ export default function LogViewer() {
                 if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
                 setDebouncedGrep('');
               }}
-              className="absolute right-1 btn btn-ghost btn-xs px-1 text-base-content/40 hover:text-base-content"
+              className="absolute right-2 btn btn-ghost btn-sm px-2 text-base-content/40 hover:text-base-content"
             >
               ✕
             </button>
           )}
         </div>
+        <button
+          onClick={() => setFiltersOpen(!filtersOpen)}
+          className={`sm:hidden btn gap-1.5 ${filtersOpen ? 'btn-primary btn-soft' : ''}`}
+          aria-expanded={filtersOpen}
+        >
+          <FaSlidersH className="w-3.5 h-3.5" />
+          {t('log_viewer.filters')}
+          {activeFilterCount > 0 && (
+            <span className="badge badge-xs badge-primary">{activeFilterCount}</span>
+          )}
+        </button>
+        <button
+          onClick={() => fetchLogs()}
+          disabled={isLoading}
+          className="sm:hidden btn btn-square"
+          aria-label={t('log_viewer.refresh')}
+        >
+          <FaSync className={`${isLoading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+      <div className={`bg-base-200 p-2 sm:p-4 border-b border-base-content/10 flex-wrap items-center gap-2 sm:gap-4 ${filtersOpen ? 'flex' : 'hidden sm:flex'}`}>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            className="toggle toggle-sm"
+            checked={autoRefresh}
+            onChange={(e) => setAutoRefresh(e.target.checked)}
+          />
+          <span className="text-sm">{t('log_viewer.auto_refresh')}</span>
+        </label>
+
+        <button
+            className={`btn btn-sm ${autoScroll ? 'btn-primary btn-soft' : ''}`}
+            onClick={() => setAutoScroll(!autoScroll)}
+          >
+            {autoScroll ? t('log_viewer.auto_scroll_on') : t('log_viewer.auto_scroll_off')}
+          </button>
+
+        <div className="flex items-center gap-1" title={!isSystemd && logSource !== null ? t('log_viewer.filter_client_only') : ''}>
+          {LOG_LEVELS.map(level => {
+            const isActive = isSystemd
+              ? serverPriority === level.value
+              : selectedLevels.has(level.value);
+            return (
+              <button
+                key={level.value}
+                onClick={() => toggleLevel(level.value)}
+                className={`btn btn-xs font-mono ${isActive ? '' : 'opacity-60'}`}
+                style={isActive ? {
+                  color: level.color,
+                  borderColor: level.color,
+                  backgroundColor: level.activeColor,
+                } : {}}
+                title={isSystemd
+                  ? `${level.label} (${t('log_viewer.filter_server')})`
+                  : logSource === null
+                    ? level.label
+                    : `${level.label} (${t('log_viewer.filter_client_only')})`
+                }
+              >
+                {level.label}
+              </button>
+            );
+          })}
+        </div>
 
         <div className="relative" ref={dateFilterRef}>
           <button
             onClick={() => setDateFilterOpen(!dateFilterOpen)}
-            className={`btn btn-sm gap-1 ${dateFrom || dateTo ? 'btn-primary' : 'btn-ghost'}`}
+            className={`btn btn-sm gap-1 ${dateFrom || dateTo ? 'btn-primary btn-soft' : ''}`}
             title={t('log_viewer.date_range')}
           >
             <FaCalendarAlt className="w-3 h-3" />
@@ -777,7 +700,7 @@ export default function LogViewer() {
         <div className="relative" ref={moduleDropdownRef}>
           <button
             onClick={() => setModuleDropdownOpen(!moduleDropdownOpen)}
-            className={`btn btn-sm gap-1 ${selectedModules.size > 0 ? 'btn-primary' : 'btn-ghost'}`}
+            className={`btn btn-sm gap-1 ${selectedModules.size > 0 ? 'btn-primary btn-soft' : ''}`}
           >
             <FaFilter className="w-3 h-3" />
             {selectedModules.size > 0 ? t(selectedModules.size === 1 ? 'log_viewer.modules_count_one' : 'log_viewer.modules_count_other', { count: selectedModules.size }) : t('log_viewer.modules')}
@@ -824,7 +747,7 @@ export default function LogViewer() {
         <div className="relative" ref={excludeDropdownRef}>
           <button
             onClick={() => setExcludeDropdownOpen(!excludeDropdownOpen)}
-            className={`btn btn-sm gap-1 ${excludedModules.size > 0 ? 'btn-error btn-outline' : 'btn-ghost'}`}
+            className={`btn btn-sm gap-1 ${excludedModules.size > 0 ? 'btn-error btn-soft' : ''}`}
           >
             <FaEyeSlash className="w-3 h-3" />
             {excludedModules.size > 0 ? t(excludedModules.size === 1 ? 'log_viewer.excluded_count_one' : 'log_viewer.excluded_count_other', { count: excludedModules.size }) : t('log_viewer.exclude_modules')}
@@ -866,11 +789,11 @@ export default function LogViewer() {
           <button
             onClick={toggleDebug}
             disabled={debugLoading}
-            className={`btn btn-sm gap-1 ${debugActive ? 'btn-warning' : 'btn-ghost'}`}
+            className={`btn btn-sm gap-1 ${debugActive ? 'btn-warning btn-soft' : ''}`}
             title={debugActive ? t('log_viewer.debug_disable') : t('log_viewer.debug_enable')}
           >
             <FaBug className={`w-3 h-3 ${debugLoading ? 'animate-pulse' : ''}`} />
-            {debugActive ? t('log_viewer.debug_on') : t('log_viewer.debug_off')}
+            {debugActive ? `${t('log_viewer.debug_on')} ${captureClock}` : t('log_viewer.debug_off')}
           </button>
           {debugActive && (
             <div className="absolute top-full left-0 mt-1 z-50 hidden group-hover:block bg-warning text-warning-content text-xs rounded px-2 py-1 shadow-lg whitespace-nowrap">
@@ -884,9 +807,10 @@ export default function LogViewer() {
         </span>
 
         <button
-          onClick={fetchLogs}
+          onClick={() => fetchLogs()}
           disabled={isLoading}
-          className="btn btn-sm btn-ghost"
+          className="hidden sm:inline-flex btn btn-sm btn-square"
+          aria-label={t('log_viewer.refresh')}
         >
           <FaSync className={`${isLoading ? 'animate-spin' : ''}`} />
         </button>
@@ -916,7 +840,7 @@ export default function LogViewer() {
           <div className="flex justify-center py-2">
             <button
               onClick={fetchOlderLogs}
-              className="btn btn-ghost btn-xs text-base-content/50"
+              className="btn btn-sm"
             >
               {t('log_viewer.load_more')}
             </button>
@@ -982,8 +906,11 @@ export default function LogViewer() {
                     color: 'var(--log-error, oklch(0.8 0.15 25))',
                     borderColor: 'var(--log-error-border, oklch(0.5 0.1 25))',
                   }}
-                  title={log.count > 1 && log.timestamp !== log.lastTimestamp
-                    ? `${formatTimestamp(log.timestamp)} — ${formatTimestamp(log.lastTimestamp)}`
+                  title={log.count > 1 && log.firstTimestamp !== log.timestamp
+                    ? t('log_viewer.first_seen', {
+                        first: formatTimestamp(log.firstTimestamp),
+                        last: formatTimestamp(log.timestamp),
+                      })
                     : undefined
                   }
                 >

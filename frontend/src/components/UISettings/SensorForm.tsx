@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { FaCheckCircle, FaExclamationCircle, FaExclamationTriangle, FaPlus, FaSearch, FaTrash } from 'react-icons/fa';
 import { NumericInput } from '@/components/ui/NumericInput';
 import { useTranslation } from '../../hooks/useTranslation';
-import axios from 'axios';
+import axios from '@/api/axios';
 import { sanitizeId } from './helpers/idValidation';
 import SimpleTimePeriodInput from './widgets/SimpleTimePeriodInput';
 import AreaSelect from './widgets/AreaSelect';
@@ -14,6 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import type { JsonSchema } from '@/types/jsonSchema';
 
 // Filter types available in schema
 const FILTER_TYPES = ['offset', 'round', 'multiply', 'filter_out', 'filter_out_greater', 'filter_out_lower'] as const;
@@ -52,7 +53,7 @@ interface SensorFormProps {
   onSave: () => void;
   onCancel: () => void;
   isNew: boolean;
-  schema?: any;
+  schema?: JsonSchema;
   allAreas?: Area[];
   availableSensors?: AvailableSensor[];
   existingSensors?: SensorData[];
@@ -98,7 +99,7 @@ const SensorForm: React.FC<SensorFormProps> = ({
     return t(`sensors.${errorKey}`);
   };
 
-  const handleChange = (field: keyof SensorData, value: any) => {
+  const handleChange = <K extends keyof SensorData>(field: K, value: SensorData[K]) => {
     onChange({ ...data, [field]: value });
   };
 
@@ -395,7 +396,7 @@ const SensorForm: React.FC<SensorFormProps> = ({
               })}
               <button
                 type="button"
-                className="btn btn-ghost btn-sm"
+                className="btn btn-outline btn-sm"
                 onClick={() => {
                   const newFilters = [...(data.filters || []), { round: 2 }];
                   handleChange('filters', newFilters);

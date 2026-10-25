@@ -4,11 +4,29 @@ import react from '@vitejs/plugin-react'
 
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
+import { readFileSync } from 'fs'
 import tailwindcss from "@tailwindcss/vite";
+
+/**
+ * The application version this panel is built for, from boneio/version.py.
+ * The panel compares it with what the server reports to tell that the service
+ * worker handed it a stale build (see src/utils/updateGuard.ts).
+ */
+function appVersion(): string {
+  try {
+    const source = readFileSync(path.resolve(import.meta.dirname, '../boneio/version.py'), 'utf8')
+    return source.match(/__version__\s*=\s*["']([^"']+)["']/)?.[1] ?? ''
+  } catch {
+    return ''
+  }
+}
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
+    define: {
+      __APP_VERSION__: JSON.stringify(appVersion()),
+    },
     plugins: [
       react(),
       tailwindcss(),
@@ -76,6 +94,7 @@ export default defineConfig(({ mode }) => {
       }),
     ],
     resolve: {
+<<<<<<< ours
       alias: [
         // monaco-editor 0.56 added an exports map ("./*": "./esm/vs/*.js") that
         // already injects the "esm/vs/" prefix. Deep imports that spell it out
@@ -84,30 +103,98 @@ export default defineConfig(({ mode }) => {
         // 'monaco-editor/esm/vs/editor/editor.worker.js' and can't be edited.
         { find: /^monaco-editor\/esm\/vs\//, replacement: "monaco-editor/" },
         { find: "@", replacement: path.resolve(__dirname, "./src") },
+=======
+      // The array form, not the object form, because the dompurify entry below
+      // has to be a regular expression.
+      alias: [
+        { find: "@", replacement: path.resolve(import.meta.dirname, "./src") },
+        // monaco-yaml's worker imports Prettier unconditionally for its
+        // optional "format document" provider, which only registers when
+        // configureMonacoYaml() is given format.enable. boneIO never enables
+        // it, so stub Prettier out and keep ~420 kB out of the YAML worker.
+        { find: "prettier/standalone", replacement: path.resolve(import.meta.dirname, "./src/stubs/prettier-standalone.ts") },
+        { find: "prettier/plugins/yaml", replacement: path.resolve(import.meta.dirname, "./src/stubs/prettier-plugin.ts") },
+        { find: "prettier/plugins/estree", replacement: path.resolve(import.meta.dirname, "./src/stubs/prettier-plugin.ts") },
+        // monaco does not import the dompurify it declares in package.json: it
+        // imports a copy vendored into its own ESM tree, and on 0.55.1 that
+        // copy is 3.2.7, which every open DOMPurify advisory covers. Lifting
+        // the npm package (see pnpm-workspace.yaml) fixes the dependency graph
+        // and silences the alerts but does not touch the sanitiser that ships,
+        // so send the vendored path at the real package too. Both expose
+        // exactly `export { purify as default }`, so it is a drop-in.
+        //
+        // It has to be a regex, and it has to match the *whole* specifier:
+        // monaco imports the file relatively, as `./dompurify/dompurify.js`, so
+        // an alias keyed on the package path never matches and fails silently,
+        // while a regex matching only part of it leaves the unmatched half
+        // behind and the build stops on `Could not load .dompurify`. That one
+        // string is the only way the vendored copy is reached in the whole
+        // tree, monaco-yaml included.
+        //
+        // scripts/check-bundled-sanitizer.cjs runs at the end of every build
+        // and reads the emitted chunks, because an alias that stops matching
+        // does not fail anything on its own. Drop both this entry and that
+        // check once monaco vendors 3.4.13 or later.
+        { find: /^\.\/dompurify\/dompurify\.js$/, replacement: "dompurify" },
+>>>>>>> theirs
       ],
     },
     build: {
-      outDir: path.resolve(__dirname, '../boneio/webui/frontend-dist'),
+      outDir: path.resolve(import.meta.dirname, '../boneio/webui/frontend-dist'),
       emptyOutDir: true,
       rollupOptions: {
         output: {
-          manualChunks(id: string) {
-            if (id.includes('monaco-editor') || id.includes('@monaco-editor/react') || id.includes('monaco-yaml')) {
-              return 'monaco';
-            }
-            if (id.includes('react-dom') || id.includes('react-router-dom') || id.includes('/react/')) {
-              return 'vendor';
-            }
-          }
+          // Name — but deliberately do NOT force — the Monaco chunk.
+          //
+          // A manualChunks rule for Monaco looks tempting, but it makes the
+          // chunk a static dependency of the entry: the CommonJS interop helper
+          // that Monaco's `marked`/`dompurify` deps share with axios lands
+          // inside it, so index.js imports the chunk, index.html preloads it,
+          // and all 3.6 MB downloads on every page load even though
+          // ConfigEditor is React.lazy. Letting the bundler split on the
+          // dynamic-import boundary and only renaming the result keeps Monaco
+          // out of the entry graph while still giving the service-worker rules
+          // below a "monaco-*" filename to match.
+          chunkFileNames(chunk: { moduleIds?: string[] }) {
+            const fromMonaco = (chunk.moduleIds ?? []).some((id) =>
+              id.replace(/\\/g, '/').includes('/node_modules/monaco-editor/'),
+            );
+            return fromMonaco ? 'assets/monaco-[hash].js' : 'assets/[name]-[hash].js';
+          },
+          // Monaco's stylesheet is emitted as "editor.css", a name the
+          // service-worker rules below do not recognise. Identify it by content
+          // — every Monaco rule is prefixed .monaco- — rather than by a name the
+          // bundler picks, and give it the monaco-* name those rules expect.
+          // Binary assets (the codicon font) keep their own names.
+          assetFileNames(asset: { source?: string | Uint8Array }) {
+            const source = typeof asset.source === 'string' ? asset.source : '';
+            return source.includes('.monaco-')
+              ? 'assets/monaco-[hash][extname]'
+              : 'assets/[name]-[hash][extname]';
+          },
         }
+      },
+    },
+    // Behind a reverse proxy under a path (the Home Assistant add-on serves
+    // the panel at /api/hassio_ingress/<token>/proxy/N/) only index.html is
+    // rewritten to that path, never the scripts. Preloads of lazy views and
+    // url() in stylesheets must therefore resolve against the file that names
+    // them, not the "/" base, or they go to the proxy's root and 404 — and a
+    // failed preload rejects the view's import, leaving a blank page.
+    experimental: {
+      renderBuiltUrl(_filename: string, { hostType }: { hostType: string }) {
+        return hostType === 'html' ? undefined : { relative: true };
       },
     },
     publicDir: "public",
     test: {
       environment: 'node',
       include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+      // Node's own localStorage (on by default since 25) warns on every read
+      // without --localstorage-file; the jsdom tests bring their own.
+      execArgv: ['--no-experimental-webstorage'],
       alias: {
-        '@': path.resolve(__dirname, './src'),
+        '@': path.resolve(import.meta.dirname, './src'),
       },
     },
     server: {

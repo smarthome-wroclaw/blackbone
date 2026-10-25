@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
-import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -18,10 +18,40 @@ if TYPE_CHECKING:
 
 import contextlib
 
+from boneio.webui import bind
+from boneio.webui.bind import Exposure, immediate_binds
 from boneio.core.config import ConfigHelper
 from boneio.core.manager import Manager
 
 _LOGGER = logging.getLogger(__name__)
+
+#: How long the panel keeps watching for docker0 and the USB cable after it has
+#: started. Nothing
+#: waits on this any more, so it can outlast a slow cold boot of dockerd.
+LATE_BRIDGE_WAIT_SECONDS = bind.BRIDGE_WAIT_SECONDS * 5
+
+
+def _without_lifespan(app):
+    """The same application for a second listener, without starting it twice.
+
+    Hypercorn runs the lifespan protocol for every ``serve``. The first server
+    already started the application; this one answers the protocol itself and
+    passes everything else through.
+    """
+
+    async def wrapped(scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        else:
+            await app(scope, receive, send)
+
+    return wrapped
 
 
 class WebServer:
@@ -36,12 +66,15 @@ class WebServer:
         logger: dict = None,
         debug_level: int = 0,
         initial_config: dict | None = None,
+        expose: str = Exposure.ALL,
     ) -> None:
         """Initialize the web server.
 
         Args:
             initial_config: Pre-parsed config to populate cache (avoids slow first request)
+            expose: Which addresses to answer on — see :class:`Exposure`.
         """
+        self._expose = expose
         if logger is None:
             logger = {}
         if auth is None:
@@ -53,6 +86,18 @@ class WebServer:
         self.manager = manager
         self.initial_config = initial_config
         self._shutdown_event = asyncio.Event()
+        #: Set once the UI has actually been served something. What follows the
+        #: web server coming up is several seconds of import that blocks the
+        #: loop whichever thread runs it, and landing that on the very first
+        #: request means the page waits on it. Work that can wait, waits for
+        #: this.
+        self.first_response = asyncio.Event()
+        #: Set once the web stack is in sys.modules. Importing it is the single
+        #: heaviest thing this controller does at boot, and on a one-core
+        #: BeagleBone anything else importing at the same time just takes the
+        #: CPU away from it. Whoever else has bulky imports to do waits for
+        #: this, so the UI is not the thing that pays for them.
+        self.stack_imported = asyncio.Event()
         self._port = port
 
         # Get yaml config file path
@@ -71,32 +116,9 @@ class WebServer:
         self._server_running = False
 
     def _get_jwt_secret_or_generate(self):
-        config_dir = Path(self._yaml_config_file).parent
-        jwt_secret_file = config_dir / "jwt_secret"
+        from boneio.core.auth.jwt_secret import load_or_create_jwt_secret
 
-        try:
-            if jwt_secret_file.exists():
-                # Read existing secret
-                with open(jwt_secret_file) as f:
-                    jwt_secret = f.read().strip()
-                    if jwt_secret:  # Verify it's not empty
-                        return jwt_secret
-
-            # Generate new secret if file doesn't exist or is empty
-            jwt_secret = secrets.token_hex(32)  # 256-bit random secret
-
-            # Save the secret
-            with open(jwt_secret_file, "w") as f:
-                f.write(jwt_secret)
-
-            # Secure the file permissions (read/write only for owner)
-            os.chmod(jwt_secret_file, 0o600)
-
-        except Exception as e:
-            # If we can't persist the secret, generate a temporary one
-            _LOGGER.error(f"Failed to handle JWT secret file: {e}")
-            jwt_secret = secrets.token_hex(32)
-        return jwt_secret
+        return load_or_create_jwt_secret(Path(self._yaml_config_file).parent)
 
     async def start_webserver(self) -> None:
         """Start the web server."""
@@ -160,8 +182,18 @@ class WebServer:
 
             import boneio.webui.app
 
+            # While we are off the critical path anyway: the placeholder hash
+            # that makes an unknown username cost the same as a known one is a
+            # real password hash, about a second on a BeagleBone. Warming it
+            # here means the first login finds it ready without it having been
+            # computed while the controller was still bringing up its I/O.
+            from boneio.core.auth.store import dummy_hash
+
+            dummy_hash()
+
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _do_heavy_imports)
+        self.stack_imported.set()
 
         if dummy_server:
             dummy_server.close()
@@ -173,7 +205,11 @@ class WebServer:
 
         # Configure hypercorn (moved from __init__ for lazy loading)
         self._hypercorn_config = Config()
-        self._hypercorn_config.bind = [f"0.0.0.0:{self._port}"]
+        # Only what exists now: the panel answers on the loopback at once, and
+        # docker0 is added by a second listener when Docker brings it up.
+        self._hypercorn_config.bind = await asyncio.to_thread(
+            immediate_binds, self._expose, self._port
+        )
         self._hypercorn_config.use_reloader = False
         self._hypercorn_config.worker_class = "asyncio"
 
@@ -225,21 +261,121 @@ class WebServer:
         if hasattr(self.app, "state") and hasattr(self.app.state, "websocket_manager"):
             self.manager._websocket_manager = self.app.state.websocket_manager
 
+        served = self.first_response
+
+        async def _announce_first_response(scope, receive, send):
+            """The app, wrapped so we learn when it has answered something."""
+            if served.is_set():
+                await self.app(scope, receive, send)
+                return
+
+            async def _send(message):
+                await send(message)
+                # response.complete for HTTP, accept for a WebSocket: either
+                # way somebody is looking at the UI now.
+                if message["type"] in ("http.response.body", "websocket.accept") and not message.get(
+                    "more_body", False
+                ):
+                    served.set()
+
+            await self.app(scope, receive, _send)
+
         server_task = asyncio.create_task(
             serve(
-                app=cast("Framework", self.app),
+                app=cast("Framework", _announce_first_response),
                 config=self._hypercorn_config,
                 shutdown_trigger=shutdown_trigger,
             )
+        )
+        # Always in proxy mode, even when docker0 was there already: it can
+        # come up between the bind above and any check made here, and then
+        # nothing would ever bind it. When nothing is missing this ends quietly.
+        late_bridge = (
+            asyncio.create_task(self._serve_late_bridge(_announce_first_response))
+            if self._expose == Exposure.PROXY
+            else None
         )
         self.manager.set_web_server_status(status=True, bind=self._port)
         try:
             _LOGGER.debug("Waiting for Hypercorn server to complete...")
             await server_task
+            if late_bridge:
+                # Stops on the same shutdown event; let it close gracefully.
+                await late_bridge
             _LOGGER.info("Hypercorn server task completed")
         except asyncio.CancelledError:
             _LOGGER.info("Hypercorn server task cancelled")
             pass  # Expected due to cancellation
+        finally:
+            if late_bridge:
+                late_bridge.cancel()
+
+    async def _serve_late_bridge(self, app) -> None:
+        """Answer on docker0 and on the USB cable too, once each comes up.
+
+        Node-RED's editor login reaches the panel through host.docker.internal,
+        which is docker0, and on a cold boot dockerd brings it up well after the
+        panel is serving. bb-usb-gadgets is ordered after boneio.service, so
+        192.168.7.2 is never there when the panel first binds either, cable in
+        or not — and the factory station reaches a fresh board only that way.
+
+        Args:
+            app: The ASGI application the first server is serving.
+        """
+        already = list(self._hypercorn_config.bind)
+        port = self._port
+        await asyncio.gather(
+            self._serve_when(
+                bind._default_bridge_up,
+                lambda: bind.bridge_binds(port, 0, already),
+                "the Docker bridge",
+                app,
+            ),
+            self._serve_when(
+                lambda: bool(bind.usb_gadget_addresses()),
+                lambda: bind.usb_binds(port, already),
+                "the USB cable",
+                app,
+            ),
+        )
+
+    async def _serve_when(self, ready, missing, what: str, app) -> None:
+        """Wait for ``ready()``, then also listen on whatever ``missing()`` gives.
+
+        The wait polls from the loop, one short check at a time, so a shutdown
+        ends it at once: a thread asleep for minutes would hold the process exit
+        for as long. A listener that cannot be bound is logged and given up; the
+        panel keeps answering where it already does.
+
+        Args:
+            ready: Blocking check, run in a thread, true once it is worth binding.
+            missing: Blocking call returning the bind strings still to add.
+            what: Name for the log.
+            app: The ASGI application the first server is serving.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + LATE_BRIDGE_WAIT_SECONDS
+        while loop.time() < deadline and not await asyncio.to_thread(ready):
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._shutdown_event.wait(), bind._BRIDGE_POLL_SECONDS)
+            if self._shutdown_event.is_set():
+                return
+        try:
+            from hypercorn.asyncio import serve
+
+            binds = await asyncio.to_thread(missing)
+            if not binds or self._shutdown_event.is_set():
+                return
+            config = copy.copy(self._hypercorn_config)
+            config.bind = binds
+            _LOGGER.info("The panel now also answers on %s, %s being up", ", ".join(binds), what)
+            await serve(
+                cast("Framework", _without_lifespan(app)),
+                config,
+                shutdown_trigger=self._shutdown_event.wait,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("The panel could not also listen on %s: %s", what, err)
 
     async def trigger_shutdown(self) -> None:
         """Signal the web server to start its shutdown sequence."""

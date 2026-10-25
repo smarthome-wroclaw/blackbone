@@ -1,14 +1,19 @@
 import { useState, useCallback, useEffect } from 'react';
-import { FaSpinner, FaExclamationTriangle, FaCheck, FaShieldAlt, FaSync } from 'react-icons/fa';
+import { FaCheck, FaSpinner, FaShieldAlt, FaSync } from 'react-icons/fa';
 import axios from '@/api/axios';
 import { useTranslation } from '@/hooks/useTranslation';
-import SudoPasswordDialog from './SudoPasswordDialog';
+import { SettingsCard, NoticeCallout } from './ui';
 
 /**
- * Component for checking and fixing timedatectl sudoers configuration.
- * Checks if NOPASSWD rules exist for `timedatectl set-timezone` and
- * `timedatectl set-ntp`, and allows creating the sudoers file via
- * SudoPasswordDialog.
+ * Reports whether the timedatectl sudoers rules are in place.
+ *
+ * This used to offer to create them, which meant asking the operator for their
+ * sudo password and posting it to `/api/timezone/sudoers/fix`. That endpoint is
+ * gone: the password for this account is shared across controllers, so an
+ * endpoint that collects it is a path to intercepting it. The rule now arrives
+ * with system migration 1.6.7, over a channel that needs no password — so all
+ * that is left here is to say whether it landed, and to point at the migrations
+ * when it has not.
  */
 export default function FixTimezoneSudoers() {
   const { t } = useTranslation();
@@ -17,54 +22,31 @@ export default function FixTimezoneSudoers() {
     sudoers_file_exists: boolean;
     error: string | null;
   } | null>(null);
-  const [fixResult, setFixResult] = useState<{
-    status: string;
-    message: string;
-    content?: string;
-  } | null>(null);
+  /** Set when the request itself failed — which is not an answer about the
+   *  rule, and must not be reported as one. */
+  const [unreachable, setUnreachable] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [fixing, setFixing] = useState(false);
-  const [showSudoDialog, setShowSudoDialog] = useState(false);
-  const [sudoError, setSudoError] = useState<string | null>(null);
 
   const checkSudoers = useCallback(async () => {
     setLoading(true);
     setCheckResult(null);
-    setFixResult(null);
+    setUnreachable(null);
     try {
-      const { data } = await axios.get('/api/timezone/sudoers/check');
+      // Longer than the backend's own five-second cap on `sudo -l`. With both
+      // at five seconds the two raced, the client always lost, and a device
+      // that was merely busy came back as "the rule is missing" — with the
+      // migrations page next door correctly saying it had been installed.
+      const { data } = await axios.get('/api/timezone/sudoers/check', { timeout: 20000 });
       setCheckResult(data);
-    } catch (err: any) {
-      setCheckResult({
-        needs_password: true,
-        sudoers_file_exists: false,
-        error: err.message || 'Request failed',
-      });
+    } catch (err: unknown) {
+      // "Could not ask" is a third state. Reporting it as "not installed" sent
+      // people to apply migrations that were already applied.
+      const message = err instanceof Error ? err.message : String(err);
+      setUnreachable(message || 'Request failed');
     } finally {
       setLoading(false);
     }
   }, []);
-
-  const fixSudoers = async (password: string) => {
-    setFixing(true);
-    setFixResult(null);
-    setSudoError(null);
-    try {
-      const { data } = await axios.post('/api/timezone/sudoers/fix', { password });
-      setFixResult(data);
-      if (data.status === 'success') {
-        setShowSudoDialog(false);
-        // Re-check to confirm fix worked
-        checkSudoers();
-      } else {
-        setSudoError(data.message || t('common.error'));
-      }
-    } catch (err: any) {
-      setSudoError(err.response?.data?.detail || err.message || 'Request failed');
-    } finally {
-      setFixing(false);
-    }
-  };
 
   // Auto-check on mount
   useEffect(() => {
@@ -74,104 +56,95 @@ export default function FixTimezoneSudoers() {
   const needsFix = checkResult?.needs_password === true;
   const isOk = checkResult !== null && !checkResult.needs_password;
 
+  /**
+   * When the rules are already in place there is nothing to do, and a full
+   * card saying so pushed the actual timezone controls below the fold. A
+   * single line is enough to confirm it, with the re-check still reachable.
+   */
+  if (isOk && !loading) {
+    return (
+      <div className="stg-inset flex items-center gap-2.5 px-3.5 py-2.5 text-[13px]">
+        <FaCheck className="text-success shrink-0" />
+        <span className="text-base-content/70 min-w-0 flex-1">
+          {t('timezone_sudoers.status_ok')}
+        </span>
+        <button
+          className="btn btn-xs gap-1.5 shrink-0"
+          onClick={checkSudoers}
+          disabled={loading}
+        >
+          <FaSync className="w-3 h-3" />
+          <span className="hidden sm:inline">{t('timezone_sudoers.check_now')}</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="card bg-base-200 shadow-xl">
-      <div className="card-body">
-        <h3 className="card-title">
-          <FaShieldAlt />
-          {t('timezone_sudoers.title')}
-        </h3>
-        <p className="text-sm opacity-70">
-          {t('timezone_sudoers.description')}
-        </p>
-
-        {/* Manual check button */}
-        <div className="card-actions mt-1">
-          <button
-            className="btn btn-outline btn-sm"
-            onClick={checkSudoers}
-            disabled={loading}
-          >
-            {loading ? <FaSpinner className="animate-spin" /> : <FaSync />}
-            {t('timezone_sudoers.check_now')}
-          </button>
-        </div>
-
-        {/* Loading */}
+    <SettingsCard
+      icon={<FaShieldAlt />}
+      title={t('timezone_sudoers.title')}
+      description={t('timezone_sudoers.description')}
+      action={
+        <button
+          className="btn btn-sm gap-2"
+          onClick={checkSudoers}
+          disabled={loading}
+        >
+          {loading ? <FaSpinner className="animate-spin" /> : <FaSync />}
+          {t('timezone_sudoers.check_now')}
+        </button>
+      }
+    >
+      <div className="space-y-3">
         {loading && (
-          <div className="flex items-center gap-2 text-sm mt-2">
+          <div className="flex items-center gap-2.5 text-[13px] text-base-content/60">
             <FaSpinner className="animate-spin" />
             {t('timezone_sudoers.checking')}
           </div>
         )}
 
-        {/* Status OK */}
         {isOk && !loading && (
-          <div className="alert alert-success mt-2">
-            <FaCheck />
-            <div>
-              <p className="font-semibold">{t('timezone_sudoers.status_ok')}</p>
-              <p className="text-sm opacity-80">{t('timezone_sudoers.status_ok_hint')}</p>
-            </div>
-          </div>
+          <NoticeCallout
+            variant="success"
+            title={t('timezone_sudoers.status_ok')}
+            message={t('timezone_sudoers.status_ok_hint')}
+          />
         )}
 
-        {/* Needs fix */}
+        {unreachable && !loading && (
+          <NoticeCallout
+            variant="warning"
+            title={t('timezone_sudoers.unknown')}
+            message={
+              <>
+                <span className="block">{t('timezone_sudoers.unknown_hint')}</span>
+                <span className="block font-mono text-xs opacity-60 mt-1">{unreachable}</span>
+              </>
+            }
+          />
+        )}
+
         {needsFix && !loading && (
-          <>
-            <div className="alert alert-warning mt-2">
-              <FaExclamationTriangle />
-              <div>
-                <p className="font-semibold">{t('timezone_sudoers.password_required')}</p>
-                <p className="text-sm opacity-80">{t('timezone_sudoers.password_required_hint')}</p>
+          <NoticeCallout
+            variant="warning"
+            title={t('timezone_sudoers.missing')}
+            message={
+              <>
+                <span className="block">{t('timezone_sudoers.missing_hint')}</span>
+                <code className="block font-mono text-xs mt-1 text-base-content/70">
+                  /etc/sudoers.d/boneio-timedatectl
+                </code>
                 {checkResult?.error && (
-                  <p className="text-xs font-mono mt-1 opacity-60">{checkResult.error}</p>
+                  <span className="block font-mono text-xs opacity-60 mt-1">
+                    {checkResult.error}
+                  </span>
                 )}
-              </div>
-            </div>
-
-            <div className="card-actions mt-2">
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={() => {
-                  setSudoError(null);
-                  setShowSudoDialog(true);
-                }}
-              >
-                <FaShieldAlt />
-                {t('timezone_sudoers.create_sudoers')}
-              </button>
-            </div>
-
-            <div className="alert alert-info mt-2">
-              <div className="text-xs">
-                <p>{t('timezone_sudoers.info_1')}</p>
-                <p className="font-mono mt-1">/etc/sudoers.d/boneio-timedatectl</p>
-                <p className="mt-1">{t('timezone_sudoers.info_2')}</p>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Fix result */}
-        {fixResult && (
-          <div className={`alert ${fixResult.status === 'success' ? 'alert-success' : 'alert-error'} mt-2`}>
-            {fixResult.status === 'success' ? <FaCheck /> : <FaExclamationTriangle />}
-            <span className="text-sm">{fixResult.message}</span>
-          </div>
+              </>
+            }
+          />
         )}
       </div>
-
-      <SudoPasswordDialog
-        open={showSudoDialog}
-        onOpenChange={setShowSudoDialog}
-        title={t('timezone_sudoers.title')}
-        description={t('timezone_sudoers.password_required_hint')}
-        submitLabel={t('timezone_sudoers.create_sudoers')}
-        isSubmitting={fixing}
-        error={sudoError}
-        onSubmit={fixSudoers}
-      />
-    </div>
+    </SettingsCard>
   );
 }
