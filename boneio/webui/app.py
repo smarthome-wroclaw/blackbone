@@ -66,6 +66,7 @@ from boneio.webui.routes import (
     accounts_router,
     auth_router,
     can_router,
+    caddy_router,
     config_router,
     covers_router,
     dashboard_router,
@@ -77,8 +78,10 @@ from boneio.webui.routes import (
     onboarding_router,
     mqtt_reference_router,
     mqtt_topics_router,
+    mqtt_tls_router,
     nodered_router,
     outputs_router,
+    os_update_router,
     remote_devices_router,
     schema_router,
     sensors_router,
@@ -207,6 +210,9 @@ app.include_router(tools_router)
 app.include_router(migrations_router)
 app.include_router(mqtt_reference_router)
 app.include_router(mqtt_topics_router)
+app.include_router(mqtt_tls_router)
+app.include_router(os_update_router)
+app.include_router(caddy_router)
 
 if os.environ.get("BONEIO_DEV"):
     app.include_router(dev_fake_device_router)
