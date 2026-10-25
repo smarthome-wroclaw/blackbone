@@ -137,9 +137,9 @@ def test_manifest_hashes_match_the_plans():
 
 
 def test_manifest_names_the_release_it_belongs_to():
-    from boneio.version import __version__
+    from boneio.version import __migration_release__
 
-    assert _manifest()["release"] == __version__
+    assert _manifest()["release"] == __migration_release__
 
 
 # ------------------------------------------------------------------- signatures

@@ -385,10 +385,10 @@ def _anchor_problems() -> list[str]:
 
 
 def _release_version() -> str:
-    """The version of the package being released."""
-    from boneio.version import __version__
+    """The migration trust release whose plans are being signed."""
+    from boneio.version import __migration_release__
 
-    return __version__
+    return __migration_release__
 
 
 def _discover() -> list[tuple[str, object]]:
