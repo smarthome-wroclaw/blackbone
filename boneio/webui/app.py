@@ -49,6 +49,7 @@ from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
 from boneio.webui.security_headers import apply_security_headers
 from boneio.webui import security_events
+from boneio.webui.middleware.csrf import CSRFMiddleware
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
     is_auth_required,
@@ -88,6 +89,7 @@ from boneio.webui.routes import (
     update_router,
 )
 from boneio.webui.routes import config as config_module
+from boneio.webui.routes.config_core import api_shape
 from boneio.webui.routes import onboarding as onboarding_module
 from boneio.webui.routes import system as system_module
 from boneio.webui.routes import diagnostics as diagnostics_module
