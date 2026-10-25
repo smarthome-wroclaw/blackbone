@@ -5,6 +5,19 @@ użyciu Release Please i OpenRouter.
 
 
 
+
+<!-- blackbone-release:0.3.0:start -->
+## [0.3.0](https://github.com/smarthome-wroclaw/blackbone/compare/v0.2.0...v0.3.0) (2026-10-25)
+
+### Funkcje
+
+* dodano konfigurowalny przekaźnik zatrzymania rolety ([#130](https://github.com/smarthome-wroclaw/blackbone/issues/130))
+
+### Poprawki błędów
+
+* rozwiązano konflikty synchronizacji upstream w PR 98
+<!-- blackbone-release:0.3.0:end -->
+
 <!-- blackbone-release:0.1.2:start -->
 ## [0.1.2](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.1...v0.1.2) (2026-09-07)
 
