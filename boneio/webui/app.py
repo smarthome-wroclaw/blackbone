@@ -91,6 +91,7 @@ from boneio.webui.routes import config as config_module
 from boneio.webui.routes import onboarding as onboarding_module
 from boneio.webui.routes import system as system_module
 from boneio.webui.routes import diagnostics as diagnostics_module
+from boneio.webui.routes import mqtt_tls as mqtt_tls_module
 from boneio.webui.routes import security as security_module
 
 # Import WebSocket manager

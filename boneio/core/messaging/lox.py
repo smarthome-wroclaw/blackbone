@@ -387,6 +387,25 @@ class LoxUDPClient(MessageBus):
             if self._transport:
                 self._transport.close()
 
+    async def _send_current_states(self) -> None:
+        """Refresh Lox with current output, group, and cover states."""
+        if not self._manager or not self._transport:
+            return
+        for output in self._manager.outputs.get_all_outputs().values():
+            if getattr(output, "output_type", None) in (OUTPUT_NONE, "cover"):
+                continue
+            self._send_udp(output.id, ON if output.is_active else OFF)
+        for group in self._manager.outputs.get_all_output_groups().values():
+            self._send_udp(group.id, ON if group.is_active else OFF)
+        for cover in self._manager.covers.get_all_covers().values():
+            position = getattr(cover, "json_position", None)
+            if isinstance(position, dict):
+                position = position.get("position")
+            if position is None:
+                position = getattr(cover, "position", None)
+            if position is not None:
+                self._send_udp(cover.id, str(position))
+
     def set_manager(self, manager: Manager) -> None:
         """Set manager reference for routing incoming commands."""
         self._manager = manager

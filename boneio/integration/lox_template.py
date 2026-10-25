@@ -456,7 +456,7 @@ def _get_lox_config(manager: Manager) -> dict[str, Any]:
         config = manager.config_helper.get_config()
         lox = config.get("lox_udp", {})
         return {
-            "boneio_ip": _boneio_ip(lox.get("host")),
+            "boneio_ip": lox.get("boneio_host") or _boneio_ip(lox.get("host")),
             "send_port": lox.get("send_port", 4444),
             "listen_port": lox.get("listen_port", 4445),
             "mqtt_bridge": lox.get("mqtt_bridge", []),
