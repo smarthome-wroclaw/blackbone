@@ -172,6 +172,21 @@
             "default": true,
             "description": "If you want you can disable discovering this input in HA.",
             "title": "Show in ha"
+          },
+          "stop_relay": {
+            "type": "string",
+            "description": "Optional relay pulsed when stopping cover movement.",
+            "title": "Stop relay"
+          },
+          "stop_relay_duration": {
+            "type": [
+              "number",
+              "string"
+            ],
+            "x-timeperiod": true,
+            "default": "500ms",
+            "description": "Duration of stop relay pulse.",
+            "title": "Stop relay duration"
           }
         },
         "required": [

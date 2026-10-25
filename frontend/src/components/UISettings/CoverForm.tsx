@@ -211,6 +211,29 @@ const CoverForm: React.FC<CoverFormProps> = ({
                   </label>
                 </div>
 
+                {/* Optional STOP relay: momentarily interrupts an external safety circuit. */}
+                <div className="form-control">
+                  <label className="label"><span className="label-text font-medium">{t('covers.stop_relay')}</span></label>
+                  <OutputSelectDropdown
+                    value={data.stop_relay || ''}
+                    onChange={(value: string) => updateField('stop_relay', value || undefined)}
+                    allOutputs={allOutputs.filter((output: OutputConfigEntry) => !!(output?.id || output?.boneio_output))}
+                    allAreas={allAreas}
+                    placeholder={t('covers.select_relay')}
+                    excludeIds={[data.open_relay, data.close_relay].filter(Boolean) as string[]}
+                  />
+                  <label className="label"><span className="label-text-alt text-info">{t('covers.stop_relay_hint')}</span></label>
+                </div>
+                {data.stop_relay && (
+                  <SimpleTimePeriodInput
+                    value={data.stop_relay_duration || '500ms'}
+                    onChange={(value: string) => updateField('stop_relay_duration', value)}
+                    label={t('covers.stop_relay_duration')}
+                    required={false}
+                    minimum={10}
+                  />
+                )}
+
                 {/* Open Time */}
                 <SimpleTimePeriodInput
                   value={data.open_time || ''}

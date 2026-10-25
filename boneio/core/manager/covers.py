@@ -110,6 +110,8 @@ class CoverManager:
 
             open_relay = self._manager.outputs.get_output(open_relay_id)
             close_relay = self._manager.outputs.get_output(close_relay_id)
+            stop_relay_id = str(_config.get("stop_relay", ""))
+            stop_relay = self._manager.outputs.get_output(stop_relay_id) if stop_relay_id else None
 
             # Generate ID from relays if not provided
             if _config.get(ID):
@@ -167,6 +169,9 @@ class CoverManager:
                             )
                         _cover._open_relay = open_relay
                         _cover._close_relay = close_relay
+                        _cover._stop_relay = stop_relay
+                        duration = _config.get("stop_relay_duration")
+                        _cover._stop_relay_duration = ensure_time_period(duration) if duration is not None else None
                         _cover.update_config_times(_config)
                         # Re-send HA autodiscovery with potentially new name/area
                         if _config.get(SHOW_HA, True):
@@ -198,6 +203,7 @@ class CoverManager:
                         **_config,
                         "open_relay": open_relay,
                         "close_relay": close_relay,
+                        "stop_relay": stop_relay,
                     },
                     tilt_duration=_config.get("tilt_duration"),
                 )
@@ -232,7 +238,7 @@ class CoverManager:
 
         # Normalize time period fields — during hot-reload YAML values may
         # arrive as raw strings (e.g. "5s") instead of TimePeriod objects.
-        for time_key in ("open_time", "close_time", "actuator_activation_duration"):
+        for time_key in ("open_time", "close_time", "actuator_activation_duration", "stop_relay_duration"):
             if time_key in config and config[time_key] is not None:
                 config[time_key] = ensure_time_period(config[time_key])
 
