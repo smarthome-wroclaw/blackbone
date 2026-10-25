@@ -8,12 +8,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from collections import deque
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from boneio.components.cover.remote import RemoteCoverOutput
+from boneio.components.output.remote import RemoteOutputBase
 from boneio.const import (
     BUTTON,
     CAN,
@@ -29,9 +32,11 @@ from boneio.const import (
     OUTPUT_OVER_MQTT,
     REMOTE_COVER,
     REMOTE_OUTPUT,
+    SCHEDULE,
     SET_BRIGHTNESS,
     STATE,
     TOGGLE,
+    VIRTUAL_SWITCH,
     cover_actions,
     filter_cover_extra_data,
     output_actions,
@@ -47,15 +52,16 @@ from boneio.core.manager.irrigation import IrrigationManager
 from boneio.core.manager.modbus import ModbusManager
 from boneio.core.manager.outputs import OutputManager
 from boneio.core.manager.remote import RemoteDeviceManager
+from boneio.core.manager.scheduler import Scheduler
+from boneio.core.manager.security_alert import SecurityAlertPublisher
 from boneio.core.manager.sensors import SensorManager
+from boneio.core.manager.sun import SunProvider
 from boneio.core.manager.templates import TemplateManager
 from boneio.core.manager.update import UpdateManager
+from boneio.core.manager.virtual_switches import VirtualSwitchManager
 from boneio.core.messaging import MessageBus
 from boneio.core.state import StateManager
 from boneio.core.utils.timeperiod import parse_time_to_ms, parse_time_to_seconds
-from boneio.components.output.remote import RemoteOutputBase
-from boneio.components.cover.remote import RemoteCoverOutput
-from boneio.core.remote.wled import WLEDRemoteDevice
 from boneio.hardware.i2c.bus import SMBus2I2C
 from boneio.migrations import MigrationRunner
 
@@ -129,6 +135,9 @@ class Manager:
         irrigation: list[dict] | None = None,
         remote_devices: list[dict] | None = None,
         can: dict[str, Any] | None = None,
+        location: dict[str, Any] | None = None,
+        schedule: list[dict] | None = None,
+        virtual_switch: list[dict] | None = None,
         web_active: bool = False,
         web_port: int = 8090,
         early_oled_device: Any | None = None,
@@ -163,6 +172,17 @@ class Manager:
         self._config_helper = config_helper
         self._config_file_path = config_file_path
         self._topic_prefix = config_helper.topic_prefix
+        # One reload at a time: they re-read the file and rebuild entity maps
+        # across awaits, so two interleaved runs corrupt each other's state.
+        self._reload_lock = asyncio.Lock()
+
+        # Where the Sun is. Built even when `location:` is absent: an
+        # unconfigured provider answers "not ready" and says so once, which is
+        # what every caller has to handle anyway.
+        self.sun = SunProvider(location)
+
+        # Reports outstanding security recommendations to Home Assistant.
+        self.security_alert = SecurityAlertPublisher(self)
 
         # Hardware errors storage for WebUI
         self._hardware_errors: list[dict[str, Any]] = []
@@ -225,6 +245,15 @@ class Manager:
             manager=self,
             cover_config=cover,
         )
+
+        # 4b. Virtual switches — flags with no hardware, read by conditions and
+        # set by actions. Before anything whose actions may target one: the
+        # inputs here, the scheduler below. Their own actions resolve outputs
+        # and covers, both built above. Bound before it is configured, because
+        # one switch's action may target another and that lookup goes through
+        # self.virtual_switches.
+        self.virtual_switches = VirtualSwitchManager(manager=self)
+        self.virtual_switches.configure(virtual_switch or [])
 
         # 5. InputManager
         self.inputs = InputManager(
@@ -296,6 +325,13 @@ class Manager:
             irrigation_config=merged_irrigation,
         )
 
+        # 14. Scheduler — actions that fire on their own. Built here because
+        # parsing its actions needs the outputs and covers to exist, and armed
+        # from a task because the first thing it does is look at the clock.
+        self.scheduler = Scheduler(manager=self, schedules=schedule or [])
+        if schedule:
+            self.append_task(coro=self.scheduler.start, name="scheduler")
+
         # Configure virtual energy sensors (must be after outputs are initialized)
         self.sensors.configure_virtual_energy_sensors()
 
@@ -305,7 +341,9 @@ class Manager:
         # Run system migration startup check (discovers pending migrations,
         # detects bootstrap_required, applies if helper is installed).
         try:
-            migration_status = self.migration_runner.startup_check()
+            migration_status = self.migration_runner.startup_check(
+                progress_callback=self.display.show_migration_progress
+            )
             _LOGGER.info(
                 "Migration startup_check finished: status=%s, pending=%d, bootstrap_required=%s",
                 migration_status.value,
@@ -314,6 +352,8 @@ class Manager:
             )
         except Exception as exc:
             _LOGGER.error("Migration startup_check failed: %s", exc, exc_info=True)
+        finally:
+            self.display.clear_migration_progress()
 
         _LOGGER.info("Manager initialization complete")
 
@@ -488,12 +528,14 @@ class Manager:
         _LOGGER.info("Sending HA autodiscovery messages")
 
         await self.outputs.send_ha_autodiscovery()
+        self.virtual_switches.publish_discovery()
         await self.inputs.send_ha_autodiscovery()
         await self.covers.send_ha_autodiscovery()
         await self.sensors.send_ha_autodiscovery()
         await self.modbus.send_ha_autodiscovery()
         await self.display.send_ha_autodiscovery()
         await self.update_manager.send_ha_autodiscovery()
+        await self.security_alert.send_ha_autodiscovery()
         await self.templates.send_ha_autodiscovery()
         await self.irrigation.send_ha_autodiscovery()
 
@@ -585,6 +627,7 @@ class Manager:
                         self.send_message(
                             topic=f"{topic_prefix}/input/{input_id}",
                             payload=state,
+                            retain=True,
                         )
                 except Exception as e:
                     _LOGGER.debug(
@@ -603,6 +646,14 @@ class Manager:
 
         # Dallas and I2C temperature sensors
         for sensor in self.sensors.get_all_temp_sensors():
+            try:
+                await sensor.async_update(timestamp)
+            except Exception as e:
+                _LOGGER.debug("Error re-publishing sensor state %s: %s", sensor.id, e)
+
+        # Sun sensors. A broker that has just come back has no retained value
+        # for them, and the next scheduled update could be a minute away.
+        for sensor in self.sensors.get_sun_sensors():
             try:
                 await sensor.async_update(timestamp)
             except Exception as e:
@@ -679,7 +730,7 @@ class Manager:
                 if action_definition.get(key) is not None:
                     parsed_action[key] = action_definition[key]
             # Pre-compile conditions for fast evaluation at action time
-            compiled = precompile_conditions(parsed_action)
+            compiled = precompile_conditions(parsed_action, self.sun)
             if compiled is not None:
                 parsed_action["_compiled_conditions"] = compiled
 
@@ -720,6 +771,27 @@ class Manager:
                             continue
                     _LOGGER.warning("Device %s for action in %s not found. Omitting.", entity_id, pin)
 
+                elif action == VIRTUAL_SWITCH:
+                    entity_id = action_definition.get("boneio_virtual_switch")
+                    action_output = action_definition.get("action_output", TOGGLE)
+                    action_to_execute = output_actions.get(action_output)
+                    # Resolved here so a typo shows up as a warning at config
+                    # load rather than as an action that quietly does nothing.
+                    if entity_id and action_to_execute and self.virtual_switches.get(entity_id):
+                        parsed_action = {
+                            "action": action,
+                            "boneio_virtual_switch": entity_id,
+                            "action_to_execute": action_to_execute,
+                        }
+                        _copy_long_press_meta(parsed_action, action_definition)
+                        parsed_actions[click_type].append(parsed_action)
+                        continue
+                    _LOGGER.warning(
+                        "Virtual switch %s for action in %s not found. Omitting.",
+                        entity_id,
+                        pin,
+                    )
+
                 elif action == COVER:
                     # Support both new 'boneio_cover' and legacy 'pin' for backward compatibility
                     entity_id = action_definition.get("boneio_cover") or action_definition.get("pin")
@@ -758,7 +830,7 @@ class Manager:
 
                 elif action == OUTPUT_OVER_MQTT:
                     boneio_id = action_definition.get("boneio_id")
-                    action_output = action_definition.get("action_output")
+                    action_output = action_definition.get("action_output", TOGGLE)
                     action_to_execute = output_actions.get(action_output.upper())
                     if boneio_id and action_to_execute:
                         parsed_action = {
@@ -773,7 +845,7 @@ class Manager:
 
                 elif action == COVER_OVER_MQTT:
                     boneio_id = action_definition.get("boneio_id")
-                    action_cover = action_definition.get("action_cover")
+                    action_cover = action_definition.get("action_cover", TOGGLE)
                     action_to_execute = cover_actions.get(action_cover.upper())
                     if boneio_id and action_to_execute:
                         parsed_action = {
@@ -854,7 +926,8 @@ class Manager:
         OutputManager, so they are resolved via ``entity_type='output'``.
 
         Args:
-            entity_type: Entity type ('binary_sensor', 'cover', 'output', 'light', 'remote_output', 'remote_input')
+            entity_type: Entity type ('binary_sensor', 'cover', 'output', 'light',
+                'virtual_switch', 'remote_output', 'remote_input')
             entity_id: Entity ID
 
         Returns:
@@ -866,6 +939,8 @@ class Manager:
             return self.covers.get_cover(entity_id)
         if entity_type in ("binary_sensor", "remote_input"):
             return self.inputs.get_input(entity_id)
+        if entity_type == VIRTUAL_SWITCH:
+            return self.virtual_switches.get(entity_id)
         _LOGGER.warning("Unknown entity type for condition: %s", entity_type)
         return None
 
@@ -897,8 +972,12 @@ class Manager:
 
         duration_ms = (duration or 0) * 1000  # Convert to ms
 
-        # Compute datetime once for all condition evaluations in this batch
-        now_dt = datetime.now()
+        # Compute datetime once for all condition evaluations in this batch.
+        # Aware, not naive: sun anchors are born as aware UTC, and comparing
+        # them against a naive local time would be ambiguous in the hour the
+        # clock goes back. `.time()` and `.month` behave identically on an
+        # aware local datetime, so the time and date conditions are unaffected.
+        now_dt = datetime.now().astimezone()
 
         for idx, action_definition in enumerate(actions):
             is_repeat = action_definition.get("repeat", False)
@@ -940,8 +1019,34 @@ class Manager:
                 _LOGGER.debug("Action %d: condition not met, skipping", idx)
                 continue
 
+            # Drawn after the conditions, so a probability on an action whose
+            # condition is false still never runs — and so the draw is not
+            # burned on a firing that was never going to happen.
+            probability = action_definition.get("probability")
+            if probability is not None and probability < 1:
+                if random.random() >= probability:
+                    _LOGGER.debug(
+                        "Action %d: skipped by probability %.2f", idx, probability
+                    )
+                    continue
+
             # Handle delayed actions
             delay_seconds = action_definition.get("delay")
+            if delay_seconds and delay_seconds > 0 and not input_id:
+                # Delayed actions are tracked per input, for the cancel-on
+                # rules; a schedule has no input, so the delay is dropped. It
+                # has always been dropped — silently, which is the part worth
+                # fixing here. A durable delay is a separate piece of work: an
+                # asyncio task does not survive the restart that a schedule's
+                # own plan does.
+                _LOGGER.warning(
+                    "Action %d has a delay of %.1fs but was fired by something "
+                    "with no input (a schedule or a virtual switch), where "
+                    "delays are not supported. Running it immediately. Use a "
+                    "second schedule for the later step instead.",
+                    idx,
+                    delay_seconds,
+                )
             if delay_seconds and delay_seconds > 0 and input_id:
                 _LOGGER.info(
                     "Scheduling delayed action %d for input '%s': %.1fs delay",
@@ -1028,6 +1133,15 @@ class Manager:
             )
             _f = getattr(output, action_to_execute)
             await _f()
+
+        elif action == VIRTUAL_SWITCH:
+            switch_id = action_definition.get("boneio_virtual_switch")
+            switch_action = action_definition.get("action_to_execute")
+            switch = self.virtual_switches.get(switch_id) if switch_id else None
+            if not switch or not switch_action:
+                _LOGGER.warning("Virtual switch %s not found for action", switch_id)
+                return
+            await getattr(switch, switch_action)()
 
         elif action == COVER:
             assert entity_id and action_to_execute  # guaranteed by guard above
@@ -1131,7 +1245,13 @@ class Manager:
         elif action == REMOTE_COVER:
             assert entity_id and remote_device_id  # guaranteed by guard above
             action_cover = action_definition.get("action_cover", "TOGGLE")
-            extra_data = action_definition.get("extra_data", {})
+            # Same per-action filter as local covers: the remote protocols read
+            # `position` / `tilt_position` ahead of the action name, so a value
+            # left behind in `data` must not turn OPEN into a set-position.
+            extra_data = filter_cover_extra_data(
+                cover_actions.get(action_cover.upper(), ""),
+                action_definition.get("extra_data", {}),
+            )
             restore_tilt = action_definition.get("restore_tilt", False)
 
             # Save tilt before executing action (ESPHome only)
@@ -1288,6 +1408,66 @@ class Manager:
         finally:
             self._pending_tilt_restores.pop(task_key, None)
 
+    async def _reload_virtual_switches(self) -> None:
+        """Adopt a new virtual_switch section, keeping the states that survive."""
+        config = self._config_helper.get_config() or {}
+        await self.virtual_switches.reload(config.get("virtual_switch") or [])
+
+    async def _reload_schedule(self) -> None:
+        """Adopt a new schedule section, disarming whatever was armed before."""
+        config = self._config_helper.get_config() or {}
+        await self.scheduler.reload(config.get("schedule") or [])
+        # A device that started with no schedules never started the supervisor.
+        await self.scheduler.start()
+
+    def _reload_location(self) -> None:
+        """Adopt new coordinates and drop every cached sun answer.
+
+        Cheap enough to be synchronous: the provider recomputes lazily, so this
+        is a configure call and three cache clears.
+        """
+        config = self._config_helper.get_config() or {}
+        self.sun.configure(config.get("location"))
+        # Coordinates may have just appeared, in which case the sun sensors
+        # were never built. Existing ones need nothing: they read the provider
+        # on every update, so new coordinates reach them by themselves.
+        self.sensors.configure_sun_sensors()
+
+    async def _reload_mqtt_credentials(self) -> None:
+        """Adopt new broker credentials without a restart.
+
+        Host, port, username, password and TLS only. The rest of the mqtt section —
+        the topic prefix, Home Assistant discovery, the update channel — is
+        read into entity names and subscriptions all over the application while
+        it starts, and still takes a restart.
+
+        A key the configuration does not carry is left as it is: the broker
+        credentials can also come from the command line, and a reload must not
+        throw those away.
+        """
+        from boneio.const import HOST, PASSWORD, PORT, USERNAME
+
+        config = self._config_helper.get_config() or {}
+        mqtt = config.get(MQTT)
+        if not isinstance(mqtt, dict) or not mqtt:
+            # No broker configured: there is nothing to reconnect to, and
+            # falling through would reconnect on the running values for no
+            # reason at all.
+            return
+
+        buses = getattr(self._message_bus, "buses", [self._message_bus])
+        for bus in buses:
+            reload_credentials = getattr(bus, "reload_credentials", None)
+            if reload_credentials is None:
+                continue
+            await reload_credentials(
+                host=str(mqtt.get(HOST) or bus.host),
+                port=int(mqtt.get(PORT) or bus.port),
+                username=mqtt.get(USERNAME, bus.client_options.get(USERNAME)),
+                password=mqtt.get(PASSWORD, bus.client_options.get(PASSWORD)),
+                tls=mqtt.get("tls"),
+            )
+
     def _reload_logger(self) -> None:
         """Reload logger configuration from config file.
 
@@ -1314,11 +1494,12 @@ class Manager:
 
         _LOGGER.info("Reloading remote devices configuration")
         # Clean up old remote inputs and outputs before reload
+        await self.inputs._remote_registrar.stop()
         self.inputs.unregister_remote_inputs()
         self.unregister_remote_outputs()
         await self.remote_devices.reload(remote_devices_config)
         # Re-register remote inputs and outputs from config
-        self.register_remote_inputs()
+        await self.register_remote_inputs()
         self.register_remote_outputs()
         # Broadcast all input states so frontend picks up new/removed remote inputs
         self.inputs._broadcast_all_input_states()
@@ -1331,13 +1512,16 @@ class Manager:
         but the remote devices themselves didn't change.
         """
         _LOGGER.info("Reloading remote inputs configuration")
+        # Unsubscribe before dropping the objects: a topic that still fires the
+        # previous callbacks would run the old actions alongside the new ones.
+        await self.inputs._remote_registrar.stop()
         self.inputs.unregister_remote_inputs()
-        self.register_remote_inputs()
+        await self.register_remote_inputs()
         # Broadcast all input states so frontend picks up new/removed remote inputs
         self.inputs._broadcast_all_input_states()
         _LOGGER.info("Remote inputs configuration reloaded successfully")
 
-    def register_remote_inputs(self) -> None:
+    async def register_remote_inputs(self) -> None:
         """Register remote inputs from the ``remote_inputs`` config section.
 
         Delegates to :meth:`InputManager.register_remote_inputs`.
@@ -1346,6 +1530,11 @@ class Manager:
         config = self._config_helper.get_config()
         remote_inputs_config = config.get("remote_inputs", [])
         self.inputs.register_remote_inputs(self.remote_devices, remote_inputs_config)
+        # Subscribe here rather than wait for the next MQTT connect: at startup
+        # the broker is usually connected long before remote inputs register,
+        # and the inputs would stay deaf until the connection dropped. Before
+        # the connect the bus only records the listener and subscribes it then.
+        await self.inputs._remote_registrar.start()
 
     # Keep backward-compatible alias
     register_esphome_binary_sensors = register_remote_inputs
@@ -1472,7 +1661,12 @@ class Manager:
                 if output_type == "light":
                     device = self.remote_devices.get_device(device_id)
                     if device is not None:
-                        # WLED: all outputs support brightness
+                        # WLED: all outputs support brightness. Imported here
+                        # rather than at module level: wled pulls aiohttp, which
+                        # is ~2s of imports on a BeagleBone, on the startup path
+                        # of every controller whether or not it has a WLED.
+                        from boneio.core.remote.wled import WLEDRemoteDevice
+
                         if isinstance(device, WLEDRemoteDevice):
                             sup_brightness = True
                         else:
@@ -1656,6 +1850,16 @@ class Manager:
                 - reloaded_sections: List of successfully reloaded sections
                 - failed_sections: List of sections that failed to reload
         """
+        async with self._reload_lock:
+            return await self._reload_config_locked(reload_sections)
+
+    async def reload_inputs_serialized(self) -> None:
+        """Reload inputs without racing a config reload already running."""
+        async with self._reload_lock:
+            await self.inputs.reload_inputs()
+
+    async def _reload_config_locked(self, reload_sections: list[str] | None) -> dict:
+        """Body of :meth:`reload_config`; the caller holds ``_reload_lock``."""
         from boneio.const import BINARY_SENSOR, EVENT_ENTITY
 
         _LOGGER.info("Starting config reload")
@@ -1692,6 +1896,7 @@ class Manager:
             "sensor": self.sensors.reload_dallas_sensors,  # Dallas temperature sensors
             "virtual_energy_sensor": self.sensors.reload_virtual_energy_sensors,  # Virtual energy sensors
             "logger": self._reload_logger,  # Logger configuration
+            MQTT: self._reload_mqtt_credentials,  # Broker host/port/credentials
             "remote_devices": self._reload_remote_devices,  # Remote devices configuration
             "remote_inputs": self._reload_remote_inputs,  # Remote inputs (binary sensors from remote devices)
             "remote_outputs": self._reload_remote_outputs,  # Remote outputs (switches/lights from remote devices)
@@ -1699,6 +1904,9 @@ class Manager:
             "irrigation": self.irrigation.reload_irrigation,  # Irrigation controllers
             "adc": self.sensors.reload_adc_sensors,  # ADC analog sensors
             "areas": lambda: None,  # Areas are already reloaded in reload_config above
+            "location": self._reload_location,  # Coordinates for sun-based features
+            "schedule": self._reload_schedule,  # Time and sun driven schedules
+            "virtual_switch": self._reload_virtual_switches,  # Flags read by conditions
             "oled": self.display.reload_oled,  # OLED display screens, screensaver
         }
 
@@ -1789,6 +1997,12 @@ class Manager:
         _LOGGER.info("Resending all entity states after MQTT reconnect.")
         await self._resend_all_states()
 
+        # Remote inputs carried over MQTT. On every connect, not just the
+        # first: a broker restart drops subscriptions, and an input that
+        # silently stopped following its peer is a fault nobody notices until
+        # the light does not come on.
+        await self.inputs._remote_registrar.start()
+
         # Start template entities (subscribe to MQTT command topics)
         await self.templates.start()
         await self.irrigation.reconnect()
@@ -1812,6 +2026,15 @@ class Manager:
 
         # Resend cover states (send_state now uses retain=True)
         self.covers._broadcast_all_states()
+
+        # Resend virtual switches. A mode nobody can see is a mode nobody
+        # trusts, and a reinstalled broker comes back with no retained set.
+        await self.virtual_switches.republish_states()
+
+        # Binary sensors are retained, so the broker would otherwise keep
+        # serving whatever they were before this boot, however long ago that
+        # was. Read the pins and publish what is true now.
+        self.inputs.resend_binary_sensor_states()
 
         _LOGGER.info(
             "Resent states: %d outputs, %d covers.",
@@ -1866,6 +2089,37 @@ class Manager:
             _LOGGER.error("Part of topic is missing. Not invoking command.")
             return
 
+        # Handle virtual switch commands — this is how Home Assistant flips a
+        # flag. Nothing extra is subscribed for it: the controller already
+        # listens to the whole cmd/+/+/# tree.
+        if msg_type == VIRTUAL_SWITCH and command == "set":
+            target_switch = self.virtual_switches.get(device_id)
+            if target_switch is None:
+                _LOGGER.debug("Virtual switch not found %s.", device_id)
+                return
+            action_from_msg = output_actions.get(message.upper())
+            if action_from_msg:
+                await getattr(target_switch, action_from_msg)()
+            else:
+                _LOGGER.debug("Unknown virtual switch command %s.", message.upper())
+            return
+
+        # Handle schedule enable/disable — the same path the web UI toggle
+        # takes, so a schedule switched off in Home Assistant is switched off
+        # everywhere and survives a restart.
+        if msg_type == SCHEDULE and command == "set":
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is None:
+                _LOGGER.debug("No scheduler to take a command for %s.", device_id)
+                return
+            wanted = message.upper()
+            if wanted not in (ON, OFF):
+                _LOGGER.debug("Unknown schedule command %s.", wanted)
+                return
+            if not scheduler.set_enabled(device_id, wanted == ON):
+                _LOGGER.debug("Schedule not found %s.", device_id)
+            return
+
         # Handle relay/output commands
         if msg_type == OUTPUT and command == "set":
             target_device = self.outputs.get_output(device_id)
@@ -1883,7 +2137,13 @@ class Manager:
         if msg_type == OUTPUT and command == SET_BRIGHTNESS:
             target_device = self.outputs.get_output(device_id)
             if target_device and target_device.output_type != "none" and message != "":
-                brightness_val = int(message)
+                try:
+                    brightness_val = int(message)
+                except ValueError:
+                    _LOGGER.warning(
+                        "Invalid brightness '%s' for output %s.", message, device_id
+                    )
+                    return
                 # Brightness > 0 effectively turns ON — must respect interlock
                 if brightness_val > 0 and hasattr(target_device, "check_interlock") and not target_device.check_interlock():
                     _LOGGER.warning(
@@ -1979,7 +2239,7 @@ class Manager:
         if msg_type == BUTTON and command == "set":
             if device_id == "inputs_reload" and message == "inputs_reload":
                 _LOGGER.info("Reloading events and binary sensors actions")
-                asyncio.create_task(self.inputs.reload_inputs())
+                asyncio.create_task(self.reload_inputs_serialized())
             elif device_id == "cover_reload" and message == "cover_reload":
                 _LOGGER.info("Reloading covers actions")
                 self.covers.reload_covers()

@@ -19,37 +19,62 @@ import ADCForm from '../ADCForm';
 import BoardSensorsForm from '../BoardSensorsForm';
 import RemoteInputForm from '../RemoteInputForm';
 import RemoteOutputForm from '../RemoteOutputForm';
+import VirtualSwitchForm from '../VirtualSwitchForm';
+import ScheduleForm from '../ScheduleForm';
 import InputTypeSwitcher from './InputTypeSwitcher';
+import { pickInputVariantSchema } from '../helpers/inputSchema';
+import type {
+  AreaEntity,
+  BinarySensorEntity,
+  CoverEntity,
+  EventEntity,
+  OutputEntity,
+  RemoteDeviceEntity,
+} from '@/types/config';
+import type { ConfigRecord, JsonSchema } from '@/types/jsonSchema';
+import type { OutputGroupRecord } from '../ActionFields/types';
+
+/**
+ * The item is held here as a ConfigRecord; each form types it (and so its
+ * `onChange`) as its own data shape, so those props are cast per form.
+ */
+type PropsOf<C> = C extends React.ComponentType<infer P> ? P : never;
+
+/** BoardSensorsForm's item has required fields and no index signature, so it
+ *  neither accepts a ConfigRecord nor passes as one; it is cast through
+ *  `ConfigRecord &` (and its `onChange` as taking any object). */
+type BoardSensorData = PropsOf<typeof BoardSensorsForm>['data'];
 
 interface FormRendererProps {
   sectionType: string;
-  editingItem: any;
+  editingItem: ConfigRecord;
   editingIndex: number | null;
-  schema: any;
-  uiSchema?: any;
+  schema: JsonSchema;
+  uiSchema?: ConfigRecord;
   deviceType?: string;
   // Data lists
-  allBinarySensors: any[];
-  allEvents: any[];
-  allOutputs: any[];
-  allOutputGroups: any[];
-  allCovers: any[];
-  allAreas: any[];
-  allSensors: any[];
-  allModbusDevices: any[];
-  allRemoteDevices: any[];
-  allRemoteInputs?: any[];
+  allBinarySensors: BinarySensorEntity[];
+  allEvents: EventEntity[];
+  allOutputs: OutputEntity[];
+  allOutputGroups: OutputGroupRecord[];
+  allCovers: CoverEntity[];
+  allAreas: AreaEntity[];
+  allSensors: ConfigRecord[];
+  allModbusDevices: ConfigRecord[];
+  allRemoteDevices: RemoteDeviceEntity[];
+  allRemoteInputs?: ConfigRecord[];
+  allVirtualSwitches?: ConfigRecord[];
   // Saved snapshots
-  savedOutputs?: any[];
-  savedOutputGroups?: any[];
-  savedCovers?: any[];
+  savedOutputs?: OutputEntity[];
+  savedOutputGroups?: OutputGroupRecord[];
+  savedCovers?: CoverEntity[];
   // Section-specific data
-  value: any[];
+  value: ConfigRecord[];
   interlockGroups: string[];
   availableDallasSensors: { address: string; type: string }[];
   // Callbacks
-  onChange: (item: any) => void;
-  onSave: (e?: any) => void;
+  onChange: (item: ConfigRecord) => void;
+  onSave: () => void;
   onCancel: () => void;
   onValidationChange: (hasErrors: boolean) => void;
   onInterlockGroupCreated: (name: string) => void;
@@ -77,6 +102,7 @@ function inputFormProps(props: FormRendererProps) {
     allAreas: props.allAreas,
     allRemoteDevices: props.allRemoteDevices,
     allRemoteInputs: props.allRemoteInputs || [],
+    allVirtualSwitches: props.allVirtualSwitches || [],
     editingIndex: props.editingIndex,
     onValidationChange: props.onValidationChange,
     attemptedSubmit: props.attemptedSubmit,
@@ -97,6 +123,13 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
   // Merged local inputs — show type switcher + delegate to correct form
   if (sectionType === 'local_inputs') {
     const currentType = editingItem._type === 'binary_sensor' ? 'binary_sensor' : 'event';
+    // local_inputs carries both item schemas — hand each form the one for its own
+    // type, otherwise the binary sensor would be offered the event device classes
+    // (button/doorbell/motion) and the event action types.
+    const formProps = {
+      ...inputFormProps(props),
+      schema: pickInputVariantSchema(schema, currentType),
+    };
     return (
       <div className="space-y-4">
         <InputTypeSwitcher
@@ -105,8 +138,8 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
           onSwitch={props.onChange}
         />
         {currentType === 'binary_sensor'
-          ? <BinarySensorForm {...inputFormProps(props)} />
-          : <EventForm {...inputFormProps(props)} />}
+          ? <BinarySensorForm {...formProps} onChange={props.onChange as PropsOf<typeof BinarySensorForm>['onChange']} />
+          : <EventForm {...formProps} onChange={props.onChange as PropsOf<typeof EventForm>['onChange']} />}
       </div>
     );
   }
@@ -128,7 +161,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
         />
         <RemoteInputForm
           data={editingItem}
-          onChange={props.onChange}
+          onChange={props.onChange as PropsOf<typeof RemoteInputForm>['onChange']}
           onSave={props.onSave}
           onCancel={props.onCancel}
           isNew={props.editingIndex === null}
@@ -139,13 +172,14 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
           allAreas={props.allAreas}
           allRemoteDevices={props.allRemoteDevices}
           allRemoteInputs={props.allRemoteInputs || []}
+          allVirtualSwitches={props.allVirtualSwitches || []}
           allBinarySensors={props.allBinarySensors}
           onValidationChange={props.onValidationChange}
           attemptedSubmit={props.attemptedSubmit}
           savedOutputs={props.savedOutputs}
           savedOutputGroups={props.savedOutputGroups}
           savedCovers={props.savedCovers}
-          initialTab={props.initialTab as any}
+          initialTab={props.initialTab as PropsOf<typeof RemoteInputForm>['initialTab']}
         />
       </div>
     );
@@ -156,7 +190,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
     return (
       <RemoteOutputForm
         data={editingItem}
-        onChange={props.onChange}
+        onChange={props.onChange as PropsOf<typeof RemoteOutputForm>['onChange']}
         isNew={props.editingIndex === null}
         schema={props.schema}
         allAreas={props.allAreas}
@@ -173,10 +207,10 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
 
   switch (sectionType) {
     case 'binary_sensor':
-      return <BinarySensorForm {...inputFormProps(props)} />;
+      return <BinarySensorForm {...inputFormProps(props)} onChange={props.onChange as PropsOf<typeof BinarySensorForm>['onChange']} />;
 
     case 'event':
-      return <EventForm {...inputFormProps(props)} />;
+      return <EventForm {...inputFormProps(props)} onChange={props.onChange as PropsOf<typeof EventForm>['onChange']} />;
 
     case 'output':
       return (
@@ -187,7 +221,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
           onCancel={props.onCancel}
           isNew={editingIndex === null}
           schema={schema}
-          uiSchema={uiSchema}
+          uiSchema={uiSchema as PropsOf<typeof OutputForm>['uiSchema']}
           deviceType={deviceType}
           allOutputs={value}
           allAreas={props.allAreas}
@@ -213,7 +247,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
       return (
         <CoverForm
           data={editingItem}
-          onChange={props.onChange}
+          onChange={props.onChange as PropsOf<typeof CoverForm>['onChange']}
           schema={schema}
           allOutputs={props.allOutputs}
           allAreas={props.allAreas}
@@ -237,7 +271,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
       return (
         <SensorForm
           data={editingItem}
-          onChange={props.onChange}
+          onChange={props.onChange as PropsOf<typeof SensorForm>['onChange']}
           onSave={props.onSave}
           onCancel={props.onCancel}
           isNew={editingIndex === null}
@@ -254,7 +288,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
       return (
         <VirtualEnergySensorForm
           data={editingItem}
-          onChange={props.onChange}
+          onChange={props.onChange as PropsOf<typeof VirtualEnergySensorForm>['onChange']}
           onSave={props.onSave}
           onCancel={props.onCancel}
           isNew={editingIndex === null}
@@ -290,7 +324,7 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
       return (
         <ADCForm
           data={editingItem}
-          onChange={props.onChange}
+          onChange={props.onChange as PropsOf<typeof ADCForm>['onChange']}
           existingItems={value}
           editingIndex={editingIndex}
           allAreas={props.allAreas}
@@ -298,12 +332,58 @@ const FormRenderer: React.FC<FormRendererProps> = (props) => {
         />
       );
 
+    case 'virtual_switch':
+      return (
+        <VirtualSwitchForm
+          data={editingItem as PropsOf<typeof VirtualSwitchForm>['data']}
+          onChange={props.onChange}
+          allOutputs={props.allOutputs}
+          allOutputGroups={props.allOutputGroups}
+          allCovers={props.allCovers}
+          allAreas={props.allAreas}
+          allRemoteDevices={props.allRemoteDevices}
+          allBinarySensors={props.allBinarySensors}
+          allRemoteInputs={props.allRemoteInputs || []}
+          allVirtualSwitches={props.allVirtualSwitches || []}
+          savedOutputs={props.savedOutputs}
+          savedOutputGroups={props.savedOutputGroups}
+          savedCovers={props.savedCovers}
+          existingItems={value as PropsOf<typeof VirtualSwitchForm>['existingItems']}
+          editingIndex={editingIndex}
+          onValidationChange={props.onValidationChange}
+          attemptedSubmit={props.attemptedSubmit}
+        />
+      );
+
+    case 'schedule':
+      return (
+        <ScheduleForm
+          data={editingItem as PropsOf<typeof ScheduleForm>['data']}
+          onChange={props.onChange}
+          allOutputs={props.allOutputs}
+          allOutputGroups={props.allOutputGroups}
+          allCovers={props.allCovers}
+          allAreas={props.allAreas}
+          allRemoteDevices={props.allRemoteDevices}
+          allBinarySensors={props.allBinarySensors}
+          allRemoteInputs={props.allRemoteInputs || []}
+          allVirtualSwitches={props.allVirtualSwitches || []}
+          savedOutputs={props.savedOutputs}
+          savedOutputGroups={props.savedOutputGroups}
+          savedCovers={props.savedCovers}
+          existingItems={value as PropsOf<typeof ScheduleForm>['existingItems']}
+          editingIndex={editingIndex}
+          onValidationChange={props.onValidationChange}
+          attemptedSubmit={props.attemptedSubmit}
+        />
+      );
+
     case 'board_sensors':
       return (
         <BoardSensorsForm
-          data={editingItem}
-          onChange={props.onChange}
-          existingItems={value}
+          data={editingItem as ConfigRecord & BoardSensorData}
+          onChange={props.onChange as (data: object) => void}
+          existingItems={value as (ConfigRecord & BoardSensorData)[]}
           editingIndex={editingIndex}
           onValidationChange={props.onValidationChange}
         />

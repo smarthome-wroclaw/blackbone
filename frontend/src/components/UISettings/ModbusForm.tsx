@@ -3,9 +3,21 @@ import { useTranslation } from '@/hooks/useTranslation';
 import HelpLabel from './components/HelpLabel';
 import SimpleTimePeriodInput from './widgets/SimpleTimePeriodInput';
 
+/** The `modbus` section as edited here (other keys pass through untouched). */
+interface ModbusFormData {
+  [key: string]: unknown;
+  uart?: string;
+  baudrate?: number;
+  stopbits?: number;
+  bytesize?: number;
+  parity?: string;
+  timeout?: string | number;
+  inter_device_delay?: string | number;
+}
+
 interface ModbusFormProps {
-  data: any;
-  onChange: (data: any) => void;
+  data: ModbusFormData;
+  onChange: (data: ModbusFormData) => void;
 }
 
 /**
@@ -14,7 +26,7 @@ interface ModbusFormProps {
  */
 const ModbusForm: React.FC<ModbusFormProps> = ({ data, onChange }) => {
   const { t } = useTranslation();
-  const handleChange = (field: string, value: any) => {
+  const handleChange = (field: string, value: unknown) => {
     onChange({ ...data, [field]: value });
   };
 
@@ -24,7 +36,7 @@ const ModbusForm: React.FC<ModbusFormProps> = ({ data, onChange }) => {
   const uartValue = typeof rawUart === 'string' ? rawUart.toLowerCase() : '';
 
   return (
-    <div className="space-y-4">
+    <div className="stg-cols">
       {/* UART */}
       <div className="form-control">
         <label className="label">

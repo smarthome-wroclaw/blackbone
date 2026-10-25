@@ -1,24 +1,27 @@
 import { useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { WebSocketContext } from '../App';
+import { WebSocketContext } from '@/contexts/WebSocketContext';
 
 import ViewToggle from './ViewToggle';
 import { isInputEvent, InputEvent } from '../hooks/useWebSocket';
 import clsx from 'clsx';
 import { useTranslation } from '../hooks/useTranslation';
+import { useAuth } from '../hooks/useAuth';
 import { copyToClipboard } from '@/utils/clipboard';
 import { FaSortAmountDown, FaSortAlphaDown, FaClock, FaCopy, FaCog, FaWifi, FaBolt, FaGraduationCap } from 'react-icons/fa';
 import { HiSignal } from 'react-icons/hi2';
 import MqttReferenceSheet from '@/components/MqttReferenceSheet';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import EntityInfoCard, { type EntityCardMenuItem } from './entityCard/EntityInfoCard';
+import { InputCardBody } from './entityCard/bodies';
+import { historyFormatters } from './entityCard/format';
+import { historyKey } from '@/utils/entityHistory';
 import EntityCard from './EntityCard';
 import type { EntityData } from './EntityCard';
 import { EntityGrid } from './EntityGrid';
+import GroupByAreaToggle from './GroupByAreaToggle';
+import { useGroupByArea } from '@/hooks/useGroupByArea';
+import { useAreas } from '@/hooks/useAreas';
+import { groupByArea } from '@/utils/groupByArea';
 import QuickActionSheet from '@/components/QuickActionSheet';
 import TeachMode from '@/components/TeachMode';
 
@@ -94,6 +97,7 @@ function InputTypeIcon({ type }: { type: string }) {
 
 export default function InputsView() {
   const { t } = useTranslation();
+  const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const { inputs } = useContext(WebSocketContext);
   const [isGrid, setIsGrid] = useState(() => {
@@ -104,6 +108,8 @@ export default function InputsView() {
     const saved = localStorage.getItem('inputSortMode');
     return (saved as SortMode) || 'name';
   });
+  const areas = useAreas();
+  const [groupedByArea, setGroupedByArea] = useGroupByArea('inputGroupByArea', areas.length > 0);
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const prevInputsRef = useRef<Map<string, { state: string; timestamp: number }>>(new Map());
   const [recentlyChanged, setRecentlyChanged] = useState<Set<string>>(new Set());
@@ -176,19 +182,18 @@ export default function InputsView() {
   // Filter inputs to only include InputState objects
   const validInputs = inputs.filter(isInputEvent);
 
-  // Long press dialog state
-  const [longPressDialog, setLongPressDialog] = useState<{ open: boolean; inputEvent: InputEvent | null }>({
+  // Long-press card. Only the id: the input is looked up on every render,
+  // so the card shows each click as it lands.
+  const [card, setCard] = useState<{ open: boolean; entityId: string | null }>({
     open: false,
-    inputEvent: null
+    entityId: null
   });
+  const cardInput = card.entityId ? validInputs.find(ie => ie.entity_id === card.entityId) ?? null : null;
+  const closeCard = useCallback(() => setCard(prev => ({ ...prev, open: false })), []);
 
   const handleLongPress = useCallback((entity: EntityData) => {
-    // Look up the original InputEvent by entity_id
-    const inputEvent = validInputs.find(ie => ie.entity_id === entity.id);
-    if (inputEvent) {
-      setLongPressDialog({ open: true, inputEvent });
-    }
-  }, [validInputs]);
+    setCard({ open: true, entityId: entity.id });
+  }, []);
 
   // Quick action sheet state
   const [quickAction, setQuickAction] = useState<{ open: boolean; inputEvent: InputEvent | null }>({
@@ -196,22 +201,24 @@ export default function InputsView() {
     inputEvent: null
   });
 
-  const handleOpenQuickAction = useCallback(() => {
-    if (!longPressDialog.inputEvent) return;
-    setQuickAction({ open: true, inputEvent: longPressDialog.inputEvent });
-    setLongPressDialog({ open: false, inputEvent: null });
-  }, [longPressDialog.inputEvent]);
+  // Plain functions, not callbacks: they close over the live `cardInput`, and
+  // the menu they go into is rebuilt on every render anyway.
+  const handleOpenQuickAction = () => {
+    if (!cardInput) return;
+    setQuickAction({ open: true, inputEvent: cardInput });
+    closeCard();
+  };
 
-  const handleGoToSettings = useCallback(() => {
-    if (!longPressDialog.inputEvent) return;
+  const handleGoToSettings = () => {
+    if (!cardInput) return;
     // Use entity_id for filtering instead of name to avoid duplicates
-    const inputId = longPressDialog.inputEvent.entity_id;
-    const isRemote = longPressDialog.inputEvent.state.remote;
+    const inputId = cardInput.entity_id;
+    const isRemote = cardInput.state.remote;
     // Navigate to settings with edit query param
     const section = isRemote ? 'remote_inputs' : 'local_inputs';
     navigate(`/settings/${section}?edit=${encodeURIComponent(inputId)}`);
-    setLongPressDialog({ open: false, inputEvent: null });
-  }, [longPressDialog.inputEvent, navigate]);
+    closeCard();
+  };
 
   // MQTT Reference dialog state
   const [mqttRef, setMqttRef] = useState<{
@@ -221,16 +228,29 @@ export default function InputsView() {
     entityName: string;
   }>({ open: false, entityType: '', entityId: '', entityName: '' });
 
-  const handleOpenMqttRef = useCallback(() => {
-    if (!longPressDialog.inputEvent) return;
+  const handleOpenMqttRef = () => {
+    if (!cardInput) return;
     setMqttRef({
       open: true,
       entityType: 'input',
-      entityId: longPressDialog.inputEvent.entity_id,
-      entityName: longPressDialog.inputEvent.state.name,
+      entityId: cardInput.entity_id,
+      entityName: cardInput.state.name,
     });
-    setLongPressDialog({ open: false, inputEvent: null });
-  }, [longPressDialog.inputEvent]);
+    closeCard();
+  };
+
+  // Behind the card's ⋮.
+  const cardMenu: EntityCardMenuItem[] = [
+    // A quick action writes an input→output binding into the configuration
+    // (POST /api/config/quick-action, admin-only), so a read-only account is
+    // not offered it. The MQTT reference stays: it only describes what
+    // already exists.
+    ...(isAdmin ? [{ key: 'quick', label: t('quick_action.title'), icon: <FaBolt />, onSelect: handleOpenQuickAction }] : []),
+    { key: 'mqtt', label: t('mqtt_reference.button'), icon: <HiSignal />, onSelect: handleOpenMqttRef },
+    // Hidden for a read-only account: the route refuses it, and a button that
+    // leads to "administrators only" is a button that should not have been offered.
+    ...(isAdmin ? [{ key: 'settings', label: t('inputs.go_to_settings'), icon: <FaCog />, onSelect: handleGoToSettings }] : []),
+  ];
 
 
   // Initialize prevInputsRef on first render (to avoid showing toast on page load)
@@ -347,29 +367,53 @@ export default function InputsView() {
     [sortedInputs]
   );
   const hasBothSections = localInputs.length > 0 && remoteInputs.length > 0;
+  const areaGroups = useMemo(
+    () => (groupedByArea ? groupByArea(sortedInputs, (i) => i.state.area, areas) : []),
+    [groupedByArea, sortedInputs, areas],
+  );
+
+  const areaNames = useMemo(() => new Map(areas.map((a) => [a.id, a.name])), [areas]);
+  const areaLabelOf = (area: string | null | undefined) =>
+    groupedByArea ? null : (area ? areaNames.get(area) || area : undefined);
+
+  const renderInputCard = (inputEvent: InputEvent) => (
+    <EntityCard
+      key={inputEvent.entity_id}
+      output={inputToEntity(inputEvent)}
+      isGrid={isGrid}
+      isHighlighted={recentlyChanged.has(inputEvent.entity_id)}
+      onLongPress={handleLongPress}
+      iconSlot={<InputTypeIcon type={inputEvent.state.type} />}
+      actionSlot={<InputStateBadge state={inputEvent.state.state} duration={inputEvent.duration} />}
+      longPressTitle={t('inputs.long_press_to_edit')}
+      areaLabel={areaLabelOf(inputEvent.state.area)}
+    />
+  );
 
   if (validInputs.length === 0) {
     return (
       <div className="container mx-auto p-4">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold">{t('inputs.title')}</h2>
+          <h2 className="text-xl font-bold tracking-tight">{t('inputs.title')}</h2>
         </div>
-        <div>
-          No inputs configured.
+        <div className="text-center py-8 text-base-content/60">
+          {t('inputs.no_inputs')}
         </div>
       </div>)
   }
 
   return (
     <div className="container mx-auto p-4">
-      <div className="card bg-base-200 shadow-xl">
-        <div className="card-body">
+      {/* No panel around the list: the page is a tinted field and the
+          entities are the cards on it. */}
+      <div>
+        <div className="flex flex-col gap-2">
           <div className="flex justify-between items-center mb-4">
-            <h2 className="card-title">{t('inputs.title')}</h2>
+            <h2 className="text-xl font-bold tracking-tight">{t('inputs.title')}</h2>
             <div className="flex items-center gap-2">
               {/* Sort dropdown */}
               <div className="dropdown dropdown-end">
-                <label tabIndex={0} className="btn btn-sm btn-ghost gap-1">
+                <label tabIndex={0} className="btn btn-sm gap-1">
                   {sortMode === 'recent' ? <FaClock /> : <FaSortAlphaDown />}
                   <span className="hidden sm:inline">{t(`inputs.sort_${sortMode}`)}</span>
                   <FaSortAmountDown className="w-3 h-3" />
@@ -393,62 +437,63 @@ export default function InputsView() {
                   </li>
                 </ul>
               </div>
+              {areas.length > 0 && (
+                <GroupByAreaToggle active={groupedByArea} onToggle={setGroupedByArea} />
+              )}
               <ViewToggle isGrid={isGrid} onToggle={handleViewToggle} />
-              {/* Teach Mode button */}
-              <button
-                className="btn btn-sm btn-accent gap-1"
-                onClick={() => setTeachMode(true)}
-                title={t('teach_mode.button_label')}
-              >
-                <FaGraduationCap className="w-4 h-4" />
-                <span className="hidden sm:inline">{t('teach_mode.button_label')}</span>
-              </button>
+              {/* Teach Mode writes input→action bindings into the
+                  configuration (/api/config/quick-action, admin-only), so a
+                  read-only account is not offered it — the same rule as the
+                  quick action in the long-press dialog below. */}
+              {isAdmin && (
+                <button
+                  className="btn btn-sm btn-accent gap-1"
+                  onClick={() => setTeachMode(true)}
+                  title={t('teach_mode.button_label')}
+                >
+                  <FaGraduationCap className="w-4 h-4" />
+                  <span className="hidden sm:inline">{t('teach_mode.button_label')}</span>
+                </button>
+              )}
             </div>
           </div>
 
+          {/* By area: local and remote together, since a room is the point */}
+          {groupedByArea && areaGroups.map((group) => (
+            <EntityGrid
+              key={group.id ?? ''}
+              isGrid={isGrid}
+              title={group.name ?? t('common.without_area')}
+            >
+              {group.items.map(renderInputCard)}
+            </EntityGrid>
+          ))}
+
           {/* Local inputs section */}
-          {localInputs.length > 0 && (
+          {!groupedByArea && localInputs.length > 0 && (
             <>
-              {hasBothSections && (
-                <div className="divider">{t('inputs.local_inputs')}</div>
-              )}
-              <EntityGrid isGrid={isGrid}>
-                {localInputs.map((inputEvent: InputEvent) => (
-                  <EntityCard
-                    key={inputEvent.entity_id}
-                    output={inputToEntity(inputEvent)}
-                    isGrid={isGrid}
-                    isHighlighted={recentlyChanged.has(inputEvent.entity_id)}
-                    onLongPress={handleLongPress}
-                    iconSlot={<InputTypeIcon type={inputEvent.state.type} />}
-                    actionSlot={<InputStateBadge state={inputEvent.state.state} duration={inputEvent.duration} />}
-                    longPressTitle={t('inputs.long_press_to_edit')}
-                  />
-                ))}
+              <EntityGrid
+                isGrid={isGrid}
+                title={hasBothSections ? t('inputs.local_inputs') : null}
+              >
+                {localInputs.map(renderInputCard)}
               </EntityGrid>
             </>
           )}
 
           {/* Remote inputs section */}
-          {remoteInputs.length > 0 && (
+          {!groupedByArea && remoteInputs.length > 0 && (
             <>
-              <div className="divider">
-                <FaWifi className="w-4 h-4 text-purple-400" />
-                {t('inputs.remote_inputs')}
-              </div>
-              <EntityGrid isGrid={isGrid}>
-                {remoteInputs.map((inputEvent: InputEvent) => (
-                  <EntityCard
-                    key={inputEvent.entity_id}
-                    output={inputToEntity(inputEvent)}
-                    isGrid={isGrid}
-                    isHighlighted={recentlyChanged.has(inputEvent.entity_id)}
-                    onLongPress={handleLongPress}
-                    iconSlot={<InputTypeIcon type={inputEvent.state.type} />}
-                    actionSlot={<InputStateBadge state={inputEvent.state.state} duration={inputEvent.duration} />}
-                    longPressTitle={t('inputs.long_press_to_edit')}
-                  />
-                ))}
+              <EntityGrid
+                isGrid={isGrid}
+                title={
+                  <>
+                    <FaWifi className="w-4 h-4 text-purple-400" />
+                    {t('inputs.remote_inputs')}
+                  </>
+                }
+              >
+                {remoteInputs.map(renderInputCard)}
               </EntityGrid>
             </>
           )}
@@ -490,47 +535,21 @@ export default function InputsView() {
         </div>
       )}
 
-      {/* Long press dialog - choose quick action or go to settings */}
-      <Dialog open={longPressDialog.open} onOpenChange={(open) => setLongPressDialog({ open, inputEvent: open ? longPressDialog.inputEvent : null })}>
-        <DialogContent
-          className="bg-base-100 p-0 gap-0 sm:max-w-sm"
+      {/* Long-press card: the input live, its recent events; the rest behind ⋮ */}
+      {cardInput && (
+        <EntityInfoCard
+          open={card.open}
+          onOpenChange={(open) => !open && closeCard()}
+          icon={<InputTypeIcon type={cardInput.state.type} />}
+          title={cardInput.state.name}
+          subtitle={[cardInput.entity_id, cardInput.state.area].filter(Boolean).join(' · ')}
+          menu={cardMenu}
+          historyKey={historyKey('input', cardInput.entity_id)}
+          formatValue={historyFormatters.input(t)}
         >
-          <DialogHeader className="px-5 pt-4 pb-0 sm:pt-5">
-            <DialogTitle className="text-center">
-              {longPressDialog.inputEvent?.state.name}
-            </DialogTitle>
-            <p className="text-xs text-base-content/50 text-center">
-              {longPressDialog.inputEvent?.entity_id}
-            </p>
-          </DialogHeader>
-          <div className="px-5 py-4 space-y-2">
-            {/* Quick Action button */}
-            <button
-              className="btn btn-primary btn-block gap-2 h-14 text-base"
-              onClick={handleOpenQuickAction}
-            >
-              <FaBolt className="w-5 h-5" />
-              {t('quick_action.title')}
-            </button>
-            {/* MQTT Reference button */}
-            <button
-              className="btn btn-outline btn-block gap-2 h-12 text-base"
-              onClick={handleOpenMqttRef}
-            >
-              <HiSignal className="w-5 h-5" />
-              {t('mqtt_reference.button')}
-            </button>
-            {/* Go to settings button */}
-            <button
-              className="btn btn-ghost btn-block gap-2 h-12"
-              onClick={handleGoToSettings}
-            >
-              <FaCog className="w-4 h-4" />
-              {t('inputs.go_to_settings')}
-            </button>
-          </div>
-        </DialogContent>
-      </Dialog>
+          <InputCardBody inputEvent={cardInput} />
+        </EntityInfoCard>
+      )}
 
       {/* MQTT Reference Sheet */}
       <MqttReferenceSheet
@@ -541,15 +560,21 @@ export default function InputsView() {
         entityName={mqttRef.entityName}
       />
 
-      {/* Quick Action Sheet */}
-      <QuickActionSheet
-        open={quickAction.open}
-        onOpenChange={(open) => setQuickAction({ open, inputEvent: open ? quickAction.inputEvent : null })}
-        inputEvent={quickAction.inputEvent}
-      />
+      {/* Both edit the configuration, so neither is mounted for a
+          read-only account — not merely left unopened. */}
+      {isAdmin && (
+        <>
+          {/* Quick Action Sheet */}
+          <QuickActionSheet
+            open={quickAction.open}
+            onOpenChange={(open) => setQuickAction({ open, inputEvent: open ? quickAction.inputEvent : null })}
+            inputEvent={quickAction.inputEvent}
+          />
 
-      {/* Teach Mode dialog */}
-      <TeachMode open={teachMode} onClose={() => setTeachMode(false)} />
+          {/* Teach Mode dialog */}
+          <TeachMode open={teachMode} onClose={() => setTeachMode(false)} />
+        </>
+      )}
     </div>
   );
 }

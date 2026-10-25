@@ -42,6 +42,7 @@ def _load_routes_update_module():
         yaml_util.load_config_from_file = MagicMock()
         yaml_util.load_yaml_file = MagicMock()
         yaml_util.normalize_board_name = MagicMock()
+        yaml_util.normalize_version = MagicMock(side_effect=str)
 
         update_source = sys.modules["boneio.core.update_source"]
         update_source.parse_pypi_package_versions = MagicMock()

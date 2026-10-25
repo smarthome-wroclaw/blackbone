@@ -1,3 +1,4 @@
+import { NoticeCallout } from './ui';
 import React, { useState, useMemo, useEffect } from 'react';
 import axios from '@/api/axios';
 import { FaPlus, FaTrash } from 'react-icons/fa';
@@ -13,6 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import type { JsonSchema } from '@/types/jsonSchema';
 
 // Filter types available in schema
 const FILTER_TYPES = ['offset', 'round', 'multiply', 'filter_out', 'filter_out_greater', 'filter_out_lower'] as const;
@@ -106,7 +108,7 @@ const FilterSection: React.FC<FilterSectionProps> = ({ title, filters, onChange,
           ))}
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="btn btn-outline btn-sm"
             onClick={addFilter}
           >
             <FaPlus className="mr-1" /> {t('modbus.filters.add')}
@@ -117,10 +119,24 @@ const FilterSection: React.FC<FilterSectionProps> = ({ title, filters, onChange,
   );
 };
 
+/** One `modbus_devices` list item as edited here (other keys pass through untouched). */
+interface ModbusDeviceFormData {
+  [key: string]: unknown;
+  id?: string;
+  name?: string;
+  area?: string;
+  address?: number;
+  model?: string;
+  update_interval?: string | number;
+  sensors_filters?: { temperature?: Filter[]; humidity?: Filter[] };
+  data?: { width?: string; length?: string };
+  entity_labels?: Record<string, string>;
+}
+
 interface ModbusDeviceFormProps {
-  data: any;
-  onChange: (data: any) => void;
-  schema?: any;
+  data: ModbusDeviceFormData;
+  onChange: (data: ModbusDeviceFormData) => void;
+  schema?: JsonSchema;
   areas?: Array<{ id: string; name: string }>;
 }
 
@@ -145,17 +161,17 @@ const ModbusDeviceForm: React.FC<ModbusDeviceFormProps> = ({
   const modelOptions = useMemo(() => {
     const modelSchema = schema?.items?.properties?.model;
     if (modelSchema?.enum) {
-      return modelSchema.enum;
+      return modelSchema.enum as string[];
     }
     // Default models if not in schema
     return ['sdm120', 'sdm630', 'cwt', 'liquid-sensor'];
   }, [schema]);
 
-  const updateField = (field: string, value: any) => {
+  const updateField = (field: string, value: unknown) => {
     onChange({ ...data, [field]: value });
   };
 
-  const updateNestedField = (parent: string, field: string, value: any) => {
+  const updateNestedField = (parent: 'sensors_filters' | 'data', field: string, value: unknown) => {
     onChange({
       ...data,
       [parent]: {
@@ -386,9 +402,7 @@ const ModbusDeviceForm: React.FC<ModbusDeviceFormProps> = ({
       {/* Sensor Filters Tab - only for CWT model */}
       {activeTab === 'filters' && showSensorsFilters && (
         <div className="space-y-4">
-          <div className="alert alert-info text-sm">
-            <span>{t('modbus.filters.info')}</span>
-          </div>
+          <NoticeCallout variant="info" message={t('modbus.filters.info')} />
 
           {/* Temperature Filters */}
           <FilterSection
@@ -411,9 +425,7 @@ const ModbusDeviceForm: React.FC<ModbusDeviceFormProps> = ({
       {/* Data Tab - only for liquid-sensor model */}
       {activeTab === 'data' && showDataFields && (
         <div className="space-y-4">
-          <div className="alert alert-info">
-            <span>{t('modbus.data.info')}</span>
-          </div>
+          <NoticeCallout variant="info" message={t('modbus.data.info')} />
 
           <div className="grid grid-cols-2 gap-4">
             {/* Width */}
@@ -452,9 +464,7 @@ const ModbusDeviceForm: React.FC<ModbusDeviceFormProps> = ({
       {/* Entity Labels Tab */}
       {activeTab === 'labels' && (
         <div className="space-y-4">
-          <div className="alert alert-info text-sm">
-            <span>{t('modbus.labels.info')}</span>
-          </div>
+          <NoticeCallout variant="info" message={t('modbus.labels.info')} />
 
           {labelsLoading && (
             <div className="flex justify-center py-4">
@@ -463,9 +473,7 @@ const ModbusDeviceForm: React.FC<ModbusDeviceFormProps> = ({
           )}
 
           {labelsError && (
-            <div className="alert alert-warning text-sm">
-              <span>{labelsError}</span>
-            </div>
+            <NoticeCallout variant="warning" message={labelsError} />
           )}
 
           {!labelsLoading && entities.filter(e => !e.entity_type?.includes('discrete')).length > 0 && (

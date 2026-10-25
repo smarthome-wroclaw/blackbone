@@ -7,13 +7,21 @@ import { useTranslation } from '../../../hooks/useTranslation';
 import { useTableSort } from '@/hooks/useTableSort';
 import TableActions from './TableActions';
 import FilterInput from './FilterInput';
+import { areaMatches } from './areaFilter';
 import MobileCard from './MobileCard';
 import SortableHeader, { ResetSortButton } from './SortableHeader';
 import { Table, Td, Tr, Th, Thead, Tbody } from '@/components/ui/table';
 import ActionDetails, { hasActions } from '../components/ActionDetails';
 import type { BinarySensorEntity, EventEntity, AreaEntity, OutputEntity, CoverEntity } from '@/types/config';
 
-type BinarySensorOrEventEntity = BinarySensorEntity | EventEntity;
+/** A row of this table. Merged views add metadata: `_type` (local_inputs,
+ *  injected during merge), `mode` (remote_inputs, from YAML) and
+ *  `_device_name` (remote_inputs). */
+export type BinarySensorOrEventEntity = (BinarySensorEntity | EventEntity) & {
+  _type?: string;
+  mode?: string;
+  _device_name?: string;
+};
 
 interface RemoteDeviceEntity {
   id: string;
@@ -50,8 +58,8 @@ const BinarySensorEventTable: React.FC<BinarySensorEventTableProps> = ({
 
   // Detect if this is a merged view (local_inputs or remote_inputs).
   // local_inputs use _type metadata (injected during merge), remote_inputs use 'mode' from YAML schema.
-  const isMergedView = items.some((item: any) => item._type || item.mode);
-  const isRemoteView = items.some((item: any) => item._device_name);
+  const isMergedView = items.some((item) => item._type || item.mode);
+  const isRemoteView = items.some((item) => item._device_name);
 
   // Filter items by name or boneio_input
   const filteredItems = useMemo(() => {
@@ -62,20 +70,21 @@ const BinarySensorEventTable: React.FC<BinarySensorEventTableProps> = ({
       .filter(({ item }) => 
         (item.name?.toLowerCase().includes(lowerFilter)) ||
         (item.boneio_input?.toLowerCase().includes(lowerFilter)) ||
-        (item.id?.toLowerCase().includes(lowerFilter))
+        (item.id?.toLowerCase().includes(lowerFilter)) ||
+        areaMatches(item.area, allAreas, lowerFilter)
       );
-  }, [items, filter]);
+  }, [items, filter, allAreas]);
 
   // Sort filtered items
   const sortedItems = useMemo(() => {
     return sortItems(filteredItems, {
-      name: (item: any) => (item.name || '').toLowerCase(),
-      boneio_input: (item: any) => (item.boneio_input || '').toLowerCase(),
-      area: (item: any) => {
+      name: (item) => (item.name || '').toLowerCase(),
+      boneio_input: (item) => (item.boneio_input || '').toLowerCase(),
+      area: (item) => {
         const area = allAreas.find(a => a.id === item.area);
         return (area?.name || item.area || '').toLowerCase();
       },
-      has_actions: (item: any) => hasActions(item),
+      has_actions: (item) => hasActions(item),
     });
   }, [filteredItems, sortItems, allAreas]);
 
@@ -142,9 +151,9 @@ const BinarySensorEventTable: React.FC<BinarySensorEventTableProps> = ({
                 ...(isMergedView ? [{
                   label: t('common.type'),
                   value: (() => {
-                    const itemType = (item as any)._type || (item as any).mode;
-                    if (itemType === 'binary_sensor') return <span className="badge badge-warning badge-xs">{t('sections.binary_sensor')}</span>;
-                    if (itemType === 'event') return <span className="badge badge-primary badge-xs">{t('sections.event')}</span>;
+                    const itemType = item._type || item.mode;
+                    if (itemType === 'binary_sensor') return <span className="badge whitespace-nowrap badge-warning badge-xs">{t('sections.binary_sensor')}</span>;
+                    if (itemType === 'event') return <span className="badge whitespace-nowrap badge-primary badge-xs">{t('sections.event')}</span>;
                     return '–';
                   })(),
                 }] : []),
@@ -204,22 +213,22 @@ const BinarySensorEventTable: React.FC<BinarySensorEventTableProps> = ({
                       {item.name || `${t('array_table_widget.item')} ${originalIndex + 1}`}
                     </Td>
                     <Td className={`uppercase ${itemHasActions ? 'cursor-pointer' : ''}`} onClick={() => itemHasActions && toggleRow(originalIndex)}>
-                      {(item as any).boneio_input?.toUpperCase() || (item as any).id || '-'}
+                      {item.boneio_input?.toUpperCase() || item.id || '-'}
                     </Td>
                     {isMergedView && (
                       <Td>
                         {(() => {
-                          const itemType = (item as any)._type || (item as any).mode;
-                          if (itemType === 'binary_sensor') return <span className="badge badge-warning badge-sm">{t('sections.binary_sensor')}</span>;
-                          if (itemType === 'event') return <span className="badge badge-primary badge-sm">{t('sections.event')}</span>;
+                          const itemType = item._type || item.mode;
+                          if (itemType === 'binary_sensor') return <span className="badge whitespace-nowrap badge-warning badge-sm">{t('sections.binary_sensor')}</span>;
+                          if (itemType === 'event') return <span className="badge whitespace-nowrap badge-primary badge-sm">{t('sections.event')}</span>;
                           return null;
                         })()}
                       </Td>
                     )}
                     {isRemoteView && (
                       <Td>
-                        {(item as any)._device_name && (
-                          <span className="badge badge-accent badge-sm">{(item as any)._device_name}</span>
+                        {item._device_name && (
+                          <span className="badge badge-accent badge-sm">{item._device_name}</span>
                         )}
                       </Td>
                     )}
@@ -242,7 +251,8 @@ const BinarySensorEventTable: React.FC<BinarySensorEventTableProps> = ({
                   </Tr>
                   {isExpanded && itemHasActions && (
                     <tr>
-                      <td colSpan={6 + extraCols} className="p-0">
+                      <td className="w-8 p-2" />
+                      <td colSpan={5 + extraCols} className="pt-0 pb-2">
                         <ActionDetails item={item} allAreas={allAreas} allOutputs={allOutputs} allCovers={allCovers} allRemoteDevices={allRemoteDevices} />
                       </td>
                     </tr>

@@ -16,7 +16,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import SettingsToggleGroup from './widgets/SettingsToggleGroup';
-import type { TemplateSubFormProps, AlarmZone, AlarmOutput, AlarmPin, ZoneInput } from './types/template';
+import { NoticeCallout } from './ui';
+import type { TemplateSubFormProps, AlarmPanelData, AlarmZone, AlarmOutput, AlarmPin, ZoneInput } from './types/template';
 import { ARM_MODE_OPTIONS, OUTPUT_TYPE_OPTIONS } from './types/template';
 
 /**
@@ -25,7 +26,7 @@ import { ARM_MODE_OPTIONS, OUTPUT_TYPE_OPTIONS } from './types/template';
  * Zone-based alarm system with independent zone arming, entry delay,
  * multiple outputs (siren, notification, etc.), and configurable timing.
  */
-const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
+const AlarmPanelForm: React.FC<TemplateSubFormProps<AlarmPanelData>> = ({
   data,
   onChange,
   allOutputs,
@@ -37,7 +38,7 @@ const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>('basic');
 
-  const updateField = (field: string, value: any) => {
+  const updateField = (field: keyof AlarmPanelData, value: AlarmPanelData[keyof AlarmPanelData]) => {
     onChange({ ...data, [field]: value });
   };
 
@@ -107,7 +108,7 @@ const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
     updateZones(zones.filter((_, i) => i !== index));
   };
 
-  const updateZone = (index: number, field: string, value: any) => {
+  const updateZone = (index: number, field: keyof AlarmZone, value: AlarmZone[keyof AlarmZone]) => {
     const newZones = [...zones];
     newZones[index] = { ...newZones[index], [field]: value };
     updateZones(newZones);
@@ -169,11 +170,11 @@ const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
 
   /** Build enriched input list from local binary sensors. */
   const enrichedInputs = allInputs
-    .filter((inp: any) => {
+    .filter((inp) => {
       const id = inp.id || inp.boneio_input || '';
       return Boolean(id);
     })
-    .map((inp: any) => {
+    .map((inp) => {
       const id = inp.id || inp.boneio_input || '';
       const name = inp.name || '';
       const area = inp.area || '';
@@ -183,11 +184,11 @@ const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
 
   /** Build enriched input list from remote inputs (binary sensors from remote devices). */
   const enrichedRemoteInputs = (allRemoteInputs || [])
-    .filter((inp: any) => {
+    .filter((inp) => {
       const id = inp.name || inp.id || '';
       return Boolean(id);
     })
-    .map((inp: any) => {
+    .map((inp) => {
       const id = inp.name || inp.id || '';
       const name = inp.name || '';
       const deviceId = inp.device_id || '';
@@ -397,6 +398,24 @@ const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
                 <label className="label">
                   <span className="label-text-alt text-info">{t('template.alarm_codes_hint')}</span>
                 </label>
+                {/* What the controller does with wrong codes, and the HA entity
+                    that says so — without this nobody learns the entity exists. */}
+                {pinCodes.length > 0 && (
+                  <NoticeCallout
+                    variant="info"
+                    className="mt-2"
+                    title={t('template.code_lock_title')}
+                    message={
+                      <>
+                        <span className="block">{t('template.code_lock_hint')}</span>
+                        <span className="block mt-1">
+                          {t('template.code_lock_entity')}{' '}
+                          <code className="font-mono text-xs">binary_sensor.…_{data.id || '<id>'}_code_lock</code>
+                        </span>
+                      </>
+                    }
+                  />
+                )}
               </div>
 
               {/* Zones */}
@@ -555,7 +574,7 @@ const AlarmPanelForm: React.FC<TemplateSubFormProps> = ({
                                       className={`btn btn-xs ${
                                         zi.on_disconnect === 'trigger'
                                           ? 'btn-error'
-                                          : 'btn-ghost border-base-content/20'
+                                          : ''
                                       }`}
                                       onClick={() => toggleOnDisconnect(zIdx, zi.id)}
                                       title={

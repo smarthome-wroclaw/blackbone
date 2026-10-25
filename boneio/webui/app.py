@@ -14,18 +14,20 @@ from typing import TYPE_CHECKING
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketState
 
 from boneio.components.input import RemoteInputBase
-from boneio.const import COVER, NONE
+from boneio.const import COVER, NONE, VIRTUAL_SWITCH, VIRTUAL_SWITCH
 from boneio.core.auth.migration import migrate_legacy_auth
 from boneio.core.auth.store import UserStore, UserStoreError
 from boneio.core.config import ConfigHelper
+from boneio.core.config.provenance import was_configured_before
 from boneio.core.events import GracefulExit
 from boneio.core.manager import Manager
+from boneio.webui.static_assets import HashedAssets
 from boneio.models import (
     CoverState,
     GroupState,
@@ -39,12 +41,16 @@ from boneio.models.events import (
     GroupEvent,
     InputEvent,
     ModbusDeviceEvent,
+    ModbusStatusEvent,
     OutputEvent,
     SensorEvent,
 )
 from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
 from boneio.webui.security_headers import apply_security_headers
+from boneio.webui import security_events
+from boneio.webui.middleware.csrf import CSRFMiddleware
+from boneio.webui.middleware.proxy import TrustedProxyMiddleware
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
     is_auth_required,
@@ -59,11 +65,12 @@ from boneio.webui.routes import (
     addons_router,
     accounts_router,
     auth_router,
-    caddy_router,
     can_router,
+    caddy_router,
     config_router,
     covers_router,
     dashboard_router,
+    diagnostics_router,
     dev_fake_device_router,
     irrigation_router,
     migrations_router,
@@ -71,19 +78,27 @@ from boneio.webui.routes import (
     onboarding_router,
     mqtt_reference_router,
     mqtt_topics_router,
+    mqtt_tls_router,
     nodered_router,
     outputs_router,
+    os_update_router,
     remote_devices_router,
     schema_router,
     sensors_router,
+    security_router,
+    sun_router,
     system_router,
     templates_router,
     tools_router,
     update_router,
 )
 from boneio.webui.routes import config as config_module
+from boneio.webui.routes.config_core import api_shape
 from boneio.webui.routes import onboarding as onboarding_module
 from boneio.webui.routes import system as system_module
+from boneio.webui.routes import diagnostics as diagnostics_module
+from boneio.webui.routes import mqtt_tls as mqtt_tls_module
+from boneio.webui.routes import security as security_module
 
 # Import WebSocket manager
 from boneio.webui.websocket_manager import WebSocketManager
@@ -140,10 +155,22 @@ class BoneIOApp(FastAPI):
 
 
 # Create FastAPI application
+#
+# The interactive docs are off. AuthMiddleware only gates paths under /api, so
+# /docs, /redoc and /openapi.json sat outside it entirely and answered without
+# a token on a device that otherwise requires one — handing anyone on the
+# network a 150KB map of every route, parameter and schema. Nothing in the
+# product needs them at runtime; a developer can set BONEIO_DEV to get them
+# back.
+_DEV_MODE = bool(os.environ.get("BONEIO_DEV"))
+
 app = BoneIOApp(
     title="BoneIO API",
     description="BoneIO API for managing inputs, outputs, and sensors",
     version=__version__,
+    docs_url="/docs" if _DEV_MODE else None,
+    redoc_url="/redoc" if _DEV_MODE else None,
+    openapi_url="/openapi.json" if _DEV_MODE else None,
 )
 
 
@@ -172,7 +199,8 @@ app.include_router(update_router)
 app.include_router(modbus_router)
 app.include_router(schema_router)
 app.include_router(sensors_router)
-app.include_router(caddy_router)
+app.include_router(security_router)
+app.include_router(diagnostics_router)
 app.include_router(nodered_router)
 app.include_router(onboarding_router)
 app.include_router(can_router)
@@ -182,6 +210,9 @@ app.include_router(tools_router)
 app.include_router(migrations_router)
 app.include_router(mqtt_reference_router)
 app.include_router(mqtt_topics_router)
+app.include_router(mqtt_tls_router)
+app.include_router(os_update_router)
+app.include_router(caddy_router)
 
 if os.environ.get("BONEIO_DEV"):
     app.include_router(dev_fake_device_router)
@@ -197,7 +228,9 @@ from boneio.webui.routes import mqtt_reference as mqtt_reference_module
 from boneio.webui.routes import mqtt_topics as mqtt_topics_module
 from boneio.webui.routes import outputs as outputs_module
 from boneio.webui.routes import remote_devices as remote_devices_module
+from boneio.webui.routes import schedule as schedule_module
 from boneio.webui.routes import sensors as sensors_module
+from boneio.webui.routes import sun as sun_module
 from boneio.webui.routes import templates as templates_module
 from boneio.webui.routes import tools as tools_module
 from boneio.webui.routes import update as update_module
@@ -274,11 +307,27 @@ def add_all_websocket_listeners(boneio_manager: Manager):
         target=boneio_state_changed_callback,
     )
 
+    # Schedule events (ran, re-planned, switched on or off)
+    boneio_manager.event_bus.add_event_listener(
+        event_type="schedule",
+        entity_id="",
+        listener_id="ws_schedule_global",
+        target=boneio_state_changed_callback,
+    )
+
     # Modbus device events
     boneio_manager.event_bus.add_event_listener(
         event_type="modbus_device",
         entity_id="",
         listener_id="ws_modbus_global",
+        target=boneio_state_changed_callback,
+    )
+
+    # Modbus device status (a device starts or stops failing)
+    boneio_manager.event_bus.add_event_listener(
+        event_type="modbus_status",
+        entity_id="",
+        listener_id="ws_modbus_status_global",
         target=boneio_state_changed_callback,
     )
 
@@ -298,7 +347,34 @@ def remove_all_websocket_listeners(boneio_manager: Manager):
     boneio_manager.event_bus.remove_event_listener(event_type="cover", listener_id="ws_cover_global")
     boneio_manager.event_bus.remove_event_listener(event_type="input", listener_id="ws_input_global")
     boneio_manager.event_bus.remove_event_listener(event_type="modbus_device", listener_id="ws_modbus_global")
+    boneio_manager.event_bus.remove_event_listener(event_type="modbus_status", listener_id="ws_modbus_status_global")
     boneio_manager.event_bus.remove_event_listener(event_type="sensor", listener_id="ws_sensor_global")
+    boneio_manager.event_bus.remove_event_listener(event_type="schedule", listener_id="ws_schedule_global")
+
+
+async def broadcast_initial_states(boneio_manager: Manager) -> None:
+    """Push the current state of every entity to every connected panel.
+
+    The same payloads a client receives when its socket opens, sent to the
+    clients that are already connected. Used after a configuration reload,
+    where the panels have just been told to clear the sections being reloaded
+    and have nothing to refill them with.
+
+    Never raises: a panel that has gone away must not turn a successful reload
+    into a failed request.
+
+    Args:
+        boneio_manager: Manager holding the entities to describe.
+    """
+    manager = getattr(app.state, "websocket_manager", None)
+    if manager is None:
+        return
+
+    for websocket in list(manager.active_connections):
+        try:
+            await send_initial_states(websocket, boneio_manager)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Could not send states to a panel: %s", err)
 
 
 # ============================================================================
@@ -404,6 +480,29 @@ async def send_initial_states(
             except Exception as e:
                 _LOGGER.error(f"Error preparing output state: {type(e).__name__} - {e}")
 
+        # Send virtual switches. They travel the output channel because to a
+        # viewer they are the same shape of thing — a name that is on or off —
+        # and `type` tells the panel to group them separately.
+        for switch in boneio_manager.virtual_switches.all():
+            try:
+                update = OutputEvent(
+                    entity_id=switch.id,
+                    state=OutputState(
+                        id=switch.id,
+                        name=switch.name,
+                        state=switch.state,
+                        type=VIRTUAL_SWITCH,
+                        expander_id=None,
+                        pin=None,
+                        timestamp=switch.last_timestamp,
+                        area=switch.area,
+                    ),
+                )
+                if not await send_state_update(update):
+                    return False
+            except Exception as e:
+                _LOGGER.error(f"Error preparing virtual switch state: {type(e).__name__} - {e}")
+
         # Send output groups
         for group in boneio_manager.outputs.get_all_output_groups().values():
             try:
@@ -413,6 +512,7 @@ async def send_initial_states(
                     state=group.state,
                     type=group.output_type,
                     timestamp=getattr(group, "last_timestamp", None),
+                    area=getattr(group, "area", None),
                 )
                 update = GroupEvent(entity_id=group.id, state=group_state)
                 if not await send_state_update(update):
@@ -431,6 +531,7 @@ async def send_initial_states(
                     kind=cover.kind,
                     timestamp=cover.last_timestamp,
                     current_operation=cover.current_operation,
+                    area=getattr(cover, "area", None),
                 )
                 if getattr(cover, "kind", None) == "venetian":
                     cover_state.tilt = getattr(cover, "tilt", 0)
@@ -444,6 +545,10 @@ async def send_initial_states(
         for modbus_coordinator in boneio_manager.modbus.get_all_coordinators().values():
             if not modbus_coordinator:
                 continue
+            if not await send_state_update(
+                ModbusStatusEvent(entity_id=modbus_coordinator._id, failing=modbus_coordinator.failing)
+            ):
+                return False
             for entities in modbus_coordinator.get_all_entities():
                 for entity in entities.values():
                     try:
@@ -456,6 +561,7 @@ async def send_initial_states(
                             timestamp=entity.last_timestamp,
                             device_group=modbus_coordinator.name,
                             coordinator_id=modbus_coordinator._id,
+                            area=modbus_coordinator._area,
                             step=getattr(entity, "step", None),
                         )
                         update = ModbusDeviceEvent(entity_id=entity.id, state=sensor_state)
@@ -479,6 +585,7 @@ async def send_initial_states(
                             timestamp=entity.last_timestamp if hasattr(entity, "last_timestamp") else None,
                             device_group=modbus_coordinator.name,
                             coordinator_id=modbus_coordinator._id,
+                            area=modbus_coordinator._area,
                             entity_type=entity.entity_type,
                             x_mapping=value_mapping,
                             payload_on=payload_on,
@@ -767,10 +874,18 @@ def init_app(
     allow_anonymous = bool(auth_config.get("allow_anonymous")) or dev_mode
     set_allow_anonymous(allow_anonymous)
 
+    # An incomplete_legacy_auth block still indicates an upgraded device.
+    # set_configured_before records that legacy web.auth existed, even if its credentials need migration.
     auth_required = is_auth_required()
 
     # Set app state
     app.state.manager = manager
+    # Password guessing and the sessions signed out for it go to Home
+    # Assistant through the manager's MQTT link.
+    security_alert = getattr(manager, "security_alert", None)
+    security_events.set_publisher(
+        security_alert.publish_event if security_alert is not None else None
+    )
     app.state.auth_config = auth_config
     app.state.yaml_config_file = yaml_config_file
     app.state.web_server = web_server
@@ -782,7 +897,12 @@ def init_app(
     # Configure route modules with app state
     config_module.set_app_state(app.state)
     config_module.set_websocket_manager(app.state.websocket_manager)
+    config_module.set_state_broadcaster(broadcast_initial_states)
     system_module.set_app_state(app.state)
+    security_module.set_app_state(app.state)
+    security_module.warm_system_state()
+    diagnostics_module.set_app_state(app.state)
+    mqtt_tls_module.set_app_state(app.state)
 
     # Pre-populate config cache if initial_config provided
     if initial_config is not None:
@@ -791,7 +911,7 @@ def init_app(
         # earlier use in init_app raises UnboundLocalError.
         from boneio.webui.routes.config import _config_cache, _get_config_mtime
 
-        _config_cache["data"] = initial_config
+        _config_cache["data"] = api_shape(initial_config)
         _config_cache["mtime"] = _get_config_mtime(yaml_config_file)
         _LOGGER.info("Config cache pre-populated from initial_config")
 
@@ -857,6 +977,11 @@ def init_app(
         ]
         _LOGGER.info("CORS: dev mode — allowing origins: %s", cors_origins)
 
+    # Refuses cross-site state changes, trusting exactly the origins CORS
+    # trusts. Added before CORS so CORS ends up outermost and its headers are
+    # still attached to the refusal, which is what lets the browser show it.
+    app.add_middleware(CSRFMiddleware, allowed_origins=cors_origins)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -882,6 +1007,10 @@ def init_app(
 
     # Add GZip compression
     app.add_middleware(GZipMiddleware, minimum_size=500)
+
+    # Last added runs first: the real client address has to be in place before
+    # anything reads it — the login throttle, the logs, the auth middleware.
+    app.add_middleware(TrustedProxyMiddleware)
 
     return app
 
@@ -960,22 +1089,29 @@ if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
+    #: FastAPI's own schema and docs routes. In dev mode they are registered
+    #: ahead of this catch-all and answer first; otherwise nothing should.
+    _API_DOC_PATHS = frozenset(
+        {"docs", "docs/oauth2-redirect", "redoc", "openapi.json", "openapi.yaml"}
+    )
+
     @app.get("/{filename:path}")
     async def serve_react_app(filename: str):
         """Serve static files from frontend-dist, fallback to index.html for SPA routing.
 
-        Hashed assets (in /assets/) are immutable and cached long-term.
-        index.html (SPA fallback) is never cached to prevent stale versions
-        being served through Cloudflare Tunnel or other caching proxies.
+        Hashed assets never get here: the /assets mount (HashedAssets) serves
+        them. index.html (SPA fallback) is never cached to prevent stale
+        versions being served through Cloudflare Tunnel or other caching proxies.
         """
+        # Matched loosely — a trailing slash or capitals reach the same
+        # fallback, and a scanner tries both.
+        if filename.strip("/").lower() in _API_DOC_PATHS:
+            # The schema is off outside dev mode, and these names answering
+            # with the panel's index.html read to a scanner as an exposed API
+            # schema. Saying "not here" is the truth.
+            return Response(status_code=404)
         file_path = (FRONTEND_DIR / filename).resolve()
         if filename and file_path.is_relative_to(FRONTEND_DIR.resolve()) and file_path.exists() and file_path.is_file():
-            # Hashed assets can be cached forever
-            if filename.startswith("assets/"):
-                return FileResponse(
-                    str(file_path),
-                    headers={"Cache-Control": "public, max-age=31536000, immutable"},
-                )
             return FileResponse(str(file_path))
         # SPA fallback — never cache index.html
         return FileResponse(

@@ -1,4 +1,5 @@
 import React, { useRef, ReactNode, useEffect, useState } from 'react';
+import { ChevronsUpDown } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -51,11 +52,18 @@ function useIsDesktop() {
  *
  * Shows a fixed bar at the bottom of the screen with a drag handle,
  * icon, and label. Supports:
- * - Tap to expand/collapse
- * - Swipe up on the bar to expand
+ * - Tap to expand
  * - Swipe down on the sheet header to collapse
  *
+ * The bar opens on a tap only. It sits where the thumb scrolls the page, so
+ * a swipe up on it opened the sheet by accident, and blocking touch scrolling
+ * there to tell the two apart made the page hard to scroll.
+ *
  * Only renders on mobile (hidden on lg+).
+ *
+ * From `sm` up the Dialog opens as a centred modal, not a sheet, so the bar
+ * drops its drag handle there and shows a picker chevron instead — a handle
+ * promises something that slides up out of the bar, and nothing does.
  *
  * @example
  * ```tsx
@@ -94,15 +102,12 @@ export function BottomPeekBar({
     touchStartY.current = e.touches[0].clientY;
   };
 
-  /** Handle touch move — detect swipe direction and trigger open/close. */
-  const handleTouchMove = (e: React.TouchEvent, direction: 'up' | 'down') => {
+  /** Handle touch move — a swipe down on the sheet header closes it. */
+  const handleTouchMove = (e: React.TouchEvent) => {
     if (touchStartY.current === null) return;
     const dy = touchStartY.current - e.touches[0].clientY;
 
-    if (direction === 'up' && dy > SWIPE_THRESHOLD) {
-      touchStartY.current = null;
-      onOpenChange(true);
-    } else if (direction === 'down' && dy < -SWIPE_THRESHOLD) {
+    if (dy < -SWIPE_THRESHOLD) {
       touchStartY.current = null;
       onOpenChange(false);
     }
@@ -120,34 +125,37 @@ export function BottomPeekBar({
     <div className="lg:hidden">
       {/* Fixed bottom peek bar */}
       <div
-        className="fixed bottom-0 inset-x-0 z-40 safe-area-bottom touch-none"
-        onTouchStart={handleTouchStart}
-        onTouchMove={(e) => handleTouchMove(e, 'up')}
-        onTouchEnd={handleTouchEnd}
+        // Sits on top of the app's bottom navigation, which below xl is always
+        // there and already pads for the iOS home indicator. The wrapper lets
+        // touches through, so the gradient above the bar does not catch them;
+        // only the bar itself takes them.
+        className="fixed inset-x-0 z-40 pointer-events-none"
+        style={{ bottom: 'var(--bottom-nav-h, 0px)' }}
       >
         {/* Top shadow gradient */}
-        <div className="h-6 bg-gradient-to-t from-base-200/95 to-transparent pointer-events-none" />
+        <div className="h-6 bg-gradient-to-t from-base-200/95 to-transparent" />
         <button
           type="button"
           onClick={() => onOpenChange(true)}
-          className="w-full bg-base-200/95 backdrop-blur-sm border-t border-base-content/10 active:bg-base-300 transition-colors"
+          className="pointer-events-auto w-full bg-base-200/95 backdrop-blur-sm border-t border-base-content/10 active:bg-base-300 transition-colors"
         >
-          {/* Drag handle */}
-          <div className="flex justify-center pt-2">
+          {/* Drag handle — phones only, where the sheet really slides up */}
+          <div className="flex justify-center pt-2 sm:hidden">
             <div className="w-8 h-1 rounded-full bg-base-content/20" />
           </div>
           {/* Content */}
-          <div className={`flex items-center justify-center gap-2.5 px-4 py-2 ${actions ? 'pb-1' : 'pb-3'}`}>
+          <div className={`flex items-center justify-center gap-2.5 px-4 py-2 sm:pt-3 ${actions ? 'pb-1' : 'pb-3'}`}>
             {icon && <span className="text-lg">{icon}</span>}
             <span className="font-semibold text-sm text-base-content truncate">
               {label}
             </span>
             {indicator}
+            <ChevronsUpDown aria-hidden className="hidden sm:block w-4 h-4 shrink-0 text-base-content/40" />
           </div>
         </button>
         {/* Action buttons (e.g. Save/Restore) */}
         {actions && (
-          <div className="bg-base-200/95 backdrop-blur-sm px-3 pb-3 flex gap-2">
+          <div className="pointer-events-auto bg-base-200/95 backdrop-blur-sm px-3 pb-3 flex gap-2">
             {actions}
           </div>
         )}
@@ -160,7 +168,7 @@ export function BottomPeekBar({
           <div
             className="touch-none cursor-grab active:cursor-grabbing"
             onTouchStart={handleTouchStart}
-            onTouchMove={(e) => handleTouchMove(e, 'down')}
+            onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
           >
             {/* Drag handle */}

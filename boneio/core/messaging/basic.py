@@ -55,8 +55,22 @@ class MessageBus(ABC):
         pass
 
     @abstractmethod
-    async def subscribe_and_listen(self, topic: str, callback: Callable[[str, str], Awaitable[None]]) -> None:
-        """Subscribe to a topic and listen for messages."""
+    async def subscribe_and_listen(
+        self,
+        topic: str,
+        callback: Callable[..., Awaitable[None]],
+        *,
+        retain_aware: bool = False,
+    ) -> None:
+        """Subscribe to a topic and listen for messages.
+
+        Args:
+            topic: Topic to subscribe to.
+            callback: Called as ``callback(topic, payload)``.
+            retain_aware: Also pass ``retained=`` — True when the broker is
+                replaying a stored message on subscribe rather than forwarding
+                a live one. Buses without retained messages always pass False.
+        """
         pass
 
     @abstractmethod
@@ -64,6 +78,9 @@ class MessageBus(ABC):
         """Unsubscribe from a topic and stop listening."""
         pass
 
-    async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
-        """Temporarily observe topics matching a filter, if supported."""
-        return []
+    async def wait_until_subscribed(self) -> None:
+        """Return once the broker holds this bus's subscriptions.
+
+        Until then a retained message cannot have arrived yet, so its absence
+        means nothing. Buses without a broker return at once.
+        """

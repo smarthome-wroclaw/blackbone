@@ -1,39 +1,31 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import { createContext, useEffect, useRef, useState, lazy, Suspense } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { getRouterBasename } from './api/basePath';
 
 // Lazy-load all route-level components for code splitting.
 // Only Layout, auth, and context providers are eagerly loaded since they're
 // needed on every page. Everything else loads on-demand when the route is visited.
 const lazyImports = {
-  ConfigEditor: () => import('./components/ConfigEditor'),
-  LogViewer: () => import('./components/LogViewer'),
+  DiagnosticsView: () => import('./components/DiagnosticsView'),
   OutputsView: () => import('./components/OutputsView'),
   InputsView: () => import('./components/InputsView'),
   SensorView: () => import('./components/SensorView'),
   ModbusView: () => import('./components/ModbusView'),
-  Tools: () => import('./components/Tools'),
   HelpView: () => import('./components/HelpView'),
   UISettings: () => import('./components/UISettings/UISettings'),
-  SystemState: () => import('./components/UISettings/SystemState'),
   NodeRedView: () => import('./components/NodeRedView'),
   TemplatesView: () => import('./components/TemplatesView'),
-  AddonsView: () => import('./components/AddonsView'),
 } as const;
 
-const ConfigEditor = lazy(lazyImports.ConfigEditor);
-const LogViewer = lazy(lazyImports.LogViewer);
+const DiagnosticsView = lazy(lazyImports.DiagnosticsView);
 const OutputsView = lazy(lazyImports.OutputsView);
 const InputsView = lazy(lazyImports.InputsView);
 const SensorView = lazy(lazyImports.SensorView);
 const ModbusView = lazy(lazyImports.ModbusView);
-const Tools = lazy(lazyImports.Tools);
 const HelpView = lazy(lazyImports.HelpView);
 const UISettings = lazy(lazyImports.UISettings);
-const SystemState = lazy(lazyImports.SystemState);
 const NodeRedView = lazy(lazyImports.NodeRedView);
 const TemplatesView = lazy(lazyImports.TemplatesView);
-const AddonsView = lazy(lazyImports.AddonsView);
 
 /**
  * Prefetch all lazy route chunks in the background after initial render.
@@ -45,16 +37,14 @@ function prefetchRouteChunks() {
   const schedule = window.requestIdleCallback || ((cb: () => void) => setTimeout(cb, 100));
   // Prefetch everything except ConfigEditor (Monaco is too large)
   const toPrefetch = [
+    lazyImports.OutputsView,
     lazyImports.InputsView,
     lazyImports.SensorView,
     lazyImports.ModbusView,
     lazyImports.UISettings,
-    lazyImports.LogViewer,
-    lazyImports.Tools,
+    lazyImports.DiagnosticsView,
     lazyImports.TemplatesView,
-    lazyImports.AddonsView,
     lazyImports.HelpView,
-    lazyImports.SystemState,
     lazyImports.NodeRedView,
   ];
   // Stagger imports so they don't all fire at once
@@ -67,48 +57,85 @@ function prefetchRouteChunks() {
 
 import LoginView from './components/LoginView';
 import OnboardingWizard from './components/OnboardingWizard';
+import SecurityUpdatePrompt from './components/SecurityUpdatePrompt';
 import Layout from './components/Layout';
-import { useWebSocket, StateUpdate, isCoverEvent, InputEvent, OutputEvent, SensorEvent, CoverEvent, ModbusDeviceEvent, GroupEvent, isOutputEvent, isGroupEvent, isConfigReloadEvent } from './hooks/useWebSocket';
+import { useWebSocket, requestStateResync, StateUpdate, isCoverEvent, InputEvent, OutputEvent, SensorEvent, CoverEvent, ModbusDeviceEvent, GroupEvent, isOutputEvent, isGroupEvent, isConfigReloadEvent } from './hooks/useWebSocket';
 import { AuthProvider, useAuth } from './hooks/useAuth';
+import { useTranslation } from './hooks/useTranslation';
+import { NoticeCallout, SettingsPage } from './components/UISettings/ui';
 import { AppInitProvider, useAppInit } from './contexts/AppInitContext';
 import NotAvailable from './components/NotAvailable';
+import UpdateFailedNotice from './components/UpdateFailedNotice';
+import ReauthDialog from './components/ReauthDialog';
 import { ConfigProvider } from './contexts/ConfigContext';
+import { WebSocketContext } from './contexts/WebSocketContext';
 import { TranslationProvider } from './contexts/TranslationContext';
 import { appendModbusHistoryPointToStorage, clearModbusHistoryStorage } from './hooks/useModbusHistory';
+import { recordFromStateUpdate } from './utils/entityHistory';
+import { readProvisioningHint } from '@/utils/provisioning';
 
-export const WebSocketContext = createContext<{
-  outputs: OutputEvent[];
-  inputs: InputEvent[];
-  sensors: SensorEvent[];
-  modbus_devices: ModbusDeviceEvent[];
-  covers: CoverEvent[];
-  groups: GroupEvent[];
-}>({
-  outputs: [],
-  inputs: [],
-  sensors: [],
-  modbus_devices: [],
-  covers: [],
-  groups: [],
-});
+/**
+ * Gate for an authenticated route, optionally an administrator-only one.
+ *
+ * `adminOnly` exists because hiding a navigation entry is not the same as
+ * closing a route. The Settings entry has always been hidden from a viewer,
+ * but the route stayed reachable — by a bookmark, by the /config and /system
+ * redirects that land on a settings section, and by the "edit in settings"
+ * shortcut behind a long press on an output, an input, a template, a Modbus
+ * device or an irrigation controller. Six call sites, and a seventh whenever
+ * somebody adds one; the durable place to decide is here.
+ *
+ * Every write behind Settings is refused by the auth middleware regardless, so
+ * this is not what keeps a viewer from changing the configuration. It keeps
+ * them from being handed a workspace whose every save fails.
+ */
+function ProtectedRoute({
+  children,
+  adminOnly = false,
+}: {
+  children: React.ReactNode;
+  adminOnly?: boolean;
+}) {
+  const { isAuthenticated, isLoading: authLoading, isAuthRequired, isAdmin, role } = useAuth();
+  const { isApiAvailable, isLoading: initLoading, needsOnboarding, panelState } = useAppInit();
 
-// Protected route component
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading: authLoading, isAuthRequired } = useAuth();
-  const { isApiAvailable, isLoading: initLoading, needsOnboarding } = useAppInit();
+  // Read once per mount: the value cannot change while this render tree lives,
+  // and touching localStorage on every render would be pure waste.
+  const [showShellWhileLoading] = useState(() =>
+    readProvisioningHint(window.localStorage, window.__BONEIO_BASE_PATH__),
+  );
 
-  // API confirmed unavailable after retries — show error screen
-  if (!isApiAvailable && !initLoading) {
+  // API confirmed unavailable after retries, or a panel the service worker
+  // kept from before an update: say so instead of rendering it.
+  //
+  // Not over the first-run wizard. Its PWA step recreates Caddy, which with
+  // web.expose: proxy is the only way in, so the API is expected to vanish
+  // for half a minute — and swapping the wizard out for this screen unmounted
+  // it, so it came back at its welcome step with everything it knew gone.
+  // The wizard waits that window out itself.
+  if ((!isApiAvailable && !initLoading && !needsOnboarding) || panelState === 'stale_panel') {
     return <NotAvailable />
   }
 
-  // Still loading init data or auth — show spinner inside layout shell
+  // Still loading init data or auth — show a spinner.
+  //
+  // Inside the layout shell only for a device this browser has seen
+  // provisioned: the navigation is what the user is waiting for, so drawing it
+  // straight away reads as speed. On a device that may still need onboarding
+  // the same shell reads as the app flashing up and being snatched away, so
+  // that case gets a bare spinner on the wizard's own background instead.
   if (initLoading || authLoading) {
+    const spinner = <span className="loading loading-spinner loading-lg text-primary"></span>;
+
+    if (!showShellWhileLoading) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-base-100">{spinner}</div>
+      );
+    }
+
     return (
       <Layout>
-        <div className="flex items-center justify-center h-full min-h-[60vh]">
-          <span className="loading loading-spinner loading-lg text-primary"></span>
-        </div>
+        <div className="flex items-center justify-center h-full min-h-[60vh]">{spinner}</div>
       </Layout>
     );
   }
@@ -127,8 +154,47 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   if (!isAuthenticated && isAuthRequired) {
     return <LoginView />
   }
-  
+
+  if (adminOnly && isAuthRequired) {
+    // isLoading goes false as soon as the token is accepted, but the role
+    // arrives one request later — AuthProvider fires /api/account/me without
+    // awaiting it. So "not an admin" and "not known yet" look identical from
+    // isAdmin alone, and an administrator would be told they are not one for
+    // as long as that round trip takes. On a controller over the network that
+    // is long enough to read.
+    if (role === null) {
+      return (
+        <Layout>
+          <div className="flex items-center justify-center h-full min-h-[60vh]">
+            <span className="loading loading-spinner loading-lg text-primary"></span>
+          </div>
+        </Layout>
+      );
+    }
+    if (!isAdmin) {
+      return (
+        <Layout>
+          <AdminOnlyNotice />
+        </Layout>
+      );
+    }
+  }
+  // When auth is not required at all the middleware enforces no roles either,
+  // so there is nobody to refuse.
+
   return <>{children}</>;
+}
+
+/** Says why a page is empty, rather than drawing one that cannot work. */
+function AdminOnlyNotice() {
+  const { t } = useTranslation();
+  return (
+    <div className="settings-scope stg-canvas h-full overflow-y-auto p-4 sm:p-6 lg:p-8">
+      <SettingsPage width="wide">
+        <NoticeCallout variant="warning" message={t('settings.admin_only')} />
+      </SettingsPage>
+    </div>
+  );
 }
 
 function AppContent() {
@@ -139,7 +205,7 @@ function AppContent() {
   const [covers, setCovers] = useState<CoverEvent[]>([]);
   const [groups, setGroups] = useState<GroupEvent[]>([]);
   const { isAuthenticated, isAuthRequired } = useAuth();
-  const { isApiAvailable } = useAppInit();
+  const { isApiAvailable, panelState } = useAppInit();
   const { error, addMessageListener, addConnectionStateListener } = useWebSocket();
 
   // Select all text in number inputs on focus for better mobile UX.
@@ -173,21 +239,35 @@ function AppContent() {
     };
   }, []);
 
-  // Listen to WebSocket connection state changes and request state resync on reconnect
-  // Note: Initial state is sent automatically by backend on WebSocket connect
-  // This handles reconnection scenarios where we need to resync
+  // Ask for the full state every time the socket comes up.
+  //
+  // The backend does send it on connect, and this listener used to just log
+  // that fact — which is why signing in left every view empty until a reload.
+  // Entity state only ever arrives in that one burst: nothing polls, and the
+  // views read it straight out of WebSocketContext. Miss the burst and the
+  // app shows an empty controller with no way back except F5.
+  //
+  // There are several ways to miss it. Logging in is the reliable one: the
+  // socket is deliberately not opened while unauthenticated, so it connects
+  // on the transition, in the same commit that swaps the login screen for the
+  // app — and anything that delays this component's handler past the server's
+  // first messages loses them. A dropped Wi-Fi link and a service restart are
+  // the same shape.
+  //
+  // Asking again on every connect costs one message and makes the question
+  // moot: whatever the burst did or did not deliver, the client asks for the
+  // truth once it is listening. `request_state` is exactly what the backend
+  // offers for this (see send_initial_states in webui/app.py).
   useEffect(() => {
     if (!isAuthenticated && isAuthRequired) return;
     if (!isApiAvailable) return;
-    
+
     const unsubscribe = addConnectionStateListener((connected) => {
       if (connected) {
-        // Backend sends initial state on connect, but for reconnects we may need to request it
-        // The backend will send all states via WebSocket messages
-        console.log('WebSocket connected/reconnected');
+        requestStateResync();
       }
     });
-    
+
     return unsubscribe;
   }, [addConnectionStateListener, isAuthenticated, isAuthRequired, isApiAvailable]);
 
@@ -213,8 +293,19 @@ function AppContent() {
       return;
     }
 
+    // Now that this component is listening again, ask for the whole picture.
+    //
+    // The socket may already have been open when this became true — signing
+    // in is exactly that case — in which case the burst the server sends on
+    // connect has been and gone while the handler was still null. Asking here
+    // means "I am listening now, send me everything", independent of which
+    // happened first, the connection or the sign-in.
+    requestStateResync();
+
     // Set the handler that the stable listener will delegate to
     messageHandlerRef.current = (message: StateUpdate) => {
+      // The long-press card's event list: the same stream, filtered by entity.
+      recordFromStateUpdate(message);
       if (isOutputEvent(message)) {
         setOutputs(prev => {
           const index = prev.findIndex(o => o.entity_id === message.entity_id);
@@ -315,10 +406,19 @@ function AppContent() {
           return [...prev, message];
         });
       } else if (isConfigReloadEvent(message)) {
-        // Config was reloaded - clear old states
-        // New states will be sent by backend after reload
+        // Config was reloaded — drop the old states.
+        //
+        // The device sends the new ones once the reload finishes, but ask as
+        // well, a moment later. This clearing used to rely on a push that
+        // nothing actually made: saving a section emptied Outputs and Inputs
+        // until the page was reloaded. The device sends them now, and the
+        // request below covers the two cases where it will not — a reload
+        // that failed part way, and a panel newer than the firmware it is
+        // talking to. A resync that arrives on top of the push costs one
+        // message and settles on the same state.
         console.log('🔄 Config reload event received, clearing states for sections:', message.sections);
         const sections = message.sections;
+        window.setTimeout(() => requestStateResync(), 4000);
         
         if (sections.includes('all') || sections.includes('output') || sections.includes('output_group')) {
           setOutputs([]);
@@ -354,7 +454,7 @@ function AppContent() {
     };
   }, [addMessageListener]);
 
-  if (!isApiAvailable){
+  if (!isApiAvailable || panelState === 'stale_panel'){
     return <NotAvailable />
   }
 
@@ -386,36 +486,43 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-        <Route path="/config" element={
-          <ProtectedRoute>
-            <Layout configEditor={true}>
-              <ConfigEditor />
-            </Layout>
-          </ProtectedRoute>
-        } />
+        {/* The YAML editor is a settings section under Advanced. Kept as a redirect for bookmarks. */}
+        <Route path="/config" element={<Navigate to="/settings/yaml_editor" replace />} />
         {/* ConfigEditor2 (UISettings) - Temporarily disabled due to JSON Schema issues */}
         {/* TODO: Re-enable when JSON Schema validation problems are resolved */}
         <Route path="/settings" element={
-          <ProtectedRoute>
-            <Layout configEditor>
+          <ProtectedRoute adminOnly>
+            <Layout fullHeight>
               <UISettings />
             </Layout>
           </ProtectedRoute>
         } />
         <Route path="/settings/:section" element={
-          <ProtectedRoute>
-            <Layout configEditor>
+          <ProtectedRoute adminOnly>
+            <Layout fullHeight>
               <UISettings />
             </Layout>
           </ProtectedRoute>
         } />
-        <Route path="/logs" element={
+        {/* The section is in the path, as it is for settings, so a bus scan
+            can be linked to and the back button steps through the rail. */}
+        <Route path="/diagnostics" element={
           <ProtectedRoute>
-            <Layout>
-              <LogViewer />
+            <Layout fullHeight>
+              <DiagnosticsView />
             </Layout>
           </ProtectedRoute>
         } />
+        <Route path="/diagnostics/:section" element={
+          <ProtectedRoute>
+            <Layout fullHeight>
+              <DiagnosticsView />
+            </Layout>
+          </ProtectedRoute>
+        } />
+        {/* The page was /logs until the support bundle joined it. Kept so
+            bookmarks and anything linking to it still land somewhere. */}
+        <Route path="/logs" element={<Navigate to="/diagnostics" replace />} />
         <Route path="/sensors" element={
           <ProtectedRoute>
             <Layout>
@@ -437,20 +544,8 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-        <Route path="/addons" element={
-          <ProtectedRoute>
-            <Layout>
-              <AddonsView />
-            </Layout>
-          </ProtectedRoute>
-        } />
-        <Route path="/tools" element={
-          <ProtectedRoute>
-            <Layout>
-              <Tools />
-            </Layout>
-          </ProtectedRoute>
-        } />
+        {/* The Tools page was four bus scans and an export; the scans are on Diagnostics and the export is a settings section. Kept as a redirect for bookmarks. */}
+        <Route path="/tools" element={<Navigate to="/diagnostics/i2c" replace />} />
         <Route path="/help" element={
           <ProtectedRoute>
             <Layout>
@@ -458,13 +553,9 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-        <Route path="/system" element={
-          <ProtectedRoute>
-            <Layout>
-              <SystemState />
-            </Layout>
-          </ProtectedRoute>
-        } />
+        {/* The System page's blocks are Settings sections now. Kept as a
+            redirect so bookmarks and older links still land somewhere. */}
+        <Route path="/system" element={<Navigate to="/settings/update" replace />} />
         <Route path="/nodered" element={
           <ProtectedRoute>
             <Layout>
@@ -474,6 +565,10 @@ function AppContent() {
         } />
       </Routes>
       </Suspense>
+      {/* Renders nothing unless an admin is signed in and something is
+          outstanding, so it stays inert on the login and wizard screens. */}
+      <SecurityUpdatePrompt />
+      <UpdateFailedNotice />
     </WebSocketContext.Provider>
   );
 }
@@ -486,6 +581,9 @@ export default function App() {
           <ConfigProvider>
             <TranslationProvider>
               <AppContent />
+              {/* Outside AppContent so it also answers during the first-run
+                  wizard, which AppContent renders instead of the app. */}
+              <ReauthDialog />
             </TranslationProvider>
           </ConfigProvider>
         </AuthProvider>

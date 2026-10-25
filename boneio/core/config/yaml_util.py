@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import fnmatch
 import logging
 import os
@@ -11,70 +12,152 @@ from pathlib import Path
 from typing import Any
 
 from cerberus import TypeDefinition, Validator
+from cerberus.schema import DefinitionSchema
+import yaml
 from yaml import MarkedYAMLError, YAMLError, dump, load
 
-from boneio.const import OUTPUT
+from boneio.const import OUTPUT, VIRTUAL_SWITCH
+from boneio.core.atomic_file import write_atomically
+from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
 from boneio.core.config.yaml_compat import FastSafeDumper, FastSafeLoader
 from boneio.core.utils import TimePeriod
+from boneio.core.utils.naming import resolve_id
 from boneio.exceptions import ConfigurationException
+from boneio.version import __version__
 
 schema_file = os.path.join(os.path.dirname(__file__), "../../schema/schema.yaml")
 _LOGGER = logging.getLogger(__name__)
 
 SECRET_YAML = "secrets.yaml"
 _SECRET_VALUES = {}
+#: Names of every secret a YAML load resolved, whatever its type — so the cache
+#: can tell a secret it kept as a reference from one validation turned into a
+#: number and it had to keep by value.
+_SECRET_NAMES_LOADED: set[str] = set()
+
+
+class SecretStr(str):
+    """A string that came from ``!secret``, and knows which secret it was.
+
+    The config cache holds the validated config. It used to hold it with every
+    secret already substituted — the passwords sat in ``.cache.pkl``, and
+    secrets.yaml was not part of the cache key, so changing a password there did
+    nothing until some other edit invalidated the cache. The cache now stores a
+    :class:`_SecretRef` in place of each ``SecretStr`` and resolves it against
+    secrets.yaml as it is read back. Validation keeps the subclass (it checks
+    type, it does not copy), which is what lets the cache find them.
+    """
+
+    secret_name: str
+
+    def __new__(cls, value: str, name: str) -> "SecretStr":
+        obj = super().__new__(cls, value)
+        obj.secret_name = name
+        return obj
+
+    def __reduce__(self):
+        # Anything else that pickles a config gets the plain value, never a
+        # boneIO type that another build may not define.
+        return (str, (str(self),))
+
+
+class _SecretRef:
+    """What the config cache stores instead of a secret's value."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+#: Cerberus checks that the schema is itself a legal cerberus schema every time
+#: a Validator is built, and that - not validating anybody's config - is where a
+#: cold start spends its time: ~93% of it, because every subschema is hashed and
+#: re-checked, and the verdict cannot be carried between processes (cerberus
+#: memoises it under hashes of ``types_mapping``, which hold functions and so
+#: hash by identity). On a BeagleBone that is most of the 20-30s a config cache
+#: miss costs.
+#:
+#: schema.yaml ships in the wheel and nothing on the device can edit it - the
+#: one dynamic part, _inject_modbus_models, only fills an ``allowed`` list with
+#: filenames, which cannot make a schema illegal - so the check is run once in
+#: the test suite instead of once per boot. See tests/unit/core/test_schema_is_valid.py.
+#:
+#: Set BONEIO_VALIDATE_SCHEMA=1 to put the runtime check back. That is what you
+#: want while editing schema.yaml on a device, where a mistake would otherwise
+#: surface as odd validation results rather than a SchemaError.
+_SCHEMA_SELF_CHECK = DefinitionSchema.validate
+_schema_self_check_dropped = False
+
+
+def _no_schema_self_check(self, schema=None) -> None:
+    """Stand-in for DefinitionSchema.validate: the schema ships with the wheel."""
+    return None
+
+
+def _schema_self_check_requested() -> bool:
+    """True if BONEIO_VALIDATE_SCHEMA asks for cerberus to check the schema."""
+    return os.environ.get("BONEIO_VALIDATE_SCHEMA", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _trust_schema() -> None:
+    """Take cerberus' schema self-check out of the startup path, once.
+
+    Patching the class rather than wrapping each call is deliberate: cerberus
+    re-checks subschemas from inside normalization too, so a narrower hook would
+    only move the cost. It is never restored, because a process that wants the
+    check never gets here - and the only consequence of a race with a thread
+    validating right now is that that thread pays for a check it did not need.
+    """
+    global _schema_self_check_dropped
+    if _schema_self_check_dropped or _schema_self_check_requested():
+        return
+    DefinitionSchema.validate = _no_schema_self_check
+    _schema_self_check_dropped = True
+    _LOGGER.debug("Trusting the packaged schema; cerberus will not re-check it")
+
+
+@contextlib.contextmanager
+def schema_self_check():
+    """Put cerberus' schema self-check back for the duration of the block.
+
+    This is what the test suite uses to prove the shipped schema is legal, and
+    it is the only thing standing between a typo in schema.yaml and a release.
+    Nothing on a device should need it.
+    """
+    patched = DefinitionSchema.validate
+    DefinitionSchema.validate = _SCHEMA_SELF_CHECK
+    # The memo would otherwise let a schema validated earlier in this process
+    # through without looking at it.
+    Validator._valid_schemas.clear()
+    try:
+        yield
+    finally:
+        DefinitionSchema.validate = patched
+        Validator._valid_schemas.clear()
+
+
+#: Anything that makes a cache unreadable by *this* build, as opposed to
+#: corrupt. The payload is a pickle of boneIO objects, so a build that moved or
+#: renamed a class fails on the import or the attribute lookup rather than on
+#: the bytes; ``TypeError`` covers a class that still exists but no longer
+#: reconstructs from the arguments it was pickled with. All of them mean the
+#: same thing — throw the cache away and validate normally. ``pickle`` is
+#: imported lazily, so ``pickle.PickleError`` is added at the ``except`` itself.
+_CACHE_FOREIGN_BUILD_ERRORS = (
+    ImportError,  # ModuleNotFoundError is a subclass
+    AttributeError,
+    TypeError,
+    EOFError,
+)
 
 # ── YAML write serialization & background save tracking ──────────────────
-_yaml_write_lock = threading.Lock()
-_yaml_pending_saves = 0
-_yaml_pending_lock = threading.Lock()
-
-
-def yaml_saves_pending() -> bool:
-    """Return True if background YAML saves are still in progress."""
-    return _yaml_pending_saves > 0
-
-
-def get_pending_yaml_saves_count() -> int:
-    """Return count of pending background YAML saves."""
-    return _yaml_pending_saves
-
-
-def wait_for_pending_yaml_saves(timeout: float = 30.0) -> bool:
-    """Block until all pending YAML saves complete (or timeout).
-
-    Args:
-        timeout: Maximum seconds to wait.
-
-    Returns:
-        True if all saves completed, False if timed out.
-    """
-    deadline = time.monotonic() + timeout
-    while yaml_saves_pending():
-        if time.monotonic() > deadline:
-            _LOGGER.warning(
-                "Timed out waiting for %d pending YAML save(s)",
-                _yaml_pending_saves,
-            )
-            return False
-        time.sleep(0.1)
-    return True
-
-
-def increment_pending_yaml_saves() -> None:
-    """Increment pending YAML save counter."""
-    global _yaml_pending_saves
-    with _yaml_pending_lock:
-        _yaml_pending_saves += 1
-
-
-def decrement_pending_yaml_saves() -> None:
-    """Decrement pending YAML save counter."""
-    global _yaml_pending_saves
-    with _yaml_pending_lock:
-        _yaml_pending_saves = max(0, _yaml_pending_saves - 1)
-
-
+# Shared with yaml_patch: both rewrite the same files.
+_yaml_write_lock = CONFIG_WRITE_LOCK
 # Cache for schema to avoid loading it multiple times (saves ~2-3s per config load)
 _SCHEMA_CACHE = None
 # Cache for board configs to avoid loading them multiple times
@@ -102,8 +185,10 @@ def _schema_fingerprint() -> tuple:
     """Build a cheap fingerprint of all schema inputs.
 
     Combines name/mtime/size of every YAML file in the schema directory with
-    the list of modbus device models, so the pickled schema cache is
-    invalidated whenever any of them changes.
+    the list of modbus device models and the boneIO version, so the pickled
+    schema cache is invalidated whenever any of them changes. The version is
+    in there because the pickle holds parsed objects: a release that moves a
+    class need not touch a single schema YAML.
     """
     schema_dir = os.path.dirname(os.path.abspath(schema_file))
     files = []
@@ -116,7 +201,7 @@ def _schema_fingerprint() -> tuple:
     except OSError as e:
         _LOGGER.debug("Could not fingerprint schema directory: %s", e)
         return ()
-    return (tuple(files), tuple(_get_modbus_device_models()))
+    return (tuple(files), tuple(_get_modbus_device_models()), __version__)
 
 
 def _get_schema_pickle_path() -> str:
@@ -144,8 +229,19 @@ def _load_schema() -> dict:
                 _LOGGER.debug("Loaded schema from pickle cache %s", cache_path)
                 return cached["data"]
             _LOGGER.debug("Schema pickle cache is stale, reparsing YAML")
-        except (FileNotFoundError, OSError, EOFError, pickle.UnpicklingError, AttributeError) as e:
-            _LOGGER.debug("Schema pickle cache not available: %s", e)
+        except FileNotFoundError:
+            _LOGGER.debug("No schema pickle cache at %s", cache_path)
+        except (OSError, pickle.PickleError, *_CACHE_FOREIGN_BUILD_ERRORS) as e:
+            # Same story as the config cache: this is a pickle of parsed schema
+            # objects, so a build that moved a class cannot read back what its
+            # predecessor wrote. Reparsing the YAML costs several seconds on a
+            # BeagleBone, so say so rather than lose them quietly.
+            _LOGGER.warning(
+                "Schema pickle cache %s could not be read (%s: %s), reparsing YAML",
+                cache_path,
+                type(e).__name__,
+                e,
+            )
 
     schema = load_yaml_file(schema_file)
     _inject_modbus_models(schema)
@@ -228,6 +324,17 @@ def represent_time_period(dumper, data):
 TimePeriodDumper.add_representer(TimePeriod, represent_time_period)
 
 
+def _represent_secret_str(dumper, data):
+    # Written as the plain string it always was: a SecretStr only exists so the
+    # config cache can keep secrets out of .cache.pkl, and must not change what
+    # a save puts in a YAML file.
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data))
+
+
+for _dumper in {TimePeriodDumper, FastSafeDumper, yaml.SafeDumper, yaml.Dumper}:
+    _dumper.add_representer(SecretStr, _represent_secret_str)
+
+
 class BoneIOLoader(FastSafeLoader):
     """Loader which support for include in yaml files."""
 
@@ -251,7 +358,8 @@ class BoneIOLoader(FastSafeLoader):
             raise MarkedYAMLError(f"Secret '{node.value}' not defined", node.start_mark)
         val = secrets[node.value]
         _SECRET_VALUES[str(val)] = node.value
-        return val
+        _SECRET_NAMES_LOADED.add(node.value)
+        return SecretStr(val, node.value) if isinstance(val, str) else val
 
     def represent_stringify(self, value):
         # Type: ignore[attr-defined] - represent_scalar is inherited from the loader base
@@ -473,6 +581,11 @@ def merge_board_config(config: dict) -> dict:
     if not config.get("boneio", {}).get("device_type"):
         return config
 
+    if config["boneio"].get("version") is None:
+        # Optional in the schema, but the board's mapping is found by it.
+        raise ConfigurationException(
+            "boneio.version is needed with boneio.device_type to find the board's mapping"
+        )
     board_name = normalize_board_name(config["boneio"]["device_type"])
     version = normalize_version(config["boneio"]["version"])
     config["boneio"]["version"] = version
@@ -512,7 +625,9 @@ def merge_board_config(config: dict) -> dict:
     if "output" in config:
         output_mapping = board_config.get("output_mapping", {})
         for output in config["output"]:
-            if "boneio_output" in output:
+            # Nothing coerces it to a string before this point; anything else
+            # is left for the schema to report as the wrong type.
+            if isinstance(output.get("boneio_output"), str):
                 boneio_output = output["boneio_output"].lower()
                 mapped_output = output_mapping.get(boneio_output)
                 if not mapped_output:
@@ -570,6 +685,121 @@ def one_of(*values, **kwargs):
 
 
 timeperiod_type = TypeDefinition("timeperiod", (TimePeriod,), ())
+
+
+def schedule_shape_errors(value: Any) -> list[str]:
+    """Why a schedule's trigger does not match its own type; empty when it does.
+
+    A schema can require a dict and check each field on its own, but not "a
+    sun trigger needs an event and a time trigger needs a time". Left to
+    runtime the symptom is a schedule that quietly never fires, which is the
+    hardest kind of misconfiguration to notice. A field of the wrong type is
+    the schema's to report and is not compared here.
+    """
+    if not isinstance(value, dict):
+        return []
+
+    errors = []
+    trigger = value.get("trigger")
+    trigger = trigger if isinstance(trigger, dict) else {}
+    kind = trigger.get("type", "sun")
+
+    if kind == "sun":
+        from boneio.core.utils.sun import ANCHOR_NAMES
+
+        event = trigger.get("event")
+        if not event:
+            errors.append("A sun trigger needs an 'event', e.g. sunset or civil_dusk.")
+        elif event not in ANCHOR_NAMES:
+            errors.append(
+                f"Unknown sun event {event!r}. "
+                f"Expected one of: {', '.join(sorted(ANCHOR_NAMES))}."
+            )
+        if trigger.get("at"):
+            errors.append("'at' belongs to a time trigger, not a sun trigger.")
+        earliest, latest = trigger.get("earliest"), trigger.get("latest")
+        # String compare is right for zero-padded HH:MM, which the schema's
+        # regex holds both to.
+        if isinstance(earliest, str) and isinstance(latest, str) and earliest and latest and earliest > latest:
+            errors.append(
+                f"'earliest' ({earliest}) is after 'latest' ({latest}), "
+                "so the window is empty and the schedule can never fire."
+            )
+    elif kind == "time":
+        if not trigger.get("at"):
+            errors.append("A time trigger needs 'at' in HH:MM.")
+        if trigger.get("event"):
+            errors.append("'event' belongs to a sun trigger, not a time trigger.")
+        for key in ("earliest", "latest"):
+            if trigger.get(key):
+                # Clamping a clock time to another clock time is either a
+                # no-op or a different time written twice.
+                errors.append(
+                    f"{key!r} clamps a sun anchor; a time trigger already has a fixed time."
+                )
+
+    if not value.get("actions"):
+        errors.append("A schedule with no actions would fire and do nothing.")
+    return errors
+
+
+def condition_shape_errors(value: Any) -> list[str]:
+    """Why a condition's fields do not match its own type; empty when they do.
+
+    A schema can say "this is a dict of allowed keys" but not "a sun condition
+    is one of three shapes and never a mixture". Without this a typo like
+    ``type: sun`` with ``after: "05:00"`` reaches runtime, where the only
+    symptom is an action that silently never fires.
+    """
+    if not isinstance(value, dict) or value.get("type") != "sun":
+        return []
+
+    from boneio.core.utils.sun import ANCHOR_NAMES, PHASE_NAMES
+
+    window = [key for key in ("after", "before") if value.get(key)]
+    phase = value.get("phase")
+    elevation = [key for key in ("above", "below") if value.get(key) is not None]
+
+    modes = [bool(window), bool(phase), bool(elevation)]
+    if sum(modes) == 0:
+        return [
+            "A sun condition needs one of: after/before (anchors), "
+            "phase, or above/below (elevation in degrees)."
+        ]
+    if sum(modes) > 1:
+        return [
+            "A sun condition must use only one of after/before, phase, or "
+            "above/below — not a mixture."
+        ]
+
+    errors = []
+    for key in ("after", "before"):
+        anchor = value.get(key)
+        if anchor and anchor not in ANCHOR_NAMES:
+            errors.append(
+                f"Unknown sun anchor {anchor!r} in '{key}'. "
+                f"Expected one of: {', '.join(sorted(ANCHOR_NAMES))}."
+            )
+
+    for key, other in (("after_offset", "after"), ("before_offset", "before")):
+        if value.get(key) and not value.get(other):
+            errors.append(f"'{key}' has no effect without '{other}'.")
+
+    if phase and phase not in PHASE_NAMES:
+        errors.append(
+            f"Unknown sun phase {phase!r}. "
+            f"Expected one of: {', '.join(sorted(PHASE_NAMES))}."
+        )
+
+    above, below = value.get("above"), value.get("below")
+    # A non-number is the schema's to report; compared here it would raise.
+    numbers = all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (above, below))
+    if numbers and above >= below:
+        errors.append(
+            f"'above' ({above}) must be lower than 'below' ({below}); "
+            "the pair describes a band of elevations."
+        )
+    return errors
 
 
 class CustomValidator(Validator):
@@ -763,6 +993,144 @@ class CustomValidator(Validator):
 
         kwarg = unit_to_kwarg[one_of(*unit_to_kwarg)(unit_str)]
         return TimePeriod(**{kwarg: float(match.group(1))})
+
+    def _normalize_coerce_sun_offset(self, value) -> float:
+        """Parse a signed offset from a sun anchor into seconds.
+
+        Unlike ``positive_time_period`` this must accept negative values —
+        "half an hour before sunset" is the whole point — and it returns plain
+        seconds rather than a TimePeriod, because the only thing that ever
+        happens to it is being added to a datetime.
+
+        A bare number means **seconds**, not milliseconds. That differs from
+        ``positive_time_period`` deliberately: a sun offset measured in
+        milliseconds would be meaningless, and the frontend always sends a unit.
+
+        Args:
+            value: ``"-30min"``, ``"1h"``, ``"45s"``, or a number of seconds.
+
+        Returns:
+            The offset in seconds, negative for "before".
+
+        Raises:
+            ConfigurationException: If the value cannot be read as an offset.
+        """
+        if value is None or value == "":
+            return 0.0
+        if isinstance(value, bool):
+            raise ConfigurationException(f"Expected a sun offset, got {value!r}")
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        text = str(value).strip().lower()
+        if not text:
+            return 0.0
+
+        match = re.match(r"^([-+]?[0-9]*\.?[0-9]+)\s*(\w*)$", text)
+        if match is None:
+            raise ConfigurationException(
+                f"Expected an offset like '-30min', '15m' or '1h', got {value!r}"
+            )
+
+        unit_to_seconds = {
+            "": 1.0,
+            "s": 1.0,
+            "sec": 1.0,
+            "secs": 1.0,
+            "second": 1.0,
+            "seconds": 1.0,
+            "m": 60.0,
+            "min": 60.0,
+            "mins": 60.0,
+            "minute": 60.0,
+            "minutes": 60.0,
+            "h": 3600.0,
+            "hour": 3600.0,
+            "hours": 3600.0,
+        }
+        unit = match.group(2)
+        if unit not in unit_to_seconds:
+            raise ConfigurationException(
+                f"Unknown unit {unit!r} in sun offset {value!r}. Use s, min or h."
+            )
+        return float(match.group(1)) * unit_to_seconds[unit]
+
+    def _check_with_unique_ids(self, field, value):
+        """Reject a section where two entries resolve to the same identifier.
+
+        Only worth saying out loud since identifiers are made from names: two
+        lights both called "Salon" in different rooms are an easy thing to
+        write and produce one entity, with the second silently dropped at
+        startup. An explicit ``id`` on one of them is the way out, which is
+        what the message says.
+        """
+        if not isinstance(value, list):
+            return
+
+        seen: dict[str, int] = {}
+        for index, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                continue
+            entry_id = resolve_id(entry)
+            if not entry_id:
+                self._error(  # type: ignore[attr-defined]
+                    field,
+                    f"Entry {index + 1} has no name to make an identifier from.",
+                )
+                continue
+            if entry_id in seen:
+                self._error(  # type: ignore[attr-defined]
+                    field,
+                    f"Entries {seen[entry_id] + 1} and {index + 1} both resolve "
+                    f"to the identifier {entry_id!r}. Names do not have to be "
+                    "unique, but what they are turned into does — give one of "
+                    "them an explicit 'id', or a name that differs by more "
+                    "than punctuation.",
+                )
+                continue
+            seen[entry_id] = index
+
+    def _check_with_virtual_switch_shape(self, field, value):
+        """Reject a virtual switch whose own actions set itself.
+
+        The runtime guard stops the recursion, but it stops it by refusing to
+        act — so the configuration would load, look right, and do half of what
+        it says. Better to say so here.
+        """
+        if not isinstance(value, dict):
+            return
+
+        switch_id = resolve_id(value)
+        actions = value.get("actions")
+        # Anything but a dict of actions is the schema's to report.
+        if not switch_id or not isinstance(actions, dict):
+            return
+
+        for key in ("on_turn_on", "on_turn_off"):
+            items = actions.get(key)
+            for action in items if isinstance(items, list) else []:
+                if not isinstance(action, dict):
+                    continue
+                if (
+                    action.get("action") == "virtual_switch"
+                    and action.get("boneio_virtual_switch") == switch_id
+                ):
+                    self._error(  # type: ignore[attr-defined]
+                        field,
+                        f"Virtual switch '{switch_id}' sets itself in "
+                        f"'{key}', which cannot work: the change that would "
+                        "run the actions is the one they are trying to make.",
+                    )
+
+    def _check_with_schedule_shape(self, field, value):
+        """Reject a schedule whose trigger does not match its own type."""
+        for message in schedule_shape_errors(value):
+            self._error(field, message)  # type: ignore[attr-defined]
+
+    def _check_with_condition_shape(self, field, value):
+        """Reject a condition whose fields do not match its own type."""
+        for message in condition_shape_errors(value):
+            self._error(field, message)  # type: ignore[attr-defined]
 
     def _lookup_field(self, path: str) -> tuple:
         """
@@ -963,6 +1331,7 @@ def _strip_empty_strings_deep(obj: Any) -> Any:
 
 def load_config_from_string(config_str: str) -> dict:
     """Load config from string."""
+    _trust_schema()
     schema = _get_schema()  # Use cached schema instead of loading every time
     v = CustomValidator(schema, purge_unknown=True)
 
@@ -998,6 +1367,61 @@ def load_config_from_string(config_str: str) -> dict:
         raise ConfigurationException(error_msg)
 
     return merged_doc
+
+
+def _flatten_errors(errors: dict, path: str = "") -> list[str]:
+    """Cerberus' nested error tree as one ``path: message`` line per error."""
+    lines = []
+    for key, items in errors.items():
+        if isinstance(key, int):
+            where = f"{path}[{key}]"
+        else:
+            where = f"{path}.{key}" if path else str(key)
+        for item in items:
+            if isinstance(item, dict):
+                lines += _flatten_errors(item, where)
+            else:
+                lines.append(f"{where}: {item}")
+    return lines
+
+
+def validate_section(section: str, data: Any, boneio_section: dict | None) -> list[str]:
+    """Check one section against the schema the way startup checks the file.
+
+    Only the section is validated, not the whole config, which takes over a
+    second on a BeagleBone. The ``boneio`` section travels with it because
+    the board it names decides what ``boneio_output``/``boneio_input`` expand
+    to, and the expanded entries are what the schema checks.
+
+    Args:
+        section: Top-level section name.
+        data: The section as it would be saved. Not modified.
+        boneio_section: The stored ``boneio`` section, for the board mapping.
+
+    Returns:
+        One ``path: message`` line per error; empty when the section is valid.
+    """
+    schema = _get_schema()
+    if section not in schema:
+        return [f"Unknown configuration section: '{section}'"]
+
+    doc = {section: copy.deepcopy(data)}
+    if section != "boneio" and isinstance(boneio_section, dict):
+        doc["boneio"] = copy.deepcopy(boneio_section)
+    subschema = {key: schema[key] for key in doc}
+
+    _trust_schema()
+    v = CustomValidator(subschema, purge_unknown=True)
+    doc = v.normalized(_strip_empty_strings_deep(doc), always_return_document=True)  # type: ignore[attr-defined]
+    try:
+        doc = merge_board_config(doc)
+    except ConfigurationException as err:
+        return [f"{section}: {err}"]
+    v.validate(doc, subschema)  # type: ignore[attr-defined]
+    # Only what was asked about: the stored boneio section is context here,
+    # and anything wrong with it is not the caller's to fix in this section.
+    errors = v.errors  # type: ignore[attr-defined]
+    return _flatten_errors({section: errors[section]}) if section in errors else []
 
 
 def _get_config_cache_path(config_file: str) -> str:
@@ -1069,70 +1493,330 @@ def _compute_config_dir_hash(config_file: str) -> str:
     return h.hexdigest()
 
 
+def _secret_digest(value: Any) -> str:
+    import hashlib
+
+    return hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+
+
+def _secrets_to_refs(node: Any, found: set[str]) -> Any:
+    """A copy of *node* with every :class:`SecretStr` replaced by a reference."""
+    if isinstance(node, SecretStr):
+        found.add(node.secret_name)
+        return _SecretRef(node.secret_name)
+    if isinstance(node, dict):
+        out = copy.copy(node)
+        for key, value in node.items():
+            out[key] = _secrets_to_refs(value, found)
+        return out
+    if isinstance(node, list):
+        return [_secrets_to_refs(item, found) for item in node]
+    if isinstance(node, tuple):
+        return tuple(_secrets_to_refs(item, found) for item in node)
+    return node
+
+
+def _refs_to_secrets(node: Any, secrets: dict) -> Any:
+    """Resolve the cache's secret references against secrets.yaml, in place.
+
+    Raises:
+        KeyError: A reference names a secret secrets.yaml no longer defines.
+    """
+    if isinstance(node, _SecretRef):
+        value = secrets[node.name]
+        _SECRET_VALUES[str(value)] = node.name
+        return SecretStr(value, node.name) if isinstance(value, str) else value
+    if isinstance(node, dict):
+        for key in list(node):
+            node[key] = _refs_to_secrets(node[key], secrets)
+        return node
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            node[index] = _refs_to_secrets(item, secrets)
+        return node
+    if isinstance(node, tuple):
+        return tuple(_refs_to_secrets(item, secrets) for item in node)
+    return node
+
+
+def _load_secrets_for(config_file: str) -> dict:
+    path = os.path.join(os.path.dirname(config_file), SECRET_YAML)
+    if not os.path.isfile(path):
+        return {}
+    secrets = load_yaml_file(path)
+    return secrets if isinstance(secrets, dict) else {}
+
+
 def _try_load_cached_config(config_file: str) -> dict | None:
     """Try to load validated config from cache.
 
-    Returns the cached config dict if cache is valid (config file and schema
-    file unchanged since cache was written). Returns None if cache is missing,
-    corrupt, or stale.
+    Returns the cached config dict if the cache is valid: written by this
+    boneIO version, with the config and schema files unchanged since. Returns
+    None — never raises — if the cache is missing, corrupt, stale or written by
+    another build, so the caller falls back to full Cerberus validation.
+
+    The file holds two pickles back to back: a header of plain strings, then
+    the payload. The version is checked against the header alone, so a cache
+    from another build is rejected without ever unpickling boneIO objects that
+    build may no longer define.
     """
     import pickle
 
     cache_path = _get_config_cache_path(config_file)
     try:
         with open(cache_path, "rb") as f:
-            cached = pickle.load(f)
+            header = pickle.load(f)
 
-        # Verify cache structure
-        if (
-            not isinstance(cached, dict)
-            or "config_hash" not in cached
-            or "schema_hash" not in cached
-            or "data" not in cached
-        ):
-            _LOGGER.debug("Config cache has invalid structure, ignoring")
+            # Verify cache structure. A cache from before the header split is a
+            # single dict carrying its payload under "data": it has no version,
+            # so it is a miss like any other foreign build.
+            if (
+                not isinstance(header, dict)
+                or "version" not in header
+                or "config_hash" not in header
+                or "schema_hash" not in header
+            ):
+                _LOGGER.warning(
+                    "Config cache %s is not in a format this boneIO understands, "
+                    "revalidating config",
+                    cache_path,
+                )
+                return None
+
+            # Verify the cache was written by this build. The pickled payload
+            # holds boneIO objects (TimePeriod, OrderedDict and friends), so a
+            # release that moves a class leaves a cache that cannot be read
+            # back - and neither hash below would notice, because neither
+            # config.yaml nor schema.yaml has to change for that to happen.
+            #
+            # This check was here once before, as "app_version", and went in
+            # 3b876d04 with no reason given. If it starts rejecting the caches
+            # an image build warms, the thing to fix is the build - warm them
+            # with the boneIO the image installs - not this gate.
+            if header["version"] != __version__:
+                _LOGGER.warning(
+                    "Config cache was written by boneIO %s, this is %s - "
+                    "revalidating config",
+                    header["version"],
+                    __version__,
+                )
+                return None
+
+            # Verify config files hash (main + all !include YAML files)
+            current_config_hash = _compute_config_dir_hash(config_file)
+            if header["config_hash"] != current_config_hash:
+                _LOGGER.debug("Config files changed, cache invalidated")
+                return None
+
+            # Verify schema file hash
+            current_schema_hash = _compute_file_hash(schema_file)
+            if header["schema_hash"] != current_schema_hash:
+                _LOGGER.debug("Schema file changed, cache invalidated")
+                return None
+
+            # A secret validation turned into something other than a string is
+            # in the payload by value, so its current value has to match.
+            baked = header.get("baked_secrets", {})
+            secrets = _load_secrets_for(config_file) if baked or header.get("secret_refs") else {}
+            for name, digest in baked.items():
+                # A name the loader saw but secrets.yaml lacks was recorded as
+                # the digest of None; lacking it still is not a change.
+                if _secret_digest(secrets.get(name)) != digest:
+                    _LOGGER.debug("Secret %r changed, cache invalidated", name)
+                    return None
+
+            data = pickle.load(f)
+
+        if not isinstance(data, dict):
+            _LOGGER.warning("Config cache %s holds no config, revalidating", cache_path)
             return None
 
-        # Verify config files hash (main + all !include YAML files)
-        current_config_hash = _compute_config_dir_hash(config_file)
-        if cached["config_hash"] != current_config_hash:
-            _LOGGER.debug("Config files changed, cache invalidated")
-            return None
-
-        # Verify schema file hash
-        current_schema_hash = _compute_file_hash(schema_file)
-        if cached["schema_hash"] != current_schema_hash:
-            _LOGGER.debug("Schema file changed, cache invalidated")
+        try:
+            data = _refs_to_secrets(data, secrets)
+        except KeyError as missing:
+            _LOGGER.info(
+                "secrets.yaml no longer defines %s, revalidating config", missing
+            )
             return None
 
         _LOGGER.debug("Loading validated config from cache (skipping Cerberus validation)")
-        return cached["data"]
-    except (FileNotFoundError, pickle.UnpicklingError, OSError, EOFError) as e:
-        _LOGGER.debug("Config cache not available: %s", e)
+        return data
+    except FileNotFoundError:
+        # No cache yet - first boot after flashing, or after clear_config_cache.
+        _LOGGER.debug("No config cache at %s", cache_path)
+        return None
+    except (OSError, pickle.PickleError, *_CACHE_FOREIGN_BUILD_ERRORS) as e:
+        # Loud on purpose: losing the cache costs 20-30s of Cerberus validation
+        # on a BeagleBone, so it should be visible in the log rather than only
+        # felt at boot.
+        _LOGGER.warning(
+            "Config cache %s could not be read (%s: %s), revalidating config",
+            cache_path,
+            type(e).__name__,
+            e,
+        )
         return None
 
 
 def _save_config_cache(config_file: str, validated_config: dict) -> None:
     """Save validated config to cache file.
 
-    Stores the validated config along with hashes of the config and schema
-    files so we can detect when the cache is stale. Uses pickle to handle
-    TimePeriod and OrderedDict objects.
+    Stores the validated config along with the boneIO version and hashes of
+    the config and schema files, so we can detect when the cache is stale or
+    was written by a build whose classes have since moved. Uses pickle to
+    handle TimePeriod and OrderedDict objects.
     """
     import pickle
 
     cache_path = _get_config_cache_path(config_file)
     try:
-        cache_data = {
+        # No secret's value goes into the payload when it can be avoided:
+        # strings from !secret become references, resolved from secrets.yaml
+        # when the cache is read. A secret validation coerced (a port given as
+        # !secret, say) stays by value, and its digest in the header makes a
+        # change to it invalidate the cache instead of going unnoticed.
+        as_refs: set[str] = set()
+        payload = _secrets_to_refs(validated_config, as_refs)
+        baked: dict[str, str] = {}
+        leftover = _SECRET_NAMES_LOADED - as_refs
+        if leftover:
+            secrets = _load_secrets_for(config_file)
+            baked = {name: _secret_digest(secrets.get(name)) for name in sorted(leftover)}
+        header = {
+            "version": __version__,
             "config_hash": _compute_config_dir_hash(config_file),
             "schema_hash": _compute_file_hash(schema_file),
-            "data": validated_config,
+            "secret_refs": sorted(as_refs),
+            "baked_secrets": baked,
         }
         with open(cache_path, "wb") as f:
-            pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # Header first, payload second, so the reader can reject a cache
+            # from another build without unpickling boneIO objects at all.
+            pickle.dump(header, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
         _LOGGER.debug("Saved validated config cache to %s", cache_path)
     except (OSError, pickle.PicklingError) as e:
         _LOGGER.debug("Could not save config cache: %s", e)
+
+
+
+#: Sections whose entries can carry actions, and where those actions live.
+#: ``None`` means "a list of actions"; a string names the key holding a dict of
+#: action lists.
+_ACTION_BEARING_SECTIONS = {
+    "virtual_switch": "actions",
+    "schedule": None,
+    "event": "actions",
+    "binary_sensor": "actions",
+    "local_inputs": "actions",
+    "remote_inputs": "actions",
+}
+
+
+def _iter_conditions(holder: dict):
+    """Every condition on one action or one schedule, in both shapes."""
+    single = holder.get("condition")
+    if isinstance(single, dict):
+        yield single
+    grouped = holder.get("conditions")
+    if isinstance(grouped, dict):
+        for item in grouped.get("list") or []:
+            if isinstance(item, dict):
+                yield item
+
+
+def _iter_actions(entry: dict, actions_key: str | None):
+    """Every action on one config entry, whatever shape the section uses."""
+    raw = entry.get("actions") if actions_key else entry.get("actions")
+    if isinstance(raw, list):
+        for action in raw:
+            if isinstance(action, dict):
+                yield action
+    elif isinstance(raw, dict):
+        for group in raw.values():
+            for action in group or []:
+                if isinstance(action, dict):
+                    yield action
+
+
+def _check_virtual_switch_references(doc: dict) -> None:
+    """Refuse a reference to a virtual switch the configuration never defines.
+
+    Virtual switches come from exactly one place, so a reference to one that is
+    not there is a typo or a leftover — never something resolved elsewhere at
+    runtime. That matters more here than for other entity types because of
+    which way the runtime fails: an unresolvable condition entity is logged and
+    the action **runs anyway**. For "only while nobody is home" that is exactly
+    backwards — one wrong letter and every step of a presence simulation fires
+    while somebody is in the house, with no flag able to stop it and a single
+    warning in the log to say why.
+
+    Catching it here turns a silent runtime guess into a refusal to start with
+    the offending name quoted.
+
+    Args:
+        doc: The merged, validated configuration.
+
+    Raises:
+        ConfigurationException: With every bad reference and where it is.
+    """
+    defined = {
+        resolve_id(entry)
+        for entry in (doc.get("virtual_switch") or [])
+        if isinstance(entry, dict)
+    }
+    defined.discard("")
+
+    problems: list[str] = []
+
+    def note(where: str, name: str) -> None:
+        known = ", ".join(sorted(defined)) or "none are defined"
+        problems.append(
+            f"{where} refers to virtual switch {name!r}, which does not exist "
+            f"(defined: {known})."
+        )
+
+    for section, actions_key in _ACTION_BEARING_SECTIONS.items():
+        for index, entry in enumerate(doc.get(section) or []):
+            if not isinstance(entry, dict):
+                continue
+            # Inputs are named by their pin, not by an id — quoting "entry 3"
+            # at somebody hunting a typo is barely better than silence.
+            label = (
+                resolve_id(entry)
+                or str(entry.get("boneio_input") or entry.get("boneio_output") or "").strip()
+                or f"entry {index + 1}"
+            )
+            where = f"{section} '{label}'"
+
+            # A schedule's own gate sits on the entry, not on an action.
+            for condition in _iter_conditions(entry):
+                name = _referenced_switch(condition)
+                if name and name not in defined:
+                    note(where, name)
+
+            for action in _iter_actions(entry, actions_key):
+                for condition in _iter_conditions(action):
+                    name = _referenced_switch(condition)
+                    if name and name not in defined:
+                        note(f"{where}, in a condition on one of its actions", name)
+                if action.get("action") == "virtual_switch":
+                    name = str(action.get("boneio_virtual_switch") or "").strip()
+                    if name and name not in defined:
+                        note(f"{where}, in an action", name)
+
+    if problems:
+        raise ConfigurationException(
+            "Configuration refers to virtual switches that do not exist:\n\n- "
+            + "\n- ".join(problems)
+        )
+
+
+def _referenced_switch(condition: dict) -> str:
+    """The virtual switch a condition names, if it names one."""
+    if condition.get("entity") != VIRTUAL_SWITCH:
+        return ""
+    return str(condition.get("entity_id") or "").strip()
 
 
 def _full_config_validation(
@@ -1162,6 +1846,7 @@ def _full_config_validation(
     schema = _get_schema()
     _LOGGER.debug("[STARTUP TIMING] _get_schema: %.2fs", _time.monotonic() - _t1)
     _t2 = _time.monotonic()
+    _trust_schema()
     v = CustomValidator(schema, purge_unknown=True)
     _LOGGER.debug("[STARTUP TIMING] CustomValidator init: %.2fs", _time.monotonic() - _t2)
 
@@ -1235,9 +1920,22 @@ def _full_config_validation(
             raise ConfigurationException(error_msg)
     _LOGGER.debug("[STARTUP TIMING] v.validate: %.2fs", _time.monotonic() - _t6)
 
-    # Save to cache for next startup
-    _progress("Saving cache...")
-    _save_config_cache(config_file, merged_doc)
+    # Cross-section references cerberus cannot see: it validates one key at a
+    # time and a condition in `event:` points into `virtual_switch:`. Skipped
+    # on a downgrade, where the whole validation is already advisory.
+    if not _is_downgraded:
+        _check_virtual_switch_references(merged_doc)
+
+    # Save to cache for next startup — unless a migration just rewrote the
+    # files. The document in hand was read before that, so it no longer says
+    # what they say (v7 moves a password behind !secret: cached from here, it
+    # would sit in .cache.pkl by value and a later change in secrets.yaml would
+    # not be seen). The next start reads the files as they are now.
+    if migrations_applied:
+        _LOGGER.info("Config migrated; the cache is written on the next start")
+    else:
+        _progress("Saving cache...")
+        _save_config_cache(config_file, merged_doc)
 
     return merged_doc
 
@@ -1272,6 +1970,7 @@ def load_config_from_file(
 
     # Cache miss — full validation (slow path)
     _LOGGER.info("Config cache miss, running full validation...")
+    _SECRET_NAMES_LOADED.clear()
     if progress_callback:
         progress_callback("Parsing YAML...")
     try:
@@ -1411,6 +2110,52 @@ def strip_default_values(data: Any, schema: dict | None = None, section: str | N
         return data
 
 
+def _section_secret_refs(config_file: str, section: str, data: Any) -> dict[str, str]:
+    """Which of a section's fields defer to secrets.yaml, before a save.
+
+    A save dumps the section from the values the panel sent back, and the
+    dumper writes a secret as the plain string it is. Recorded here, each
+    reference is put back afterwards by :func:`_keep_secret_refs`.
+    """
+    if not isinstance(data, dict):
+        return {}
+    from boneio.core.config.yaml_patch import secret_reference
+
+    refs: dict[str, str] = {}
+    for key in data:
+        try:
+            ref = secret_reference(config_file, (section, str(key)))
+        except OSError:
+            continue
+        if ref is not None:
+            refs[str(key)] = ref
+    return refs
+
+
+def _keep_secret_refs(config_file: str, section: str, data: Any, refs: dict[str, str]) -> None:
+    """Move secret values a save wrote out back into secrets.yaml.
+
+    Every field that was ``!secret name`` gets its (possibly new) value stored
+    under that name and the reference back. The broker password goes to
+    secrets.yaml even when it was plain, as migration v7 does on upgrade.
+    """
+    if not isinstance(data, dict):
+        return
+    from boneio.core.config.yaml_patch import YamlPatchError, move_to_secret
+
+    fields = dict(refs)
+    if section == "mqtt" and "password" not in fields:
+        fields["password"] = "mqtt_password"
+    for key, name in fields.items():
+        value = data.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            move_to_secret(config_file, (section, key), name, overwrite=key in refs)
+        except (OSError, YamlPatchError) as err:
+            _LOGGER.error("%s.%s saved in the config instead of secrets.yaml: %s", section, key, err)
+
+
 def update_config_section(config_file: str, section: str, data: dict | list) -> dict:
     """
     Update content of a configuration section with intelligent !include handling.
@@ -1432,6 +2177,8 @@ def update_config_section(config_file: str, section: str, data: dict | list) -> 
             "[SAVE] START section='%s' data_size=%d bytes",
             section, data_size,
         )
+
+        secret_refs = _section_secret_refs(config_file, section, data)
 
         # Special handling for mcp23017 - convert hex strings to integers
         # This ensures YAML writes them as integers which are then read back as hex
@@ -1514,8 +2261,7 @@ def update_config_section(config_file: str, section: str, data: dict | list) -> 
                         time.perf_counter() - t_dump, len(content),
                     )
                     t_write = time.perf_counter()
-                    with open(include_file_path, "w", encoding="utf-8") as f:
-                        f.write(content)
+                    write_atomically(include_file_path, content)
                     _LOGGER.info(
                         "[SAVE] file write (!include) took %.3fs",
                         time.perf_counter() - t_write,
@@ -1582,8 +2328,7 @@ def update_config_section(config_file: str, section: str, data: dict | list) -> 
 
                     # Write updated config
                     t_write = time.perf_counter()
-                    with open(config_file, "w", encoding="utf-8") as f:
-                        f.writelines(updated_lines)
+                    write_atomically(config_file, "".join(updated_lines))
                     _LOGGER.info(
                         "[SAVE] file write (config.yaml) took %.3fs",
                         time.perf_counter() - t_write,
@@ -1607,6 +2352,8 @@ def update_config_section(config_file: str, section: str, data: dict | list) -> 
 
                 _LOGGER.info(f"Successfully added new section '{section}' to config.yaml")
 
+            _keep_secret_refs(config_file, section, data, secret_refs)
+
             t_total = time.perf_counter() - t_start
             _LOGGER.info(
                 "[SAVE] DONE section='%s' total=%.3fs",
@@ -1624,7 +2371,56 @@ def update_config_section(config_file: str, section: str, data: dict | list) -> 
             return {"status": "error", "message": f"Error saving section: {str(e)}"}
 
 
+def edit_config_section(
+    config_file: str, mutate: Callable[[dict], tuple[str | None, Any]]
+) -> tuple[str | None, Any, Any]:
+    """Change one section starting from what the user's file holds.
+
+    Edits begin from the file, not from the running config: that one has the
+    board's pins and the schema's defaults filled in, and writing it back put
+    them into the user's file. The read, the change and the write happen under
+    the write lock, so a save in between cannot be lost.
+
+    Args:
+        config_file: Path to the main config.yaml file.
+        mutate: Gets the whole config as the files hold it (includes followed,
+            secrets resolved), changes one section in place and returns that
+            section's name and whatever its caller wants back. A name of None
+            means there was nothing to change and nothing is written. Anything
+            it raises aborts the edit before anything is written.
+
+    Returns:
+        The section's name, the section as written, and what ``mutate``
+        returned; None and None in front of that when nothing was written.
+
+    Raises:
+        ConfigurationException: When the section could not be written.
+    """
+    with _yaml_write_lock:
+        config = load_yaml_file(config_file) or {}
+        section, result = mutate(config)
+        if section is None:
+            return None, None, result
+        status = update_config_section(config_file, section, config[section])
+        if status["status"] == "error":
+            raise ConfigurationException(status["message"])
+        return section, strip_default_values(config[section], {}, section), result
+
+
 def update_yaml_field(config_file: str, section: str, field: str, value: str) -> dict:
+    """Update a single field within a YAML section without overwriting other fields.
+
+    Takes the same lock as update_config_section: both read the whole file,
+    edit it in memory and write it back, so running side by side the later
+    write silently undid the earlier one.
+
+    See _update_yaml_field for the arguments.
+    """
+    with _yaml_write_lock:
+        return _update_yaml_field(config_file, section, field, value)
+
+
+def _update_yaml_field(config_file: str, section: str, field: str, value: str) -> dict:
     """Update a single field within a YAML section without overwriting other fields.
 
     Supports nested sections via dot notation (e.g. 'web.cloud' to target
@@ -1705,8 +2501,7 @@ def update_yaml_field(config_file: str, section: str, field: str, value: str) ->
             updated_lines.insert(insert_index, f"{indent}{field}: {value}\n")
 
         full_path = f"{section}.{field}"
-        with open(config_file, "w", encoding="utf-8") as f:
-            f.writelines(updated_lines)
+        write_atomically(config_file, "".join(updated_lines))
 
         _LOGGER.info("Updated field '%s' = '%s'", full_path, value)
         return {"status": "success", "message": f"Field '{full_path}' updated"}

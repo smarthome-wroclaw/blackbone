@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from '@/hooks/useTranslation';
+import { useAuth } from '@/hooks/useAuth';
 import axios from '@/api/axios';
 import {
   FaPlay,
@@ -8,25 +9,27 @@ import {
   FaPause,
   FaForward,
   FaTint,
-  FaCheckCircle,
   FaTimesCircle,
-  FaSync,
   FaClock,
   FaCalendarAlt,
   FaCog,
+  FaChevronRight,
 } from 'react-icons/fa';
 import { GiValve } from 'react-icons/gi';
-import { TabsBox } from '@/components/ui/tabs-box';
+import clsx from 'clsx';
 import { LongPressWrapper } from '@/components/ui/LongPressWrapper';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from '@/components/ui/dialog';
 
 import type { ZoneState, IrrigationController } from '@/types/irrigation';
+import EntityInfoCard from './entityCard/EntityInfoCard';
+import { historyFormatters } from './entityCard/format';
+import { historyKey, recordIrrigation } from '@/utils/entityHistory';
+import { TILE_BUTTON, TILE_BUTTON_STACKED, TONE_ICON, type Tone } from './templates/tileStyles';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -34,12 +37,6 @@ function fmtSeconds(s: number): string {
   const m = Math.floor(s / 60);
   const sec = s % 60;
   return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
-}
-
-function stateColor(state: string) {
-  if (state === 'RUNNING') return 'text-success';
-  if (state === 'PAUSED') return 'text-warning';
-  return 'text-base-content/50';
 }
 
 function stateLabel(state: string, t: (k: string) => string) {
@@ -81,103 +78,124 @@ function ZoneRow({
     setEditEvery(false);
   };
 
+  const everyLabel = zone.run_every_n === 1
+    ? t('irrigation.every_run')
+    : t('irrigation.every_nth_run').replace('{n}', String(zone.run_every_n));
+
+  // The two values are edited in place; as chips they are real buttons with
+  // real text, not 11px links you have to aim for.
+  const chip = 'btn btn-sm h-9 min-h-9 px-3 gap-1.5 font-normal text-sm btn-ghost bg-base-content/5';
+
   return (
     <div
-      className={`rounded-lg text-sm transition-colors ${isActive ? 'bg-success/10 border border-success/30' : 'bg-base-200/50'
-        }`}
+      className={clsx(
+        'flex flex-col gap-2 px-2 py-3 rounded-lg transition-colors',
+        isActive && 'bg-success/10',
+      )}
     >
-      {/* Top row: checkbox + name + action button */}
-      <div className="flex items-center gap-2 px-3 pt-2 pb-1">
-        <input
-          type="checkbox"
-          className="checkbox checkbox-sm checkbox-primary shrink-0"
-          checked={zone.enabled}
-          onChange={(e) => onCommand(ctrlId, zone.id, e.target.checked ? 'ENABLE' : 'DISABLE')}
+      <div className="flex items-center gap-2">
+        {/* 44px label around a normal-size checkbox: the box is what you see,
+            the label is what your thumb hits. */}
+        <label
+          className="flex items-center justify-center w-11 h-11 shrink-0 cursor-pointer"
           title={zone.enabled ? t('irrigation.zone_disable') : t('irrigation.zone_enable')}
-        />
-        <span className={`flex-1 font-medium truncate min-w-0 ${!zone.enabled ? 'opacity-40' : ''}`}>
-          {isActive && <GiValve className="inline mr-1 text-success animate-pulse" />}
-          {!isActive && <GiValve className="inline mr-1 text-base-content/30" />}
-          {zone.name || zone.id}
-        </span>
+        >
+          <input
+            type="checkbox"
+            className="checkbox checkbox-primary"
+            checked={zone.enabled}
+            onChange={(e) => onCommand(ctrlId, zone.id, e.target.checked ? 'ENABLE' : 'DISABLE')}
+            aria-label={zone.enabled ? t('irrigation.zone_disable') : t('irrigation.zone_enable')}
+          />
+        </label>
+        <div className={clsx('flex-1 min-w-0', !zone.enabled && 'opacity-50')}>
+          <div className="flex items-center gap-2 text-base font-medium">
+            <GiValve className={clsx('w-4 h-4 shrink-0', isActive ? 'text-success animate-pulse' : 'text-base-content/40')} />
+            <span className="truncate">{zone.name || zone.id}</span>
+          </div>
+          {!zone.enabled && <span className="text-xs text-base-content/70">{t('irrigation.zone_disabled')}</span>}
+        </div>
         {isActive ? (
           <button
-            className="btn btn-xs btn-outline btn-warning shrink-0"
+            type="button"
+            className="btn btn-square w-11 h-11 min-h-11 shrink-0"
             title={t('irrigation.skip_zone')}
+            aria-label={t('irrigation.skip_zone')}
             onClick={() => onCommand(ctrlId, zone.id, 'NEXT_VALVE')}
           >
-            <FaForward className="h-3 w-3" />
+            <FaForward className="w-4 h-4" />
           </button>
         ) : (
           <button
-            className="btn btn-xs btn-outline btn-success shrink-0"
+            type="button"
+            className="btn btn-square w-11 h-11 min-h-11 shrink-0"
             title={t('irrigation.start_zone')}
+            aria-label={`${t('irrigation.start_zone')}: ${zone.name || zone.id}`}
             onClick={() => onCommand(ctrlId, zone.id, 'ON')}
             disabled={!zone.enabled}
           >
-            <FaPlay className="h-3 w-3" />
+            <FaPlay className="w-3.5 h-3.5" />
           </button>
         )}
       </div>
 
-      {/* Bottom row: duration + run every (compact stats) */}
-      <div className="flex items-center gap-3 px-3 pb-2 pl-10 text-xs text-base-content/60">
-        {/* Duration */}
-        <div className="flex items-center gap-1">
-          <FaClock className="h-2.5 w-2.5" />
-          {editDuration ? (
-            <input
-              autoFocus
-              type="number"
-              min={1}
-              step={1}
-              className="input input-xs input-bordered w-16 text-center"
-              value={durationInput}
-              onChange={(e) => setDurationInput(e.target.value)}
-              onBlur={saveDuration}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') saveDuration();
-                if (e.key === 'Escape') setEditDuration(false);
-              }}
-            />
-          ) : (
-            <button
-              className="btn btn-ghost btn-xs px-1 text-xs"
-              title={t('irrigation.edit_duration')}
-              onClick={() => { setDurationInput(String(zone.run_duration)); setEditDuration(true); }}
-            >
-              {zone.run_duration} min
-            </button>
-          )}
-        </div>
+      <div className="flex flex-wrap items-center gap-2 pl-[3.25rem]">
+        {editDuration ? (
+          <input
+            autoFocus
+            type="number"
+            min={1}
+            step={1}
+            inputMode="numeric"
+            aria-label={t('irrigation.run_duration')}
+            className="input input-sm h-9 w-24 text-center"
+            value={durationInput}
+            onChange={(e) => setDurationInput(e.target.value)}
+            onBlur={saveDuration}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') saveDuration();
+              if (e.key === 'Escape') setEditDuration(false);
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className={chip}
+            title={t('irrigation.edit_duration')}
+            onClick={() => { setDurationInput(String(zone.run_duration)); setEditDuration(true); }}
+          >
+            <FaClock className="w-3.5 h-3.5 opacity-60" />
+            {zone.run_duration} min
+          </button>
+        )}
 
-        {/* Run every */}
-        <div className="flex items-center gap-1">
-          <FaCalendarAlt className="h-2.5 w-2.5" />
-          {editEvery ? (
-            <input
-              autoFocus
-              type="number"
-              min={1}
-              className="input input-xs input-bordered w-12 text-center"
-              value={everyInput}
-              onChange={(e) => setEveryInput(e.target.value)}
-              onBlur={saveEvery}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') saveEvery();
-                if (e.key === 'Escape') setEditEvery(false);
-              }}
-            />
-          ) : (
-            <button
-              className="btn btn-ghost btn-xs px-1 text-xs"
-              title={t('irrigation.edit_run_every')}
-              onClick={() => { setEveryInput(String(zone.run_every_n)); setEditEvery(true); }}
-            >
-              {t('irrigation.every_n_runs').replace('{n}', String(zone.run_every_n))}
-            </button>
-          )}
-        </div>
+        {editEvery ? (
+          <input
+            autoFocus
+            type="number"
+            min={1}
+            inputMode="numeric"
+            aria-label={t('irrigation.run_every_n')}
+            className="input input-sm h-9 w-20 text-center"
+            value={everyInput}
+            onChange={(e) => setEveryInput(e.target.value)}
+            onBlur={saveEvery}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') saveEvery();
+              if (e.key === 'Escape') setEditEvery(false);
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className={chip}
+            title={t('irrigation.edit_run_every')}
+            onClick={() => { setEveryInput(String(zone.run_every_n)); setEditEvery(true); }}
+          >
+            <FaCalendarAlt className="w-3.5 h-3.5 opacity-60" />
+            {everyLabel}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -192,6 +210,7 @@ function ControllerCard({
   onZoneUpdate,
   onSettingUpdate,
   onScheduleSkip,
+  embedded = false,
 }: {
   ctrl: IrrigationController;
   onCommand: (ctrlId: string, cmd: string) => void;
@@ -199,12 +218,17 @@ function ControllerCard({
   onZoneUpdate: (ctrlId: string, zoneId: string, field: string, value: number | boolean) => void;
   onSettingUpdate: (ctrlId: string, field: string, value: number | boolean | string) => void;
   onScheduleSkip: (ctrlId: string, idx: number, skip: boolean) => void;
+  /** Inside the long-press card, whose header already has the icon and name. */
+  embedded?: boolean;
 }) {
   const { t } = useTranslation();
   const isRunning = ctrl.state === 'RUNNING';
   const isPaused = ctrl.state === 'PAUSED';
   const isActive = isRunning || isPaused;
-  const [activeTab, setActiveTab] = useState('zones');
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  // Focus the title, not the first field: that is the multiplier input, and on
+  // a phone focusing it throws a keyboard over half the sheet.
+  const detailsTitleRef = useRef<HTMLHeadingElement>(null);
 
   // ── Live countdown ──────────────────────────────────────────────────────
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -237,9 +261,9 @@ function ControllerCard({
   }, [ctrl.active_zone?.remaining_s, ctrl.active_zone?.id, isActive]);
 
   const zonesContent = (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col divide-y divide-base-content/10">
       {ctrl.zones.length === 0 ? (
-        <p className="text-xs text-base-content/40 text-center py-2">{t('irrigation.no_zones')}</p>
+        <p className="text-sm text-base-content/60 text-center py-4">{t('irrigation.no_zones')}</p>
       ) : (
         ctrl.zones.map((zone) => (
           <ZoneRow
@@ -256,32 +280,28 @@ function ControllerCard({
   );
 
   const schedulesContent = (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col divide-y divide-base-content/10">
       {ctrl.schedules.length === 0 ? (
-        <p className="text-xs text-base-content/40 text-center py-2">{t('irrigation.no_schedules')}</p>
+        <p className="text-sm text-base-content/60 text-center py-4">{t('irrigation.no_schedules')}</p>
       ) : (
         ctrl.schedules.map((sched) => (
           <div
             key={sched.index}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-base-200/50 text-sm"
+            className={clsx('flex items-center gap-3 px-2 py-2', sched.skip && 'opacity-60')}
           >
-            <FaClock className="text-base-content/40 h-3 w-3 shrink-0" />
-            <span className="font-mono">{sched.time}</span>
-            <span className="text-base-content/50">{sched.days}</span>
-            <span className="flex-1" />
-            <label className="flex items-center gap-1 cursor-pointer select-none text-xs">
-              {sched.skip ? (
-                <FaTimesCircle className="text-warning h-3.5 w-3.5" />
-              ) : (
-                <FaCheckCircle className="text-success h-3.5 w-3.5" />
-              )}
+            <FaClock className="w-4 h-4 text-base-content/40 shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-base font-medium tabular-nums">{sched.time}</div>
+              <div className="text-sm text-base-content/70 truncate">{sched.days}</div>
+            </div>
+            <label className="flex items-center gap-2 h-11 px-2 cursor-pointer select-none text-sm">
+              <span>{t('irrigation.skip_run')}</span>
               <input
                 type="checkbox"
-                className="checkbox checkbox-xs checkbox-warning"
+                className="toggle toggle-warning"
                 checked={sched.skip}
                 onChange={(e) => onScheduleSkip(ctrl.id, sched.index, e.target.checked)}
               />
-              <span>{t('irrigation.skip_run')}</span>
             </label>
           </div>
         ))
@@ -293,14 +313,14 @@ function ControllerCard({
     <div className="space-y-4">
       {/* ── Cycle Settings ── */}
       <fieldset className="border border-base-300 rounded-lg px-3 pb-3 pt-1">
-        <legend className="text-xs font-semibold uppercase tracking-wider text-base-content/50 px-1">
+        <legend className="text-sm font-semibold text-base-content/80 px-1">
           {t('irrigation.cycle_settings')}
         </legend>
         <div className="grid grid-cols-2 gap-3 mt-1">
           {/* Multiplier */}
           <div className="form-control">
             <label className="label py-0.5">
-              <span className="label-text text-xs">{t('irrigation.multiplier')}</span>
+              <span className="label-text text-sm">{t('irrigation.multiplier')}</span>
             </label>
             <div className="flex items-center gap-1">
               <input
@@ -308,7 +328,7 @@ function ControllerCard({
                 step={0.1}
                 min={0.1}
                 max={10}
-                className="input input-sm input-bordered w-full text-center"
+                className="input w-full text-center"
                 value={ctrl.multiplier}
                 onChange={(e) => {
                   const v = parseFloat(e.target.value);
@@ -322,14 +342,14 @@ function ControllerCard({
           {/* Repeat */}
           <div className="form-control">
             <label className="label py-0.5">
-              <span className="label-text text-xs">{t('irrigation.repeat')}</span>
+              <span className="label-text text-sm">{t('irrigation.repeat')}</span>
             </label>
             <input
               type="number"
               step={1}
               min={0}
               max={10}
-              className="input input-sm input-bordered w-full text-center"
+              className="input w-full text-center"
               value={ctrl.repeat}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10);
@@ -342,15 +362,15 @@ function ControllerCard({
 
       {/* ── Behavior ── */}
       <fieldset className="border border-base-300 rounded-lg px-3 pb-3 pt-1">
-        <legend className="text-xs font-semibold uppercase tracking-wider text-base-content/50 px-1">
+        <legend className="text-sm font-semibold text-base-content/80 px-1">
           {t('irrigation.behavior')}
         </legend>
         <div className="space-y-1.5 mt-1">
           {/* Auto-advance */}
-          <label className="flex items-center gap-2 cursor-pointer select-none py-0.5">
+          <label className="flex items-center gap-3 cursor-pointer select-none min-h-11">
             <input
               type="checkbox"
-              className="toggle toggle-sm toggle-primary"
+              className="toggle toggle-primary"
               checked={ctrl.auto_advance}
               onChange={(e) => onSettingUpdate(ctrl.id, 'auto_advance', e.target.checked)}
             />
@@ -358,10 +378,10 @@ function ControllerCard({
           </label>
 
           {/* Reverse */}
-          <label className="flex items-center gap-2 cursor-pointer select-none py-0.5">
+          <label className="flex items-center gap-3 cursor-pointer select-none min-h-11">
             <input
               type="checkbox"
-              className="toggle toggle-sm"
+              className="toggle"
               checked={ctrl.reverse}
               onChange={(e) => onSettingUpdate(ctrl.id, 'reverse', e.target.checked)}
             />
@@ -369,10 +389,10 @@ function ControllerCard({
           </label>
 
           {/* Standby */}
-          <label className="flex items-center gap-2 cursor-pointer select-none py-0.5">
+          <label className="flex items-center gap-3 cursor-pointer select-none min-h-11">
             <input
               type="checkbox"
-              className="toggle toggle-sm toggle-warning"
+              className="toggle toggle-warning"
               checked={ctrl.standby}
               onChange={(e) => onSettingUpdate(ctrl.id, 'standby', e.target.checked)}
             />
@@ -385,15 +405,15 @@ function ControllerCard({
 
       {/* ── Next Run & Water Source ── */}
       <fieldset className="border border-base-300 rounded-lg px-3 pb-3 pt-1">
-        <legend className="text-xs font-semibold uppercase tracking-wider text-base-content/50 px-1">
+        <legend className="text-sm font-semibold text-base-content/80 px-1">
           {t('irrigation.next_run')}
         </legend>
         <div className="space-y-2 mt-1">
           {/* Skip next run */}
-          <label className="flex items-center gap-2 cursor-pointer select-none py-0.5">
+          <label className="flex items-center gap-3 cursor-pointer select-none min-h-11">
             <input
               type="checkbox"
-              className="toggle toggle-sm toggle-warning"
+              className="toggle toggle-warning"
               checked={ctrl.skip_next_run}
               onChange={(e) => onSettingUpdate(ctrl.id, 'skip_next_run', e.target.checked)}
             />
@@ -406,7 +426,7 @@ function ControllerCard({
           {ctrl.water_sources.length > 1 && (
             <div className="form-control">
               <label className="label py-0.5">
-                <span className="label-text text-xs">💧 {t('irrigation.water_source')}</span>
+                <span className="label-text text-sm">💧 {t('irrigation.water_source')}</span>
               </label>
               <div className="flex flex-wrap gap-2">
                 {ctrl.water_sources.map((ws) => {
@@ -456,131 +476,138 @@ function ControllerCard({
     return Math.round(countdown + remainingZonesTime);
   })();
 
+  const tone: Tone = isRunning ? 'success' : isPaused ? 'warning' : 'neutral';
+  const state = (
+    <>
+      {stateLabel(ctrl.state, t)}
+      {isActive && ctrl.active_zone && <> · {ctrl.active_zone.name}</>}
+    </>
+  );
+
+  // The controls for the state it is in, each with its word: a green square
+  // with a play icon said "start" to nobody who had not used it before.
+  const controls = !isActive ? (
+    <button type="button" className={clsx(TILE_BUTTON, 'btn-primary w-full')} onClick={() => onCommand(ctrl.id, 'ON')}>
+      <FaPlay className="w-3.5 h-3.5" />
+      {t('irrigation.start')}
+    </button>
+  ) : (
+    <div className={clsx('grid gap-2', isRunning ? 'grid-cols-3' : 'grid-cols-2')}>
+      {isRunning ? (
+        <button type="button" className={TILE_BUTTON_STACKED} onClick={() => onCommand(ctrl.id, 'PAUSE')}>
+          <FaPause className="w-4 h-4" />
+          <span className="text-xs leading-tight">{t('irrigation.pause')}</span>
+        </button>
+      ) : (
+        <button type="button" className={clsx(TILE_BUTTON_STACKED, 'btn-primary')} onClick={() => onCommand(ctrl.id, 'RESUME')}>
+          <FaPlay className="w-4 h-4" />
+          <span className="text-xs leading-tight">{t('irrigation.resume')}</span>
+        </button>
+      )}
+      {isRunning && (
+        <button type="button" className={TILE_BUTTON_STACKED} onClick={() => onCommand(ctrl.id, 'NEXT_VALVE')}>
+          <FaForward className="w-4 h-4" />
+          <span className="text-xs leading-tight">{t('irrigation.next_zone_short')}</span>
+        </button>
+      )}
+      <button type="button" className={clsx(TILE_BUTTON_STACKED, 'btn-error btn-soft')} onClick={() => onCommand(ctrl.id, 'OFF')}>
+        <FaStop className="w-3.5 h-3.5" />
+        <span className="text-xs leading-tight">{t('irrigation.stop')}</span>
+      </button>
+    </div>
+  );
+
   return (
-    <div className="card bg-base-100 shadow-sm border border-base-200 w-full">
-      <div className="card-body p-4 gap-3">
-        {/* Header row */}
-        <div className="flex items-center gap-2">
-          <FaTint className={`h-5 w-5 shrink-0 ${stateColor(ctrl.state)}`} />
-          <div className="flex-1 min-w-0">
-            <h3 className="font-semibold text-base truncate">{ctrl.name}</h3>
-            <p className={`text-xs ${stateColor(ctrl.state)}`}>
-              {stateLabel(ctrl.state, t)}
-              {isRunning && ctrl.active_zone && (
-                <span className="ml-1 text-base-content/60">
-                  — {ctrl.active_zone.name}
-                </span>
-              )}
-              {isPaused && ctrl.active_zone && (
-                <span className="ml-1 text-base-content/60">
-                  — {ctrl.active_zone.name}
-                </span>
-              )}
-              {isPaused && ctrl.pause_timeout_s > 0 && (
-                <span className="ml-1 text-warning/70 text-[10px]">
-                  ⏱ {t('irrigation.pause_timeout_active').replace('{time}', fmtSeconds(ctrl.pause_timeout_s))}
-                </span>
-              )}
-            </p>
-          </div>
-
-          {/* Timers (zone + total) */}
-          {isActive && countdown != null && countdown > 0 && (
-            <div className="flex flex-col items-end gap-0.5 shrink-0 text-right">
-              {/* Zone timer */}
-              <div className="flex items-center gap-1 text-sm">
-                <FaClock className="h-3 w-3 text-success" />
-                <span className="tabular-nums font-mono font-semibold text-success">
-                  {fmtSeconds(countdown)}
-                </span>
-              </div>
-              {/* Total timer */}
-              {totalRemaining != null && totalRemaining > countdown && (
-                <div className="flex items-center gap-1 text-xs text-base-content/50">
-                  <span className="tabular-nums font-mono">
-                    {t('irrigation.total_short')}: {fmtSeconds(totalRemaining)}
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Main controls */}
-          <div className="flex items-center gap-1">
-            {!isActive && (
-              <button
-                className="btn btn-sm btn-success"
-                title={t('irrigation.start')}
-                onClick={() => onCommand(ctrl.id, 'ON')}
-              >
-                <FaPlay className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {isRunning && (
-              <button
-                className="btn btn-sm btn-warning"
-                title={t('irrigation.pause')}
-                onClick={() => onCommand(ctrl.id, 'PAUSE')}
-              >
-                <FaPause className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {isPaused && (
-              <button
-                className="btn btn-sm btn-info"
-                title={t('irrigation.resume')}
-                onClick={() => onCommand(ctrl.id, 'RESUME')}
-              >
-                <FaPlay className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {isRunning && (
-              <button
-                className="btn btn-sm btn-ghost"
-                title={t('irrigation.next_zone')}
-                onClick={() => onCommand(ctrl.id, 'NEXT_VALVE')}
-              >
-                <FaForward className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {isActive && (
-              <button
-                className="btn btn-sm btn-error"
-                title={t('irrigation.stop')}
-                onClick={() => onCommand(ctrl.id, 'OFF')}
-              >
-                <FaStop className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
+    <div className="stg-inset p-4 flex flex-col gap-4 h-full">
+      <div className="flex items-center gap-3">
+        {!embedded && (
+          <span className={clsx('flex items-center justify-center w-10 h-10 rounded-full shrink-0', TONE_ICON[tone])}>
+            <FaTint className="w-5 h-5" />
+          </span>
+        )}
+        <div className="flex flex-col min-w-0 flex-1">
+          {!embedded && <span className="text-base font-medium truncate">{ctrl.name}</span>}
+          <span className="text-sm text-base-content/70 truncate">{state}</span>
         </div>
-
-        {/* Tabs: Zones / Schedules / Settings */}
-        <TabsBox
-          name={`irrigation_${ctrl.id}`}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          tabs={[
-            {
-              id: 'zones',
-              label: t('irrigation.zones'),
-              badge: ctrl.zones.length,
-              content: zonesContent,
-            },
-            {
-              id: 'schedules',
-              label: t('irrigation.schedules'),
-              badge: ctrl.schedules.length,
-              content: schedulesContent,
-            },
-            {
-              id: 'settings',
-              label: t('irrigation.settings'),
-              content: settingsContent,
-            },
-          ]}
-        />
       </div>
+
+      {/* While it runs, the time left is what you came to see. */}
+      {isActive && countdown != null && countdown > 0 && (
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <span className="text-3xl font-semibold tabular-nums leading-none">{fmtSeconds(countdown)}</span>
+          {totalRemaining != null && totalRemaining > countdown && (
+            <span className="text-sm text-base-content/70 tabular-nums">
+              {t('irrigation.total_short')}: {fmtSeconds(totalRemaining)}
+            </span>
+          )}
+        </div>
+      )}
+      {isPaused && ctrl.pause_timeout_s > 0 && (
+        <p className="text-sm text-warning-content bg-warning/20 rounded-lg px-3 py-2">
+          {t('irrigation.pause_timeout_active').replace('{time}', fmtSeconds(ctrl.pause_timeout_s))}
+        </p>
+      )}
+
+      {controls}
+
+      {/* What the hidden settings are doing to the next run, said on the tile:
+          with them one click away, a skipped cycle would otherwise just look
+          like a controller that forgot to water. */}
+      {(ctrl.standby || ctrl.skip_next_run) && (
+        <div className="flex flex-col gap-1.5">
+          {ctrl.standby && (
+            <p className="text-sm bg-warning/20 rounded-lg px-3 py-2">{t('irrigation.standby_active')}</p>
+          )}
+          {ctrl.skip_next_run && (
+            <p className="text-sm bg-warning/20 rounded-lg px-3 py-2">{t('irrigation.skip_next_active')}</p>
+          )}
+        </div>
+      )}
+
+      <div>
+        <h4 className="text-sm font-semibold text-base-content/80 px-2 mb-1">
+          {t('irrigation.zones')} <span className="font-normal text-base-content/60">({ctrl.zones.length})</span>
+        </h4>
+        {zonesContent}
+      </div>
+
+      {/* Schedules and settings change rarely, so they live in a dialog. As
+          tabs on the tile they changed its height at every switch and moved
+          every tile below it. */}
+      <button
+        type="button"
+        className={clsx(TILE_BUTTON, 'btn-ghost bg-base-content/5 w-full mt-auto justify-between')}
+        onClick={() => setDetailsOpen(true)}
+      >
+        <span className="flex items-center gap-2">
+          <FaCog className="w-4 h-4 opacity-70" />
+          {t('irrigation.schedules_and_settings')}
+        </span>
+        <span className="flex items-center gap-2 text-base-content/60 font-normal">
+          {ctrl.schedules.length > 0 && (
+            <span className="badge badge-sm" aria-label={`${t('irrigation.schedules')}: ${ctrl.schedules.length}`}>
+              {ctrl.schedules.length}
+            </span>
+          )}
+          <FaChevronRight className="w-3 h-3" />
+        </span>
+      </button>
+
+      <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <DialogContent maxWidthClass="sm:max-w-lg" className="overflow-y-auto" showCloseButton initialFocus={detailsTitleRef}>
+          <DialogHeader>
+            <DialogTitle ref={detailsTitleRef} tabIndex={-1} className="outline-none">{ctrl.name}</DialogTitle>
+          </DialogHeader>
+          <section className="flex flex-col gap-2">
+            <h4 className="text-base font-semibold">{t('irrigation.schedules')}</h4>
+            {schedulesContent}
+          </section>
+          <section className="flex flex-col gap-2">
+            <h4 className="text-base font-semibold">{t('irrigation.settings')}</h4>
+            {settingsContent}
+          </section>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -589,6 +616,7 @@ function ControllerCard({
 
 export default function IrrigationView() {
   const { t } = useTranslation();
+  const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const [data, setData] = useState<IrrigationController[]>([]);
   const [loading, setLoading] = useState(true);
@@ -598,6 +626,7 @@ export default function IrrigationView() {
     try {
       const resp = await axios.get('/api/irrigation');
       setData(resp.data);
+      recordIrrigation(resp.data);
       setError(null);
     } catch (err) {
       console.error('Error fetching irrigation data:', err);
@@ -661,29 +690,26 @@ export default function IrrigationView() {
     }
   }, []);
 
-  // Long press dialog state
-  const [longPressDialog, setLongPressDialog] = useState<{
-    open: boolean;
-    ctrl: IrrigationController | null;
-  }>({
-    open: false,
-    ctrl: null,
-  });
+  // Long-press card. It shows the controller live, so it opens for a viewer
+  // too; only the settings entry behind ⋮ is for administrators. Only the id
+  // is kept, so the card follows each poll like the tile does.
+  const [card, setCard] = useState<{ open: boolean; id: string | null }>({ open: false, id: null });
+  const cardCtrl = card.id ? data.find(c => c.id === card.id) : undefined;
+  const closeCard = useCallback(() => setCard(prev => ({ ...prev, open: false })), []);
 
   const handleLongPress = useCallback((ctrl: IrrigationController) => {
-    setLongPressDialog({ open: true, ctrl });
+    setCard({ open: true, id: ctrl.id });
   }, []);
 
   const handleGoToSettings = useCallback(() => {
-    if (!longPressDialog.ctrl) return;
-    const ctrlId = longPressDialog.ctrl.id;
-    navigate(`/settings/template?edit=${encodeURIComponent(ctrlId)}`);
-    setLongPressDialog({ open: false, ctrl: null });
-  }, [longPressDialog.ctrl, navigate]);
+    if (!card.id) return;
+    navigate(`/settings/template?edit=${encodeURIComponent(card.id)}`);
+    closeCard();
+  }, [card.id, navigate, closeCard]);
 
   if (loading) {
     return (
-      <div className="container mx-auto p-4">
+      <div>
         <div className="flex justify-center items-center h-64">
           <span className="loading loading-spinner loading-lg" />
         </div>
@@ -693,7 +719,7 @@ export default function IrrigationView() {
 
   if (error && data.length === 0) {
     return (
-      <div className="container mx-auto p-4">
+      <div>
         <div className="alert alert-error">
           <FaTimesCircle />
           <span>{error}</span>
@@ -704,7 +730,7 @@ export default function IrrigationView() {
 
   if (data.length === 0) {
     return (
-      <div className="container mx-auto p-4">
+      <div>
         <div className="flex flex-col items-center justify-center h-48 gap-3 text-base-content/50">
           <FaTint className="h-10 w-10" />
           <p className="text-center">{t('irrigation.no_controllers')}</p>
@@ -713,26 +739,16 @@ export default function IrrigationView() {
     );
   }
 
+  // Rendered inside the Templates page's "Irrigation" panel, which already
+  // carries the title; a second heading and a refresh button (the data polls
+  // every three seconds) only stacked another frame inside that one.
   return (
-    <div className="container mx-auto p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-bold flex items-center gap-2">
-          <FaTint className="text-primary" />
-          {t('irrigation.title')}
-        </h2>
-        <button
-          className="btn btn-ghost btn-sm"
-          title={t('irrigation.refresh')}
-          onClick={() => fetchRef.current()}
-        >
-          <FaSync className="h-4 w-4" />
-        </button>
-      </div>
-
-      <div className="flex flex-col gap-4 max-w-2xl">
+    <div>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-4">
         {data.map((ctrl) => (
           <LongPressWrapper
             key={ctrl.id}
+            className="h-full"
             onLongPress={() => handleLongPress(ctrl)}
             title={t('irrigation.long_press_to_edit')}
           >
@@ -748,40 +764,30 @@ export default function IrrigationView() {
         ))}
       </div>
 
-      {/* Long press dialog - go to settings */}
-      <Dialog
-        open={longPressDialog.open}
-        onOpenChange={(open) =>
-          setLongPressDialog({ open, ctrl: open ? longPressDialog.ctrl : null })
-        }
-      >
-        <DialogContent className="sm:max-w-md bg-base-200">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <FaCog className="w-5 h-5" />
-              {t('irrigation.go_to_settings')}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="py-4">
-            <p>{t('irrigation.go_to_settings_confirm')}</p>
-            <p className="font-semibold mt-2">{longPressDialog.ctrl?.name}</p>
-          </div>
-          <DialogFooter className="gap-2">
-            <button
-              className="btn btn-ghost"
-              onClick={() => setLongPressDialog({ open: false, ctrl: null })}
-            >
-              {t('common.cancel')}
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={handleGoToSettings}
-            >
-              {t('irrigation.go_to_settings')}
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Long-press card: the controller live, its recent runs; settings behind ⋮ */}
+      {cardCtrl && (
+        <EntityInfoCard
+          open={card.open}
+          onOpenChange={(open) => !open && closeCard()}
+          icon={<FaTint className="text-blue-400" />}
+          title={cardCtrl.name}
+          subtitle={cardCtrl.id}
+          menu={isAdmin ? [{ key: 'settings', label: t('irrigation.go_to_settings'), icon: <FaCog />, onSelect: handleGoToSettings }] : []}
+          historyKey={historyKey('irrigation', cardCtrl.id)}
+          formatValue={historyFormatters.irrigation(t)}
+          maxWidthClass="sm:max-w-xl"
+        >
+          <ControllerCard
+            ctrl={cardCtrl}
+            onCommand={sendCommand}
+            onZoneCommand={sendZoneCommand}
+            onZoneUpdate={updateZone}
+            onSettingUpdate={updateSetting}
+            onScheduleSkip={toggleScheduleSkip}
+            embedded
+          />
+        </EntityInfoCard>
+      )}
     </div>
   );
 }

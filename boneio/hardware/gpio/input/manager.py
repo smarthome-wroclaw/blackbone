@@ -14,6 +14,7 @@ from gpiod import LineSettings
 from gpiod.line import Bias, Direction, Edge
 
 from boneio.const import PINS
+from boneio.hardware.udev_wait import RETRY_SECONDS, NodeWait, is_not_ready
 
 if TYPE_CHECKING:
     from boneio.components.input.detectors import BinarySensorDetector, MultiClickDetector
@@ -52,6 +53,8 @@ class GpioManager:
         if debounce_ms > self.MAX_DEBOUNCE_MS:
             raise ValueError(f"debounce_ms={debounce_ms} exceeds BeagleBone hardware limit of {self.MAX_DEBOUNCE_MS}ms")
         self._loop = loop
+        # Awaited between attempts to open a chip; a test swaps in a fake clock.
+        self._sleep = asyncio.sleep
         self._debounce_ms = debounce_ms
         self._inputs: list[GpioInputDefinition] = []
         self._requests: dict[int, gpiod.LineRequest] = {}
@@ -68,16 +71,13 @@ class GpioManager:
         # The best we can do is wait a bit and let the kernel clean up
         await asyncio.sleep(0.1)
 
-    def add_input(
-        self, name: str, pin: str, detector: MultiClickDetector | BinarySensorDetector, gpio_mode: str = "gpio"
-    ) -> None:
+    def add_input(self, name: str, pin: str, detector: MultiClickDetector | BinarySensorDetector) -> None:
         """Add a GPIO input to monitor.
 
         Args:
             name: Name of the input
             pin: Pin name (e.g., "P8_30")
             detector: Detector instance (MultiClickDetector or BinarySensorDetector)
-            gpio_mode: GPIO mode (gpio, gpio_pu, gpio_pd)
         """
         if pin not in PINS:
             _LOGGER.error("Pin %s not found in PINS mapping", pin)
@@ -107,14 +107,7 @@ class GpioManager:
             )
             return
 
-        # gpio_mode is deprecated — kernel overlay handles pull-up/pull-down.
-        # All modes now map to Bias.AS_IS. Accept silently for backward compat.
-        if gpio_mode != "gpio":
-            _LOGGER.debug(
-                "gpio_mode='%s' for %s is deprecated and ignored — kernel overlay handles GPIO configuration",
-                gpio_mode,
-                name,
-            )
+        # Pull-up/pull-down comes from the kernel overlay, not from us.
         bias = Bias.AS_IS
 
         input_def = GpioInputDefinition(
@@ -185,6 +178,41 @@ class GpioManager:
                 failed_lines.append((line_num, input_name))
 
         return successful_lines, failed_lines
+
+    async def _request_lines_when_ready(
+        self, chip: int, consumer: str, config: dict[tuple[int, ...], LineSettings]
+    ) -> gpiod.LineRequest:
+        """Request the chip's lines, waiting for udev if it has to.
+
+        On the first boot of a fresh image boneIO can get here before udev
+        has handed /dev/gpiochip* to the gpio group. One attempt used to be
+        all there was: the chip was logged as failed and skipped, and its
+        inputs stayed dead until someone restarted boneIO by hand. Now a
+        missing or not yet accessible chip is retried once a second within
+        the startup budget shared with the I2C bus
+        (:mod:`boneio.hardware.udev_wait`). The sleep is awaited, so the event
+        loop keeps running. When the budget runs out, or on any other error,
+        the original error is raised and start() reports and skips the chip
+        as before.
+        """
+        path = f"/dev/gpiochip{chip}"
+        node = NodeWait(path, _LOGGER)
+        while True:
+            try:
+                request = gpiod.request_lines(
+                    path,
+                    consumer=consumer,
+                    config=config,  # type: ignore[arg-type]
+                )
+            except OSError as err:
+                if node.retry(err):
+                    await self._sleep(RETRY_SECONDS)
+                    continue
+                if node.waiting and is_not_ready(err):
+                    _LOGGER.error("%s still not accessible after %.0f s", path, node.elapsed)
+                raise
+            node.opened()
+            return request
 
     async def start(self, debug_mode: bool = False) -> None:
         """Start monitoring GPIO inputs.
@@ -260,11 +288,7 @@ class GpioManager:
 
             # Request all lines at once (fast mode or after debug validation)
             try:
-                request = gpiod.request_lines(
-                    f"/dev/gpiochip{chip}",
-                    consumer=consumer,
-                    config=config,  # type: ignore[arg-type]
-                )
+                request = await self._request_lines_when_ready(chip, consumer, config)
                 self._requests[chip] = request
                 _LOGGER.info("✓ Successfully configured chip %d with %d lines", chip, len(config))
             except OSError as err:
@@ -499,8 +523,9 @@ class GpioManager:
                 callback()
             except Exception as e:
                 _LOGGER.error("Error in on-start callback: %s", e)
-        else:
-            # Queue for later execution
+        elif callback not in self._on_start_callbacks:
+            # Queue for later execution — once: MQTT connects queue the same
+            # state resend again and again while GPIO has not started.
             self._on_start_callbacks.append(callback)
 
     async def stop(self) -> None:

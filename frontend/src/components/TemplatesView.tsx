@@ -1,21 +1,39 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from '@/hooks/useTranslation';
+import { useAuth } from '@/hooks/useAuth';
 import axios from '@/api/axios';
 import { FaThermometerHalf, FaShieldAlt, FaDoorOpen, FaCog, FaTint } from 'react-icons/fa';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog';
 import { LongPressWrapper } from '@/components/ui/LongPressWrapper';
-import type { TemplatesData } from './templates/types';
+import EntityInfoCard from './entityCard/EntityInfoCard';
+import { historyFormatters } from './entityCard/format';
+import { historyKey, recordTemplates } from '@/utils/entityHistory';
+import type { AlarmCommandResult, AlarmState, GateState, TemplatesData, ThermostatState } from './templates/types';
 import ThermostatCard from './templates/ThermostatCard';
 import AlarmCard from './templates/AlarmCard';
 import GateCard from './templates/GateCard';
 import IrrigationView from './IrrigationView';
+import { EntityPanel } from './EntityGrid';
+
+type TemplateKind = 'thermostat' | 'alarm' | 'gate';
+
+/**
+ * Template tiles carry a row of three buttons, which an output tile does not,
+ * so they get fewer, wider columns than ENTITY_GRID_CLASS — but a grid all the
+ * same, so a group fills its panel instead of huddling in the left corner.
+ */
+const TEMPLATE_GRID_CLASS = 'grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] gap-4';
+
+/**
+ * A group is as wide as its tiles, not as wide as the page. With one
+ * thermostat, one alarm and two gates, full-width panels each left a single
+ * tile in the corner of an empty card; sized by count they share a row, and
+ * a group with many tiles still gets a whole row to itself by growing.
+ */
+const groupStyle = (tiles: number): React.CSSProperties => ({
+  flex: `${tiles} 1 calc(${tiles} * 16rem + ${tiles - 1} * 1rem + 2.5rem)`,
+  minWidth: 0,
+});
 import { useConfig } from '../contexts/ConfigContext';
 
 /**
@@ -25,33 +43,37 @@ import { useConfig } from '../contexts/ConfigContext';
  */
 export default function TemplatesView() {
   const { t } = useTranslation();
+  const { isAdmin } = useAuth();
   const navigate = useNavigate();
   const { hasIrrigationSection } = useConfig();
   const [data, setData] = useState<TemplatesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Long press dialog state
-  const [longPressDialog, setLongPressDialog] = useState<{ open: boolean; templateId: string | null; name: string | null }>({
+  // Long-press card. It shows the template live, so it opens for a viewer
+  // too; only the settings entry behind ⋮ is for administrators.
+  const [card, setCard] = useState<{ open: boolean; kind: TemplateKind; id: string | null }>({
     open: false,
-    templateId: null,
-    name: null
+    kind: 'thermostat',
+    id: null,
   });
+  const closeCard = useCallback(() => setCard(prev => ({ ...prev, open: false })), []);
 
-  const handleLongPress = useCallback((templateId: string, name: string) => {
-    setLongPressDialog({ open: true, templateId, name });
+  const handleLongPress = useCallback((kind: TemplateKind, templateId: string) => {
+    setCard({ open: true, kind, id: templateId });
   }, []);
 
   const handleGoToSettings = useCallback(() => {
-    if (!longPressDialog.templateId) return;
-    navigate(`/settings/template?edit=${encodeURIComponent(longPressDialog.templateId)}`);
-    setLongPressDialog({ open: false, templateId: null, name: null });
-  }, [longPressDialog.templateId, navigate]);
+    if (!card.id) return;
+    navigate(`/settings/template?edit=${encodeURIComponent(card.id)}`);
+    closeCard();
+  }, [card.id, navigate, closeCard]);
 
   const fetchData = useCallback(async () => {
     try {
       const response = await axios.get('/api/templates');
       setData(response.data);
+      recordTemplates(response.data);
       setError(null);
     } catch (err) {
       console.error('Error fetching templates:', err);
@@ -90,14 +112,26 @@ export default function TemplatesView() {
   }, []);
 
   // -- Alarm actions --
-  const sendAlarmCommand = useCallback(async (id: string, command: string, code?: string) => {
+  const sendAlarmCommand = useCallback(async (id: string, command: string, code?: string): Promise<AlarmCommandResult> => {
     try {
       const body: Record<string, string> = { command };
       if (code) body.code = code;
       await axios.post(`/api/templates/alarms/${id}/command`, body);
       fetchRef.current();
+      return { ok: true };
     } catch (err) {
+      // 403 is a wrong or missing code, 429 the lockout after too many; the
+      // PIN pad says which. Refetch either way, so the tile shows the
+      // lockout countdown the controller now reports.
+      fetchRef.current();
+      const response = (err as { response?: { status?: number; data?: { detail?: { reason?: string; retry_after?: number } } } }).response;
+      const detail = response?.data?.detail;
+      if (response?.status === 429) return { ok: false, reason: 'locked', retryAfter: detail?.retry_after };
+      if (response?.status === 403 && (detail?.reason === 'invalid_code' || detail?.reason === 'code_required')) {
+        return { ok: false, reason: detail.reason };
+      }
       console.error('Error sending alarm command:', err);
+      return { ok: false, reason: 'error' };
     }
   }, []);
 
@@ -136,28 +170,67 @@ export default function TemplatesView() {
   const gates = data?.gates ?? [];
   const isEmpty = thermostats.length === 0 && alarms.length === 0 && gates.length === 0;
 
+  /** The card for `card`, drawn from the latest poll like the tile is. */
+  const renderCard = () => {
+    if (!card.id) return null;
+    const entity = card.kind === 'thermostat'
+      ? thermostats.find(x => x.id === card.id)
+      : card.kind === 'alarm'
+        ? alarms.find(x => x.id === card.id)
+        : gates.find(x => x.id === card.id);
+    if (!entity) return null;
+    const Icon = card.kind === 'thermostat' ? FaThermometerHalf : card.kind === 'alarm' ? FaShieldAlt : FaDoorOpen;
+    const iconClass = card.kind === 'thermostat' ? 'text-orange-500' : card.kind === 'alarm' ? 'text-red-500' : 'text-blue-500';
+    return (
+      <EntityInfoCard
+        open={card.open}
+        onOpenChange={(open) => !open && closeCard()}
+        icon={<Icon className={iconClass} />}
+        title={entity.name || entity.id}
+        subtitle={entity.id}
+        menu={isAdmin ? [{ key: 'settings', label: t('inputs.go_to_settings'), icon: <FaCog />, onSelect: handleGoToSettings }] : []}
+        historyKey={historyKey(card.kind, entity.id)}
+        formatValue={historyFormatters[card.kind](t)}
+      >
+        {card.kind === 'thermostat' && (
+          <ThermostatCard data={entity as ThermostatState} onSetMode={setThermostatMode} onSetTemp={setThermostatTemp} embedded />
+        )}
+        {card.kind === 'alarm' && <AlarmCard data={entity as AlarmState} onCommand={sendAlarmCommand} embedded />}
+        {card.kind === 'gate' && <GateCard data={entity as GateState} onCommand={sendGateCommand} embedded />}
+      </EntityInfoCard>
+    );
+  };
+
   return (
     <div className="container mx-auto p-4">
-      <div className="card bg-base-200 shadow-xl">
-        <div className="card-body">
-          <h2 className="card-title mb-4">{t('templates.title')}</h2>
+      {/* No panel around the list: the page is a tinted field and the
+          entities are the cards on it. */}
+      <div>
+        <div className="flex flex-col gap-2">
+          <h2 className="text-xl font-bold tracking-tight mb-4">{t('templates.title')}</h2>
 
           {isEmpty && !hasIrrigationSection && (
-            <div className="alert alert-info">
-              <span>{t('templates.no_templates')}</span>
+            <div className="text-center py-8 text-base-content/60">
+              {t('templates.no_templates')}
             </div>
           )}
 
+          <div className="flex flex-wrap gap-5">
           {/* Thermostats */}
           {thermostats.length > 0 && (
-            <>
-              <div className="divider">
-                <FaThermometerHalf className="text-orange-500" />
-                {t('templates.thermostats')}
-              </div>
-              <div className="flex flex-wrap gap-2">
+            <div style={groupStyle(thermostats.length)}>
+              <EntityPanel
+                className="mb-0 h-full"
+                title={
+                  <>
+                    <FaThermometerHalf className="text-orange-500" />
+                    {t('templates.thermostats')}
+                  </>
+                }
+              >
+                <div className={TEMPLATE_GRID_CLASS}>
                 {thermostats.map((th) => (
-                  <LongPressWrapper key={th.id} onLongPress={() => handleLongPress(th.id, th.name || th.id)}>
+                  <LongPressWrapper key={th.id} className="h-full" onLongPress={() => handleLongPress('thermostat', th.id)}>
                     <ThermostatCard
                       data={th}
                       onSetMode={setThermostatMode}
@@ -165,60 +238,80 @@ export default function TemplatesView() {
                     />
                   </LongPressWrapper>
                 ))}
-              </div>
-            </>
+                </div>
+              </EntityPanel>
+            </div>
           )}
 
           {/* Alarms */}
           {alarms.length > 0 && (
-            <>
-              <div className="divider">
-                <FaShieldAlt className="text-red-500" />
-                {t('templates.alarms')}
-              </div>
-              <div className="flex flex-wrap gap-2">
+            <div style={groupStyle(alarms.length)}>
+              <EntityPanel
+                className="mb-0 h-full"
+                title={
+                  <>
+                    <FaShieldAlt className="text-red-500" />
+                    {t('templates.alarms')}
+                  </>
+                }
+              >
+                <div className={TEMPLATE_GRID_CLASS}>
                 {alarms.map((al) => (
-                  <LongPressWrapper key={al.id} onLongPress={() => handleLongPress(al.id, al.name || al.id)}>
+                  <LongPressWrapper key={al.id} className="h-full" onLongPress={() => handleLongPress('alarm', al.id)}>
                     <AlarmCard
                       data={al}
                       onCommand={sendAlarmCommand}
                     />
                   </LongPressWrapper>
                 ))}
-              </div>
-            </>
+                </div>
+              </EntityPanel>
+            </div>
           )}
 
           {/* Gates */}
           {gates.length > 0 && (
-            <>
-              <div className="divider">
-                <FaDoorOpen className="text-blue-500" />
-                {t('templates.gates')}
-              </div>
-              <div className="flex flex-wrap gap-2">
+            <div style={groupStyle(gates.length)}>
+              <EntityPanel
+                className="mb-0 h-full"
+                title={
+                  <>
+                    <FaDoorOpen className="text-blue-500" />
+                    {t('templates.gates')}
+                  </>
+                }
+              >
+                <div className={TEMPLATE_GRID_CLASS}>
                 {gates.map((g) => (
-                  <LongPressWrapper key={g.id} onLongPress={() => handleLongPress(g.id, g.name || g.id)}>
+                  <LongPressWrapper key={g.id} className="h-full" onLongPress={() => handleLongPress('gate', g.id)}>
                     <GateCard
                       data={g}
                       onCommand={sendGateCommand}
                     />
                   </LongPressWrapper>
                 ))}
-              </div>
-            </>
+                </div>
+              </EntityPanel>
+            </div>
           )}
 
           {/* Irrigation */}
           {hasIrrigationSection && (
-            <>
-              <div className="divider">
-                <FaTint className="text-blue-400" />
-                {t('navigation.irrigation')}
-              </div>
-              <IrrigationView />
-            </>
+            <div className="basis-full">
+              <EntityPanel
+                className="mb-0"
+                title={
+                  <>
+                    <FaTint className="text-blue-400" />
+                    {t('navigation.irrigation')}
+                  </>
+                }
+              >
+                <IrrigationView />
+              </EntityPanel>
+            </div>
           )}
+          </div>
         </div>
       </div>
 
@@ -228,35 +321,8 @@ export default function TemplatesView() {
         </div>
       )}
 
-      {/* Long press dialog - go to settings */}
-      <Dialog open={longPressDialog.open} onOpenChange={(open) => setLongPressDialog({ open, templateId: open ? longPressDialog.templateId : null, name: open ? longPressDialog.name : null })}>
-        <DialogContent className="sm:max-w-md bg-base-200">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <FaCog className="w-5 h-5" />
-              {t('inputs.go_to_settings')}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="py-4">
-            <p>{t('inputs.go_to_settings_confirm')}</p>
-            <p className="font-semibold mt-2">{longPressDialog.name}</p>
-          </div>
-          <DialogFooter className="gap-2">
-            <button
-              className="btn btn-ghost"
-              onClick={() => setLongPressDialog({ open: false, templateId: null, name: null })}
-            >
-              {t('common.cancel')}
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={handleGoToSettings}
-            >
-              {t('inputs.go_to_settings')}
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Long-press card: the template live, its recent changes; settings behind ⋮ */}
+      {renderCard()}
     </div>
   );
 }

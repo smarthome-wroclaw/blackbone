@@ -1,5 +1,14 @@
 import axios from 'axios';
 import { getBasePath } from './basePath';
+import { isReauthRequired, retryAfterReauth } from './reauth';
+import { rememberSignoutReason } from './signoutReason';
+
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    /** Set on the one repeat after a password prompt, so it cannot loop. */
+    _reauthRetried?: boolean;
+  }
+}
 
 const baseURL = getBasePath();
 
@@ -21,6 +30,12 @@ axiosInstance.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    // A file upload has to go out as multipart. With the instance's JSON
+    // default, axios serialises FormData into JSON instead — `{"file":{}}` —
+    // and the server never sees the file. The browser adds the boundary.
+    if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+      config.headers.set('Content-Type', 'multipart/form-data');
+    }
     return config;
   },
   (error) => {
@@ -32,7 +47,7 @@ axiosInstance.interceptors.request.use(
 axiosInstance.interceptors.response.use(
   (response) => {
     // Auto-invalidate config cache on any mutating request to config endpoints.
-    // This covers UISettings, ConfigEditorUI, TeachMode, QuickActionSheet, etc.
+    // This covers UISettings, TeachMode, QuickActionSheet, etc.
     const method = response.config.method?.toLowerCase();
     const url = response.config.url || '';
     if (
@@ -47,6 +62,14 @@ axiosInstance.interceptors.response.use(
     return response;
   },
   (error) => {
+    // A request that wants the password typed recently: ask, then send it
+    // again. The request interceptor above picks up the fresh token, and a
+    // FormData body (a config archive) goes out a second time unchanged.
+    if (isReauthRequired(error) && error.config && !error.config._reauthRetried) {
+      return retryAfterReauth(error, () =>
+        axiosInstance({ ...error.config, _reauthRetried: true }),
+      );
+    }
     if (error.response?.status === 401) {
       // Drop the dead token AND tell the auth layer, which owns the React
       // state. Clearing storage alone left the app believing it was signed in:
@@ -56,6 +79,7 @@ axiosInstance.interceptors.response.use(
       //
       // An event rather than an import: useAuth imports axios, so calling into
       // it from here would be circular.
+      rememberSignoutReason(error.response.data?.code);
       localStorage.removeItem('token');
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     }

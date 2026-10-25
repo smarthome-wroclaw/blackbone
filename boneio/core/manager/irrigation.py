@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from boneio.components.irrigation import IrrigationController, IrrigationZone, WaterSource
@@ -35,6 +36,9 @@ class IrrigationManager:
         self._manager = manager
         self._controllers: dict[str, IrrigationController] = {}
         self._subscribed_topics: set[str] = set()
+        # Who handles each subscribed topic now. A topic is subscribed once,
+        # and its messages go to whatever handler was registered last.
+        self._topic_handlers: dict[str, Callable[[str, str], Awaitable[None]]] = {}
 
         self._initialize(irrigation_config)
 
@@ -224,6 +228,7 @@ class IrrigationManager:
             with contextlib.suppress(Exception):
                 await self._manager.message_bus.unsubscribe_and_stop_listen(topic)
         self._subscribed_topics.clear()
+        self._topic_handlers.clear()
 
         for ctrl in self._controllers.values():
             await ctrl.full_stop()
@@ -249,6 +254,10 @@ class IrrigationManager:
             ctrl_id = str(cfg.get("id", "")).strip()
             if ctrl_id:
                 new_ids.add(ctrl_id)
+
+        # Every controller registers its handlers again below; whatever is
+        # left without one afterwards belongs to nothing that exists.
+        self._topic_handlers.clear()
 
         # Stop & remove deleted controllers
         removed_ids = set(self._controllers.keys()) - new_ids
@@ -288,11 +297,8 @@ class IrrigationManager:
             await ctrl.publish_all_states()
             _LOGGER.info("Reloaded irrigation controller '%s'", ctrl_id)
 
-        # Unsubscribe topics for controllers that no longer exist
-        valid_prefixes = set()
-        for ctrl in self._controllers.values():
-            valid_prefixes.add(f"{ctrl._topic_prefix}/cmd/irrigation/{ctrl.id}")
-        stale_topics = {t for t in self._subscribed_topics if not any(t.startswith(p) for p in valid_prefixes)}
+        # Unsubscribe topics of controllers, zones and schedules that are gone
+        stale_topics = self._subscribed_topics - self._topic_handlers.keys()
         for topic in stale_topics:
             with contextlib.suppress(Exception):
                 await self._manager.message_bus.unsubscribe_and_stop_listen(topic)
@@ -308,9 +314,6 @@ class IrrigationManager:
 
         Sends empty payload to discovery topics to remove entities from HA.
         """
-        cfg = self._manager.config_helper
-        serial = cfg.serial_number
-
         # Build list of discovery IDs to remove
         discovery_ids: list[tuple[str, str]] = [
             (f"{ctrl.id}", "switch"),
@@ -321,7 +324,11 @@ class IrrigationManager:
             (f"{ctrl.id}_pause", "button"),
             (f"{ctrl.id}_resume", "button"),
             (f"{ctrl.id}_event", "event"),
+            (f"{ctrl.id}_zone_end_time", "sensor"),
+            (f"{ctrl.id}_next_run_time", "sensor"),
         ]
+        if len(ctrl.water_sources) > 1:
+            discovery_ids.append((f"{ctrl.id}_water_source", "select"))
         # Multi-zone-only entities
         if len(ctrl.zones) > 1:
             discovery_ids.extend([
@@ -337,16 +344,40 @@ class IrrigationManager:
             discovery_ids.append((f"{ctrl.id}_schedule_{idx}_skip", "switch"))
 
         for disc_id, ha_type in discovery_ids:
-            topic = f"{cfg.ha_discovery_prefix}/{ha_type}/{serial}/{disc_id}/config"
-            self._manager.send_message(topic=topic, payload="", retain=True)
+            self._unpublish_discovery(id=disc_id, ha_type=ha_type)
 
-    async def _subscribe_topic(self, topic: str, handler) -> None:
+    def _unpublish_discovery(self, id: str, ha_type: str) -> None:
+        """Take an entity out of Home Assistant and out of the discovery cache.
+
+        Left in the cache, the entity would be announced again whenever Home
+        Assistant comes online, and an empty payload there is resent each time.
+        """
+        cfg = self._manager.config_helper
+        topic = f"{cfg.ha_discovery_prefix}/{ha_type}/{cfg.serial_number}/{id}/config"
+        self._manager.send_message(topic=topic, payload="", retain=True)
+        cfg.remove_autodiscovery_msg(ha_type, topic)
+
+    async def _subscribe_topic(self, topic: str, handler: Callable[[str, str], Awaitable[None]]) -> None:
+        """Route a command topic to handler, replacing any handler it had.
+
+        A reload rebuilds controllers with the ids they had, on the same
+        topics; the subscription stays and the new controller's handler takes
+        the messages from then on.
+        """
+        self._topic_handlers[topic] = handler
         if topic in self._subscribed_topics:
-            _LOGGER.debug("Irrigation: topic already subscribed: %s", topic)
             return
         _LOGGER.debug("Irrigation: subscribing to MQTT topic: %s → handler=%s", topic, handler.__name__)
-        await self._manager.message_bus.subscribe_and_listen(topic, handler)
+        await self._manager.message_bus.subscribe_and_listen(topic, self._dispatch)
         self._subscribed_topics.add(topic)
+
+    async def _dispatch(self, topic: str, payload: str) -> None:
+        handler = self._topic_handlers.get(topic)
+        if handler is None:
+            # Between a reload dropping the old handlers and registering new ones.
+            _LOGGER.debug("Irrigation: no handler for %s, dropping command", topic)
+            return
+        await handler(topic, payload)
 
     async def _subscribe_controller(self, ctrl: IrrigationController) -> None:
         async def handle_main(_topic: str, payload: str, _ctrl: IrrigationController = ctrl) -> None:
@@ -570,11 +601,7 @@ class IrrigationManager:
 
         for zone in ctrl.zones:
             # Remove stale switch discovery (migration from switch → valve)
-            self._manager.publish_ha_discovery(
-                id=f"{ctrl.id}_zone_{zone.id}",
-                ha_type="switch",
-                payload="",
-            )
+            self._unpublish_discovery(id=f"{ctrl.id}_zone_{zone.id}", ha_type="switch")
             _pub(
                 id=f"{ctrl.id}_zone_{zone.id}",
                 ha_type="valve",
@@ -621,10 +648,8 @@ class IrrigationManager:
 
             # Remove stale per-zone next_run sensor (migrated to valve attributes)
             if zone.run_every_n > 1:
-                self._manager.publish_ha_discovery(
-                    id=f"{ctrl.id}_zone_{zone.id}_next_run",
-                    ha_type="sensor",
-                    payload="",
+                self._unpublish_discovery(
+                    id=f"{ctrl.id}_zone_{zone.id}_next_run", ha_type="sensor"
                 )
 
         for idx, _schedule in enumerate(ctrl._schedule):
@@ -690,3 +715,17 @@ class IrrigationManager:
                 config_helper=cfg,
             ),
         )
+
+    def rebind_outputs(self) -> None:
+        """Point zones and water sources at the outputs registered now.
+
+        Called after an output reload, which rebuilds outputs as new objects.
+        Unlike reload_irrigation it stops nothing: a running cycle carries on
+        with the current valves.
+        """
+        outputs = self._manager.outputs
+        for ctrl in self._controllers.values():
+            for zone in ctrl.zones:
+                zone.valve = outputs.resolve_current(zone.valve)
+            for water_source in ctrl.water_sources:
+                water_source.outputs[:] = [outputs.resolve_current(o) for o in water_source.outputs]

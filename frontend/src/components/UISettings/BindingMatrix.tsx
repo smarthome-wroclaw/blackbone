@@ -14,6 +14,10 @@ import {
 import { FaFaucetDrip } from 'react-icons/fa6';
 import clsx from 'clsx';
 import EditItemDialog from './components/EditItemDialog';
+import { SettingsPage, SettingsCard } from './ui';
+import type { Action, AreaEntity, RemoteDeviceEntity } from '@/types/config';
+import type { ConfigRecord, JsonSchema } from '@/types/jsonSchema';
+import type { OutputGroupRecord } from './ActionFields/types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,19 +68,64 @@ function OutputTypeIcon({ outputType, className }: { outputType?: string; classN
   }
 }
 
+/** The parts of a settings section the matrix reads. */
 interface ConfigSection {
   name: string;
-  schema: any;
-  normalizedSchema: any;
-  uiSchema: any;
-  data: Record<string, any>;
+  schema?: JsonSchema;
+  normalizedSchema?: JsonSchema;
+  uiSchema?: ConfigRecord;
 }
 
+/** A local_inputs / remote_inputs entry — only the fields the matrix reads. */
+interface RawInput {
+  id?: string;
+  boneio_input?: string;
+  pin?: string;
+  name?: string;
+  area?: string;
+  /** Remote inputs: owning device. */
+  boneio_id?: string;
+  remote_device?: string;
+  entity_id?: string;
+  _type?: string;
+  _inputType?: string;
+  /** Keyed by click type (single, pressed, double_then_long, ...). */
+  actions?: Record<string, Action[] | undefined>;
+}
+
+/** An output / cover / remote_outputs entry — only the fields the matrix reads. */
+interface RawOutput {
+  id?: string;
+  name?: string;
+  area?: string;
+  output_type?: string;
+  device_class?: string;
+  boneio_id?: string;
+  remote_device?: string;
+  output_id?: string;
+}
+
+/** Settings form data, keyed by section name. */
+interface BindingFormData {
+  local_inputs?: RawInput[];
+  remote_inputs?: RawInput[];
+  output?: RawOutput[];
+  cover?: RawOutput[];
+  remote_outputs?: RawOutput[];
+  output_group?: OutputGroupRecord[];
+  remote_devices?: RemoteDeviceEntity[];
+  areas?: AreaEntity[];
+  [section: string]: unknown;
+}
+
+/** i18n lookup, as returned by useTranslation(). */
+type TFn = (key: string, opts?: Record<string, string | number>) => string;
+
 interface BindingMatrixProps {
-  formData: Record<string, any>;
+  formData: BindingFormData;
   sections: ConfigSection[];
-  onSaveSection: (sectionName: string, dataOverride?: any) => Promise<void>;
-  onUpdateFormData: (section: string, data: any) => void;
+  onSaveSection: (sectionName: string, dataOverride?: ConfigRecord[]) => Promise<void>;
+  onUpdateFormData: (section: string, data: ConfigRecord[]) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +151,32 @@ const ACTION_SHORT_KEYS: Record<string, string> = {
   OPEN: 'short_open',
   CLOSE: 'short_close',
   STOP: 'short_stop',
+  SET_POSITION: 'short_set_position',
+};
+
+/**
+ * Row colours per input kind — the same pair the input settings use
+ * (event = primary, binary_sensor = warning), so a row reads as the kind
+ * of input it is without opening it.
+ *
+ * The row header is sticky and cells scroll underneath it, so its tint is
+ * mixed into base-100 rather than laid over it with alpha.
+ */
+const INPUT_KIND_STYLE: Record<InputRow['inputKind'], { header: string; headerHover: string; card: string; dot: string; labelKey: string }> = {
+  event: {
+    header: 'bg-[color-mix(in_oklab,var(--color-primary)_13%,var(--color-base-100))] shadow-[inset_3px_0_0_var(--color-primary)]',
+    headerHover: 'bg-[color-mix(in_oklab,var(--color-primary)_22%,var(--color-base-100))] shadow-[inset_3px_0_0_var(--color-primary)]',
+    card: 'border-l-4 border-l-primary',
+    dot: 'bg-primary',
+    labelKey: 'sections.event',
+  },
+  binary_sensor: {
+    header: 'bg-[color-mix(in_oklab,var(--color-warning)_15%,var(--color-base-100))] shadow-[inset_3px_0_0_var(--color-warning)]',
+    headerHover: 'bg-[color-mix(in_oklab,var(--color-warning)_25%,var(--color-base-100))] shadow-[inset_3px_0_0_var(--color-warning)]',
+    card: 'border-l-4 border-l-warning',
+    dot: 'bg-warning',
+    labelKey: 'sections.binary_sensor',
+  },
 };
 
 /** Full legend items for the legend card — keys reference binding_matrix.legend_* */
@@ -161,7 +236,7 @@ function bindingTooltip(b: Binding, t: (key: string) => string): string {
 /**
  * Extract target ID from an action definition.
  */
-function extractTargetId(action: any): { targetId: string; actionType: string; actionValue: string; remoteDevice?: string } {
+function extractTargetId(action: Action): { targetId: string; actionType: string; actionValue: string; remoteDevice?: string } {
   const actionType = action.action || 'output';
   let targetId = '';
   let actionValue = '';
@@ -203,7 +278,7 @@ function extractTargetId(action: any): { targetId: string; actionType: string; a
 /**
  * Parse all inputs (local + remote) into InputRow[].
  */
-function extractInputs(formData: Record<string, any>): InputRow[] {
+function extractInputs(formData: BindingFormData): InputRow[] {
   const rows: InputRow[] = [];
   const clickTypes = ['single', 'double', 'triple', 'long', 'pressed', 'released',
     'double_then_long', 'single_then_long', 'double_then_single'];
@@ -267,7 +342,7 @@ function extractInputs(formData: Record<string, any>): InputRow[] {
 /**
  * Extract all outputs and covers into OutputColumn[].
  */
-function extractOutputs(formData: Record<string, any>): OutputColumn[] {
+function extractOutputs(formData: BindingFormData): OutputColumn[] {
   const cols: OutputColumn[] = [];
 
   // Local outputs (skip output_type: cover/none — cover relays and disabled outputs)
@@ -329,7 +404,7 @@ function extractOutputs(formData: Record<string, any>): OutputColumn[] {
 function StatsBanner({ inputs, outputs, t }: {
   inputs: InputRow[];
   outputs: OutputColumn[];
-  t: (key: string, opts?: any) => string;
+  t: TFn;
 }) {
   const localInputs = inputs.filter(i => i.type === 'local');
   const remoteInputs = inputs.filter(i => i.type === 'remote');
@@ -351,8 +426,8 @@ function StatsBanner({ inputs, outputs, t }: {
   return (
     <div className="gap-3 grid grid-cols-1 md:grid-cols-4 mb-4">
       {/* Local */}
-      <div className="space-y-1 bg-base-200/50 p-3 border border-base-300 rounded-xl">
-        <h4 className="font-bold text-xs text-base-content/50 uppercase tracking-wider">{t('binding_matrix.local')}</h4>
+      <div className="stg-inset space-y-1 p-3">
+        <h4 className="font-semibold text-[11px] text-base-content/50 uppercase tracking-[0.08em]">{t('binding_matrix.local')}</h4>
         <p className="text-xs text-base-content/70">
           📥 {t('binding_matrix.inputs')}: {localInputs.length}
           <span className="ml-1 text-success">({boundLocalInputs.length} ✓)</span>
@@ -372,8 +447,8 @@ function StatsBanner({ inputs, outputs, t }: {
 
       {/* Remote */}
       {(remoteInputs.length > 0 || remoteOutputs.length > 0) && (
-        <div className="space-y-1 bg-info/5 p-3 border border-info/20 rounded-xl">
-          <h4 className="font-bold text-info/70 text-xs uppercase tracking-wider">{t('binding_matrix.remote')}</h4>
+        <div className="space-y-1 rounded-xl border border-info/25 bg-info/8 p-3">
+          <h4 className="font-semibold text-[11px] text-info uppercase tracking-[0.08em]">{t('binding_matrix.remote')}</h4>
           <p className="text-xs text-base-content/70">
             📥 {t('binding_matrix.inputs')}: {remoteInputs.length}
             <span className="ml-1 text-success">({boundRemoteInputs.length} ✓)</span>
@@ -388,25 +463,37 @@ function StatsBanner({ inputs, outputs, t }: {
       )}
 
       {/* Total */}
-      <div className="flex flex-col justify-center bg-primary/5 p-3 border border-primary/20 rounded-xl">
+      <div className="flex flex-col justify-center rounded-xl border border-primary/25 bg-primary/8 p-3">
         <p className="font-extrabold text-primary text-2xl">{totalBindings}</p>
         <p className="font-medium text-primary/70 text-xs">{t('binding_matrix.total_bindings')}</p>
       </div>
 
       {/* Legend */}
-      <div className="bg-base-200/50 p-3 border border-base-300 rounded-xl">
-        <h4 className="mb-1.5 font-bold text-xs text-base-content/50 uppercase tracking-wider">{t('binding_matrix.legend')}</h4>
-        <div className="gap-x-3 gap-y-0.5 grid grid-cols-2">
+      <div className="stg-inset p-3">
+        <h4 className="mb-1.5 font-semibold text-[11px] text-base-content/50 uppercase tracking-[0.08em]">{t('binding_matrix.legend')}</h4>
+        {/* Wrapping rows rather than a fixed column count. This cell is a
+            quarter of the card, so at ordinary window widths `grid-cols-2`
+            gave each label ~80px and "Pojedyncze" ran straight over
+            "Podwójne". Flowing items keep every label whole and put as many
+            on a line as actually fit. */}
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5">
           {CLICK_TYPE_LEGEND.map(item => (
-            <span key={item.key} className="text-xxs text-base-content/60">
+            <span key={item.key} className="text-xxs text-base-content/60 whitespace-nowrap">
               <span className="font-mono font-bold text-base-content/80">{item.icon}</span> {t(item.labelKey)}
             </span>
           ))}
         </div>
-        <div className="gap-x-2 gap-y-0.5 grid grid-cols-3 mt-1.5 pt-1.5 border-base-300 border-t">
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 pt-1.5 border-base-content/10 border-t">
           {ACTION_LEGEND_KEYS.map(item => (
-            <span key={item.shortKey} className="text-xxs text-base-content/60">
+            <span key={item.shortKey} className="text-xxs text-base-content/60 whitespace-nowrap">
               <span className="font-mono font-bold text-base-content/80">{t(item.shortKey)}</span> {t(item.labelKey)}
+            </span>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 pt-1.5 border-base-content/10 border-t">
+          {Object.values(INPUT_KIND_STYLE).map(kind => (
+            <span key={kind.labelKey} className="flex items-center gap-1 text-xxs text-base-content/60 whitespace-nowrap">
+              <span className={clsx('inline-block rounded-sm w-2.5 h-2.5', kind.dot)} /> {t(kind.labelKey)}
             </span>
           ))}
         </div>
@@ -415,11 +502,30 @@ function StatsBanner({ inputs, outputs, t }: {
   );
 }
 
+/**
+ * The scrolling ancestor that moves the page up and down.
+ *
+ * Looked up rather than passed in: the matrix does not know it is mounted in
+ * the settings pane, and hard-coding that selector here would break the first
+ * time it is rendered somewhere else. Walking up for the nearest element that
+ * actually scrolls vertically answers the same question without the coupling.
+ */
+function findVerticalScroller(from: HTMLElement | null): HTMLElement | null {
+  let node = from?.parentElement ?? null;
+  while (node && node !== document.body) {
+    const overflowY = getComputedStyle(node).overflowY;
+    const scrolls = overflowY === 'auto' || overflowY === 'scroll';
+    if (scrolls && node.scrollHeight > node.clientHeight) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 /** Unconfigured items section (mobile + desktop). */
 function UnconfiguredSection({ inputs, outputs, t }: {
   inputs: InputRow[];
   outputs: OutputColumn[];
-  t: (key: string, opts?: any) => string;
+  t: TFn;
 }) {
   const [showLocal, setShowLocal] = useState(true);
   const [showRemote, setShowRemote] = useState(true);
@@ -547,7 +653,7 @@ function DesktopMatrix({ inputs, outputs, areaFilter, hideEmpty, t, onEditInput,
   outputs: OutputColumn[];
   areaFilter: Set<string>;
   hideEmpty: boolean;
-  t: (key: string, opts?: any) => string;
+  t: TFn;
   onEditInput: (input: InputRow, clickType?: string) => void;
   onEditOutput: (output: OutputColumn) => void;
 }) {
@@ -557,7 +663,11 @@ function DesktopMatrix({ inputs, outputs, areaFilter, hideEmpty, t, onEditInput,
   const isMouseDown = useRef(false);
   const isDragging = useRef(false);
   const dragStartX = useRef(0);
+  const dragStartY = useRef(0);
   const scrollStartX = useRef(0);
+  const scrollStartY = useRef(0);
+  /** The settings pane the matrix sits in — what dragging up and down moves. */
+  const pageScroller = useRef<HTMLElement | null>(null);
 
   // Context menu for empty cells
   const [ctxMenu, setCtxMenu] = useState<{
@@ -704,25 +814,57 @@ function DesktopMatrix({ inputs, outputs, areaFilter, hideEmpty, t, onEditInput,
     <div
       ref={scrollRef}
       className="border border-base-300 rounded-xl overflow-x-auto cursor-grab active:cursor-grabbing select-none"
-      onMouseDown={(e) => {
+      onPointerDown={(e) => {
+        // Mouse only. Touch already pans this box natively, and hijacking it
+        // would take away the flick-to-scroll everyone expects on a phone.
+        if (e.pointerType !== 'mouse' || e.button !== 0) return;
         isMouseDown.current = true;
         isDragging.current = false;
         dragStartX.current = e.clientX;
+        dragStartY.current = e.clientY;
         scrollStartX.current = scrollRef.current?.scrollLeft || 0;
+        pageScroller.current = findVerticalScroller(scrollRef.current);
+        scrollStartY.current = pageScroller.current?.scrollTop || 0;
       }}
-      onMouseMove={(e) => {
+      onPointerMove={(e) => {
         if (!isMouseDown.current || !scrollRef.current) return;
         const dx = e.clientX - dragStartX.current;
-        // Only start dragging after 5px threshold to allow normal clicks
-        if (!isDragging.current && Math.abs(dx) > 5) {
+        const dy = e.clientY - dragStartY.current;
+        // Only start dragging after a 5px threshold, so a click on a cell is
+        // still a click. Either axis can cross it — the grid is wide and the
+        // page is long, and the gesture is the same one.
+        if (!isDragging.current && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
           isDragging.current = true;
+          // Claim the pointer only once it is a drag, so an ordinary click
+          // still lands on the cell under the cursor. From here the moves
+          // keep coming even when the cursor leaves the table, which is what
+          // dragging the page up and down needs.
+          try {
+            e.currentTarget.setPointerCapture(e.pointerId);
+          } catch {
+            // Capture is a nicety; the drag still works inside the box.
+          }
         }
         if (isDragging.current) {
           scrollRef.current.scrollLeft = scrollStartX.current - dx;
+          if (pageScroller.current) {
+            pageScroller.current.scrollTop = scrollStartY.current - dy;
+          }
         }
       }}
-      onMouseUp={() => { isMouseDown.current = false; isDragging.current = false; }}
-      onMouseLeave={() => { isMouseDown.current = false; isDragging.current = false; }}
+      onPointerUp={(e) => {
+        if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+        isMouseDown.current = false;
+        isDragging.current = false;
+      }}
+      onPointerCancel={() => { isMouseDown.current = false; isDragging.current = false; }}
+      onPointerLeave={() => {
+        // Only relevant before the drag starts; once it has, the pointer is
+        // captured and leaving the box no longer ends the gesture.
+        if (!isDragging.current) isMouseDown.current = false;
+      }}
       onClickCapture={(e) => {
         // If we were dragging, prevent the click from firing on cells
         if (isDragging.current) {
@@ -779,12 +921,14 @@ function DesktopMatrix({ inputs, outputs, areaFilter, hideEmpty, t, onEditInput,
               >
                 <td
                   className={clsx(
-                    'group/row left-0 z-10 sticky bg-base-100 border-base-300 border-r font-medium text-xs cursor-pointer',
-                    hoverRow === row.id && 'bg-base-200/60',
+                    'group/row left-0 z-10 sticky border-base-300 border-r font-medium text-xs cursor-pointer',
+                    hoverRow === row.id
+                      ? INPUT_KIND_STYLE[row.inputKind].headerHover
+                      : INPUT_KIND_STYLE[row.inputKind].header,
                     row.bindings.length === 0 && 'text-base-content/30',
                   )}
                   onClick={() => onEditInput(row)}
-                  title={t('binding_matrix.click_to_edit')}
+                  title={`${t(INPUT_KIND_STYLE[row.inputKind].labelKey)}\n${t('binding_matrix.click_to_edit')}`}
                 >
                   <div className="flex items-center gap-1 max-w-30 font-bold truncate" title={row.id}>
                     {row.name}
@@ -885,7 +1029,7 @@ function MobileAccordion({ inputs, areaFilter, hideEmpty, t, onEditInput }: {
   inputs: InputRow[];
   areaFilter: Set<string>;
   hideEmpty: boolean;
-  t: (key: string, opts?: any) => string;
+  t: TFn;
   onEditInput: (input: InputRow, clickType?: string) => void;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -934,6 +1078,7 @@ function MobileAccordion({ inputs, areaFilter, hideEmpty, t, onEditInput }: {
             className={clsx(
               'border rounded-xl overflow-hidden transition-colors',
               hasBind ? 'border-success/20 bg-success/5' : 'border-base-300 bg-base-200/30',
+              INPUT_KIND_STYLE[input.inputKind].card,
             )}
           >
             <button
@@ -1020,7 +1165,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
 
   // Inline edit dialog state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<any>(null);
+  const [editingItem, setEditingItem] = useState<ConfigRecord | null>(null);
   const [editingSection, setEditingSection] = useState<string>('');
   const [editingIndex, setEditingIndex] = useState<number>(-1);
   const [editingInitialTab, setEditingInitialTab] = useState<string>('basic');
@@ -1030,7 +1175,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
 
   // Output edit dialog state
   const [outputDialogOpen, setOutputDialogOpen] = useState(false);
-  const [editingOutput, setEditingOutput] = useState<any>(null);
+  const [editingOutput, setEditingOutput] = useState<ConfigRecord | null>(null);
   const [editingOutputSection, setEditingOutputSection] = useState<string>('');
   const [editingOutputIndex, setEditingOutputIndex] = useState<number>(-1);
   const [isSavingOutput, setIsSavingOutput] = useState(false);
@@ -1040,8 +1185,8 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
   const handleEditInput = useCallback((input: InputRow, clickType?: string) => {
     // Find the raw item in formData
     const section = input.type === 'remote' ? 'remote_inputs' : 'local_inputs';
-    const items: any[] = formData[section] || [];
-    const idx = items.findIndex((item: any, i: number) => {
+    const items: RawInput[] = formData[section] || [];
+    const idx = items.findIndex((item, i) => {
       if (input.type === 'remote') {
         // Remote inputs: reconstruct composite id (device/inputId)
         const device = item.boneio_id || item.remote_device || '';
@@ -1068,7 +1213,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
   const handleSaveEdit = useCallback(async () => {
     if (hasValidationErrors || editingIndex < 0 || !editingItem) return;
 
-    const items = [...(formData[editingSection] || [])];
+    const items = [...((formData[editingSection] || []) as ConfigRecord[])];
     items[editingIndex] = editingItem;
 
     setIsSaving(true);
@@ -1112,10 +1257,10 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
   const allRemoteDevices = useMemo(() => formData.remote_devices || [], [formData.remote_devices]);
   const allRemoteInputs = useMemo(() => formData.remote_inputs || [], [formData.remote_inputs]);
   const allBinarySensors = useMemo(() => {
-    return (formData.local_inputs || []).filter((i: any) => i._inputType === 'binary_sensor');
+    return (formData.local_inputs || []).filter((i) => i._inputType === 'binary_sensor');
   }, [formData.local_inputs]);
   const allEvents = useMemo(() => {
-    return (formData.local_inputs || []).filter((i: any) => i._inputType !== 'binary_sensor');
+    return (formData.local_inputs || []).filter((i) => i._inputType !== 'binary_sensor');
   }, [formData.local_inputs]);
   const allAreasData = useMemo(() => formData.areas || [], [formData.areas]);
 
@@ -1151,8 +1296,8 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
       remote_cover: 'remote_covers',
     };
     const section = sectionMap[output.type] || 'output';
-    const items: any[] = formData[section] || [];
-    const idx = items.findIndex((item: any, i: number) => {
+    const items = (formData[section] || []) as RawOutput[];
+    const idx = items.findIndex((item, i) => {
       if (output.type === 'remote_output' || output.type === 'remote_cover') {
         // Remote: reconstruct composite id
         const device = item.boneio_id || item.remote_device || '';
@@ -1175,7 +1320,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
   const handleSaveOutput = useCallback(async () => {
     if (editingOutputIndex < 0 || !editingOutput) return;
 
-    const items = [...(formData[editingOutputSection] || [])];
+    const items = [...((formData[editingOutputSection] || []) as ConfigRecord[])];
     items[editingOutputIndex] = editingOutput;
 
     setIsSavingOutput(true);
@@ -1200,128 +1345,126 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
   const isOutputDirty = editingOutput && originalOutputRef.current && JSON.stringify(editingOutput) !== originalOutputRef.current;
 
   return (
-    <div className="p-4 md:p-6 max-w-full">
-      {/* Header */}
-      <div className="mb-4">
-        <h2 className="font-extrabold text-xl tracking-tight">{t('binding_matrix.title')}</h2>
-        <p className="text-sm text-base-content/50">{t('binding_matrix.subtitle')}</p>
-      </div>
+    <SettingsPage width="full">
+      {/* No inner heading: the page header above already carries the title,
+          and the padding comes from the card rather than from here. */}
+      <SettingsCard>
+        {/* Statistics */}
+        <StatsBanner inputs={inputs} outputs={outputs} t={t} />
 
-      {/* Statistics */}
-      <StatsBanner inputs={inputs} outputs={outputs} t={t} />
-
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 mb-4">
-        <div className="relative flex items-center gap-2">
-          <FaFilter className="w-3 h-3 text-base-content/40" />
-          <button
-            className="justify-between gap-1 btn-outline min-w-40 btn btn-sm"
-            onClick={() => setAreaDropdownOpen(prev => !prev)}
-          >
-            <span className="text-xs truncate">
-              {areaFilter.size === 0
-                ? t('binding_matrix.all_areas')
-                : areaFilter.size === 1
-                  ? (areaFilter.has('__none__') ? t('binding_matrix.no_area') : [...areaFilter][0])
-                  : t('binding_matrix.areas_selected', { count: areaFilter.size })}
-            </span>
-            <FaChevronDown className="w-2.5 h-2.5 shrink-0" />
-          </button>
-          {areaDropdownOpen && (
-            <>
-              {/* Backdrop */}
-              <div className="z-40 fixed inset-0" onClick={() => setAreaDropdownOpen(false)} />
-              {/* Dropdown */}
-              <div className="top-full left-0 z-50 absolute bg-base-100 shadow-xl mt-1 py-1 border border-base-300 rounded-lg min-w-50 max-h-75 overflow-y-auto">
-                {/* Select all / Clear */}
-                <label className="flex items-center gap-2 hover:bg-base-200/60 px-3 py-1.5 transition-colors cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="checkbox checkbox-xs checkbox-primary"
-                    checked={areaFilter.size === 0}
-                    onChange={() => setAreaFilter(new Set())}
-                  />
-                  <span className="font-semibold text-xs">{t('binding_matrix.all_areas')}</span>
-                </label>
-                <div className="my-0.5 border-base-300 border-t" />
-                {/* No area option */}
-                {hasNoArea && (
+        {/* Filters */}
+        <div className="flex flex-wrap items-center gap-3 mb-4">
+          <div className="relative flex items-center gap-2">
+            <FaFilter className="w-3 h-3 text-base-content/40" />
+            <button
+              className="justify-between gap-1 btn-outline min-w-40 btn btn-sm"
+              onClick={() => setAreaDropdownOpen(prev => !prev)}
+            >
+              <span className="text-xs truncate">
+                {areaFilter.size === 0
+                  ? t('binding_matrix.all_areas')
+                  : areaFilter.size === 1
+                    ? (areaFilter.has('__none__') ? t('binding_matrix.no_area') : [...areaFilter][0])
+                    : t('binding_matrix.areas_selected', { count: areaFilter.size })}
+              </span>
+              <FaChevronDown className="w-2.5 h-2.5 shrink-0" />
+            </button>
+            {areaDropdownOpen && (
+              <>
+                {/* Backdrop */}
+                <div className="z-40 fixed inset-0" onClick={() => setAreaDropdownOpen(false)} />
+                {/* Dropdown */}
+                <div className="top-full left-0 z-50 absolute bg-base-100 shadow-xl mt-1 py-1 border border-base-300 rounded-lg min-w-50 max-h-75 overflow-y-auto">
+                  {/* Select all / Clear */}
                   <label className="flex items-center gap-2 hover:bg-base-200/60 px-3 py-1.5 transition-colors cursor-pointer">
                     <input
                       type="checkbox"
                       className="checkbox checkbox-xs checkbox-primary"
-                      checked={areaFilter.has('__none__')}
-                      onChange={() => {
-                        const next = new Set(areaFilter);
-                        if (next.has('__none__')) next.delete('__none__');
-                        else next.add('__none__');
-                        setAreaFilter(next);
-                      }}
+                      checked={areaFilter.size === 0}
+                      onChange={() => setAreaFilter(new Set())}
                     />
-                    <span className="text-xs text-base-content/50 italic">{t('binding_matrix.no_area')}</span>
+                    <span className="font-semibold text-xs">{t('binding_matrix.all_areas')}</span>
                   </label>
-                )}
-                {/* Area options */}
-                {allAreas.map(area => (
-                  <label key={area} className="flex items-center gap-2 hover:bg-base-200/60 px-3 py-1.5 transition-colors cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="checkbox checkbox-xs checkbox-primary"
-                      checked={areaFilter.has(area)}
-                      onChange={() => {
-                        const next = new Set(areaFilter);
-                        if (next.has(area)) next.delete(area);
-                        else next.add(area);
-                        setAreaFilter(next);
-                      }}
-                    />
-                    <span className="text-xs">{area}</span>
-                  </label>
-                ))}
-              </div>
-            </>
-          )}
+                  <div className="my-0.5 border-base-300 border-t" />
+                  {/* No area option */}
+                  {hasNoArea && (
+                    <label className="flex items-center gap-2 hover:bg-base-200/60 px-3 py-1.5 transition-colors cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-xs checkbox-primary"
+                        checked={areaFilter.has('__none__')}
+                        onChange={() => {
+                          const next = new Set(areaFilter);
+                          if (next.has('__none__')) next.delete('__none__');
+                          else next.add('__none__');
+                          setAreaFilter(next);
+                        }}
+                      />
+                      <span className="text-xs text-base-content/50 italic">{t('binding_matrix.no_area')}</span>
+                    </label>
+                  )}
+                  {/* Area options */}
+                  {allAreas.map(area => (
+                    <label key={area} className="flex items-center gap-2 hover:bg-base-200/60 px-3 py-1.5 transition-colors cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="checkbox checkbox-xs checkbox-primary"
+                        checked={areaFilter.has(area)}
+                        onChange={() => {
+                          const next = new Set(areaFilter);
+                          if (next.has(area)) next.delete(area);
+                          else next.add(area);
+                          setAreaFilter(next);
+                        }}
+                      />
+                      <span className="text-xs">{area}</span>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-sm checkbox-primary"
+              checked={hideEmpty}
+              onChange={e => setHideEmpty(e.target.checked)}
+            />
+            <span className="flex items-center gap-1 font-medium text-xs text-base-content/60">
+              {hideEmpty ? <FaEyeSlash className="w-3 h-3" /> : <FaEye className="w-3 h-3" />}
+              {t('binding_matrix.hide_empty')}
+            </span>
+          </label>
         </div>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-sm checkbox-primary"
-            checked={hideEmpty}
-            onChange={e => setHideEmpty(e.target.checked)}
+
+        {/* Desktop: Matrix table */}
+        <div className="hidden md:block">
+          <DesktopMatrix
+            inputs={inputs}
+            outputs={outputs}
+            areaFilter={areaFilter}
+            hideEmpty={hideEmpty}
+            t={t}
+            onEditInput={handleEditInput}
+            onEditOutput={handleEditOutput}
           />
-          <span className="flex items-center gap-1 font-medium text-xs text-base-content/60">
-            {hideEmpty ? <FaEyeSlash className="w-3 h-3" /> : <FaEye className="w-3 h-3" />}
-            {t('binding_matrix.hide_empty')}
-          </span>
-        </label>
-      </div>
+        </div>
 
-      {/* Desktop: Matrix table */}
-      <div className="hidden md:block">
-        <DesktopMatrix
-          inputs={inputs}
-          outputs={outputs}
-          areaFilter={areaFilter}
-          hideEmpty={hideEmpty}
-          t={t}
-          onEditInput={handleEditInput}
-          onEditOutput={handleEditOutput}
-        />
-      </div>
+        {/* Mobile: Accordion list */}
+        <div className="md:hidden">
+          <MobileAccordion
+            inputs={inputs}
+            areaFilter={areaFilter}
+            hideEmpty={hideEmpty}
+            t={t}
+            onEditInput={handleEditInput}
+          />
+        </div>
 
-      {/* Mobile: Accordion list */}
-      <div className="md:hidden">
-        <MobileAccordion
-          inputs={inputs}
-          areaFilter={areaFilter}
-          hideEmpty={hideEmpty}
-          t={t}
-          onEditInput={handleEditInput}
-        />
-      </div>
-
-      {/* Unconfigured items (both views) */}
-      <UnconfiguredSection inputs={inputs} outputs={outputs} t={t} />
+          {/* Unconfigured items (both views) */}
+          <UnconfiguredSection inputs={inputs} outputs={outputs} t={t} />
+      </SettingsCard>
 
       {/* Input Edit Dialog — uses same EditItemDialog as ArrayTableWidget */}
       <EditItemDialog
@@ -1329,7 +1472,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
         onOpenChange={setEditDialogOpen}
         editingItem={editingItem}
         editingIndex={editingIndex}
-        sectionType={editingSection as any}
+        sectionType={editingSection}
         schema={editingSection === 'remote_inputs'
           ? (sections.find(s => s.name === 'remote_inputs')?.schema || sections.find(s => s.name === 'remote_inputs')?.normalizedSchema || {})
           : eventSchema
@@ -1360,7 +1503,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
         onOpenChange={setOutputDialogOpen}
         editingItem={editingOutput}
         editingIndex={editingOutputIndex}
-        sectionType={editingOutputSection as any}
+        sectionType={editingOutputSection}
         schema={editingOutputSection === 'cover' ? coverSchema : outputSchema}
         uiSchema={editingOutputSection === 'cover' ? undefined : outputUiSchema}
         allOutputs={allOutputs}
@@ -1372,7 +1515,7 @@ const BindingMatrix: React.FC<BindingMatrixProps> = ({ formData, sections, onSav
         saveDisabled={!isOutputDirty}
         isSaving={isSavingOutput}
       />
-    </div>
+    </SettingsPage>
   );
 };
 

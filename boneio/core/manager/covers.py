@@ -68,7 +68,9 @@ class CoverManager:
             # Get config from ConfigHelper (already reloaded by Manager)
             config = self._manager._config_helper.get_config()
             self._config_covers = config.get(COVER, [])
-            self._manager._config_helper.clear_autodiscovery_type(ha_type=COVER)
+            # The discovery cache is not cleared: COVER is shared with gate
+            # covers and remote covers, and the MQTT client deletes from HA
+            # any discovery topic it sees that the cache does not hold.
 
             # Remove covers that are no longer in config
             new_ids = set()
@@ -80,26 +82,16 @@ class CoverManager:
                     _close = str(_cfg.get("close_relay", ""))
                     new_ids.add(f"cover_{_open}_{_close}".lower().replace(" ", "_"))
 
-            removed_ids = [cid for cid in self._covers if cid not in new_ids]
+            # Remote covers are not in this section; they have their own reload.
+            removed_ids = [
+                cid
+                for cid, cover in self._covers.items()
+                if cid not in new_ids and not getattr(cover, "is_remote", False)
+            ]
             for cid in removed_ids:
                 _LOGGER.info("Cover %s removed from config, cleaning up", cid)
                 cover = self._covers.pop(cid)
-                # Stop cover movement if running (synchronous - no running loop guaranteed)
-                try:
-                    if hasattr(cover, "_stop_event"):
-                        cover._stop_event.set()
-                    if (
-                        hasattr(cover, "_movement_thread")
-                        and cover._movement_thread
-                        and cover._movement_thread.is_alive()
-                    ):
-                        cover._movement_thread.join(timeout=1.0)
-                    if hasattr(cover, "_open_relay"):
-                        cover._open_relay.turn_off()
-                    if hasattr(cover, "_close_relay"):
-                        cover._close_relay.turn_off()
-                except Exception:
-                    pass
+                self._halt_cover(cover)
                 # Remove HA autodiscovery
                 self._remove_cover_ha_discovery(cid)
 
@@ -110,8 +102,6 @@ class CoverManager:
 
             open_relay = self._manager.outputs.get_output(open_relay_id)
             close_relay = self._manager.outputs.get_output(close_relay_id)
-            stop_relay_id = str(_config.get("stop_relay", ""))
-            stop_relay = self._manager.outputs.get_output(stop_relay_id) if stop_relay_id else None
 
             # Generate ID from relays if not provided
             if _config.get(ID):
@@ -146,6 +136,9 @@ class CoverManager:
                         _LOGGER.info(
                             "Cover %s platform changed from %s to %s, recreating cover", _id, current_kind, new_kind
                         )
+                        # The old object goes away: a movement it was running
+                        # would otherwise keep its relay energised.
+                        self._halt_cover(_cover)
                         # Remove old HA autodiscovery
                         self._remove_cover_ha_discovery(_id)
                         # Remove old cover from dict (will be recreated below)
@@ -158,8 +151,6 @@ class CoverManager:
                             _cover._name = _new_name
                         old_open = getattr(_cover._open_relay, "id", None)
                         old_close = getattr(_cover._close_relay, "id", None)
-                        old_stop = getattr(_cover._stop_relay, "id", None)
-                        old_stop_default_state = getattr(_cover, "_stop_relay_default_state", "off")
                         if old_open != open_relay_id or old_close != close_relay_id:
                             _LOGGER.info(
                                 "Cover %s relays changed: open %s->%s, close %s->%s",
@@ -171,26 +162,19 @@ class CoverManager:
                             )
                         _cover._open_relay = open_relay
                         _cover._close_relay = close_relay
-                        _cover._stop_relay = stop_relay
-                        configured_stop_state = _config.get("stop_relay_default_state", False)
-                        _cover._stop_relay_default_state = (
-                            "on"
-                            if configured_stop_state is True
-                            or str(configured_stop_state).lower() in ("on", "true", "1")
-                            else "off"
-                        )
-                        if stop_relay and (
-                            old_stop != getattr(stop_relay, "id", None)
-                            or old_stop_default_state != _cover._stop_relay_default_state
-                        ):
-                            _cover._apply_stop_relay_state(_cover._stop_relay_default_state, notify=True)
-                        duration = _config.get("stop_relay_duration")
-                        _cover._stop_relay_duration = ensure_time_period(duration) if duration is not None else None
                         _cover.update_config_times(_config)
-                        # Re-send HA autodiscovery with potentially new name/area
-                        if _config.get(SHOW_HA, True):
-                            # Remove old autodiscovery first (in case area changed)
+                        was_shown = _cover.show_in_ha
+                        old_area = _cover.area
+                        self._store_ha_attributes(_cover, _config)
+                        if was_shown and not _cover.show_in_ha:
                             self._remove_cover_ha_discovery(_id)
+                        # Re-send HA autodiscovery with potentially new name/area
+                        if _cover.show_in_ha:
+                            # A new area is a new HA device: take the entity off
+                            # the old one first. Otherwise update in place — a
+                            # removal makes HA delete the entity and recreate it.
+                            if was_shown and old_area != _cover.area:
+                                self._remove_cover_ha_discovery(_id)
                             # Send new autodiscovery
                             if new_platform == "venetian":
                                 availability_msg_func = ha_cover_with_tilt_availabilty_message
@@ -200,8 +184,8 @@ class CoverManager:
                                 id=_cover.id,
                                 name=_cover.name,
                                 config_helper=self._manager._config_helper,
-                                device_class=_config.get(DEVICE_CLASS),
-                                area=_config.get("area"),
+                                device_class=_cover.device_class,
+                                area=_cover.area,
                             )
                             self._manager.publish_ha_discovery(
                                 id=_cover.id,
@@ -217,7 +201,6 @@ class CoverManager:
                         **_config,
                         "open_relay": open_relay,
                         "close_relay": close_relay,
-                        "stop_relay": stop_relay,
                     },
                     tilt_duration=_config.get("tilt_duration"),
                 )
@@ -252,7 +235,7 @@ class CoverManager:
 
         # Normalize time period fields — during hot-reload YAML values may
         # arrive as raw strings (e.g. "5s") instead of TimePeriod objects.
-        for time_key in ("open_time", "close_time", "actuator_activation_duration", "stop_relay_duration"):
+        for time_key in ("open_time", "close_time", "actuator_activation_duration", "direction_change_wait_time"):
             if time_key in config and config[time_key] is not None:
                 config[time_key] = ensure_time_period(config[time_key])
 
@@ -395,14 +378,16 @@ class CoverManager:
             )
             availability_msg_func = ha_cover_availabilty_message
 
+        self._store_ha_attributes(cover, config)
+
         # Send HA autodiscovery
-        if config.get(SHOW_HA, True):
+        if cover.show_in_ha:
             payload = availability_msg_func(
                 id=cover.id,
                 name=cover.name,
                 config_helper=self._manager._config_helper,
-                device_class=config.get(DEVICE_CLASS),
-                area=config.get("area"),
+                device_class=cover.device_class,
+                area=cover.area,
             )
             self._manager.publish_ha_discovery(
                 id=cover.id,
@@ -412,6 +397,20 @@ class CoverManager:
 
         _LOGGER.debug("Configured cover %s", cover_id)
         return cover
+
+    @staticmethod
+    def _store_ha_attributes(cover: TimeBasedCover | VenetianCover, config: dict) -> None:
+        """Keep the HA discovery inputs on the cover itself.
+
+        The cover classes don't take ``area``/``device_class`` (``area`` is
+        swallowed by ``BasicMqtt``'s kwargs), yet ``send_ha_autodiscovery``
+        rebuilds the payload from the cover object. Without these the rebuild
+        would drop the area sub-device and the device class, and HA would move
+        the cover back to the main device with the default class.
+        """
+        cover.area = config.get("area")
+        cover.device_class = config.get(DEVICE_CLASS)
+        cover.show_in_ha = config.get(SHOW_HA, True)
 
     def _remove_cover_ha_discovery(self, cover_id: str) -> None:
         """Remove HA Discovery entries for a cover.
@@ -423,8 +422,12 @@ class CoverManager:
         Args:
             cover_id: ID of the cover to remove from HA Discovery
         """
-        # Find all autodiscovery topics for this cover ID
-        matching_topics = self._manager._config_helper.get_autodiscovery_topics_for_id(cover_id)
+        # Only COVER: another entity type may use the same id.
+        matching_topics = [
+            (ha_type, topic)
+            for ha_type, topic in self._manager._config_helper.get_autodiscovery_topics_for_id(cover_id)
+            if ha_type == COVER
+        ]
 
         for ha_type, topic in matching_topics:
             _LOGGER.debug("Removing HA Discovery for cover %s: %s", cover_id, topic)
@@ -451,6 +454,42 @@ class CoverManager:
             Dictionary of all covers
         """
         return self._covers
+
+    @staticmethod
+    def _halt_cover(cover: Any) -> None:
+        """Stop a cover that is being dropped and de-energise both relays.
+
+        Synchronous: a reload may run without a usable event loop for the
+        cover's own async stop.
+        """
+        try:
+            if hasattr(cover, "_stop_event"):
+                cover._stop_event.set()
+            if (
+                hasattr(cover, "_movement_thread")
+                and cover._movement_thread
+                and cover._movement_thread.is_alive()
+            ):
+                cover._movement_thread.join(timeout=1.0)
+            if hasattr(cover, "_open_relay"):
+                cover._open_relay.turn_off()
+            if hasattr(cover, "_close_relay"):
+                cover._close_relay.turn_off()
+        except Exception:
+            _LOGGER.exception("Could not stop cover %s", getattr(cover, "id", "?"))
+
+    def rebind_outputs(self) -> None:
+        """Point each cover at the relays registered now under their ids.
+
+        Called after an output reload, which rebuilds the relays as new
+        objects. A movement already running keeps the relay it started with.
+        """
+        outputs = self._manager.outputs
+        for cover in self._covers.values():
+            if getattr(cover, "is_remote", False):
+                continue
+            cover._open_relay = outputs.resolve_current(cover._open_relay)
+            cover._close_relay = outputs.resolve_current(cover._close_relay)
 
     def reload_covers(self) -> None:
         """Reload cover configuration from file.
@@ -528,6 +567,8 @@ class CoverManager:
     async def send_ha_autodiscovery(self) -> None:
         """Send Home Assistant autodiscovery for all covers."""
         for cover_id, cover in self._covers.items():
+            if not cover.show_in_ha:
+                continue
             # Use tilt variant if cover supports tilt
             if hasattr(cover, "tilt_position"):
                 msg_func = ha_cover_with_tilt_availabilty_message
@@ -537,8 +578,8 @@ class CoverManager:
                 id=cover_id,
                 name=cover.name if hasattr(cover, "name") else cover_id,
                 config_helper=self._manager._config_helper,
-                device_class=getattr(cover, "device_class", None),
-                area=getattr(cover, "area", None),
+                device_class=cover.device_class,
+                area=cover.area,
             )
             self._manager.publish_ha_discovery(
                 id=cover_id,

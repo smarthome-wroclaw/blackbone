@@ -26,6 +26,9 @@ import aiohttp
 from boneio.core.cloud.secrets import MASTER_SECRET as DEFAULT_MASTER_SECRET
 from boneio.core.system.monitor import get_network_info
 
+from boneio.core import containers
+from boneio.core.system.monitor import get_network_info
+
 _LOGGER = logging.getLogger(__name__)
 
 # Cloud API configuration
@@ -39,12 +42,18 @@ KEY_FILE = CERT_DIR / "privkey.pem"
 
 # Caddy configuration paths
 CADDY_CONFIG_DIR = _DOCKER_DIR / "caddy"
-CADDY_DEFAULT_CONFIG = CADDY_CONFIG_DIR / "Caddyfile"
-CADDY_CLOUD_CONFIG = CADDY_CONFIG_DIR / "Caddyfile.cloud"
-CADDY_ACTIVE_CONFIG = CADDY_CONFIG_DIR / "Caddyfile"
+# No Caddyfile constants here on purpose. Caddy's configuration is not a file
+# in this directory — init-certs.sh (or init-certs-cloud.sh) writes it to
+# /tmp/Caddyfile inside the container on every start. Switching between local
+# and cloud mode swaps the compose file, and with it which of those two scripts
+# runs; there is no Caddyfile to copy over another.
 
 # Registration interval (1 hour)
 REGISTRATION_INTERVAL = 3600
+#: After a failed registration: the next try, unless the API names its own.
+#: An hour was what somebody turning cloud on waited after a rate limit
+#: asking for five minutes, or a network that was down for one.
+REGISTRATION_RETRY = 300
 
 # Caddy Docker HTTPS port (host side of the 8443:443 mapping)
 CADDY_HTTPS_PORT = 8443
@@ -80,9 +89,12 @@ class CloudRegistration:
         self._master_secret = master_secret
         self._enabled = enabled
         self._domain: str | None = None
+        #: Seconds the API asked to wait, from its last 429.
+        self._retry_after: int | None = None
         self._task: asyncio.Task | None = None
         self._session: aiohttp.ClientSession | None = None
         self._last_error: str | None = None
+        self._switching = False
 
     @property
     def domain(self) -> str | None:
@@ -100,8 +112,26 @@ class CloudRegistration:
         return self._last_error
 
     @property
+    def serving(self) -> bool:
+        """Whether Caddy is up on the cloud template with the certificate.
+
+        False while the template is being swapped and Caddy recreated: the
+        compose file already names the cloud script then, but the proxy — the
+        only way into a panel with ``web.expose: proxy`` — is down for the half
+        minute that takes. Anything sending somebody to the registered name
+        has to wait for this rather than for the template.
+        """
+        return self._domain is not None and not self._switching and self.is_cloud_config_active()
+
+    @property
     def is_compose_writable(self) -> bool:
-        """Check if docker-compose.yaml is writable without side effects."""
+        """Check if docker-compose.yaml is writable without side effects.
+
+        True for the packaged Caddy: there is no compose file to be writable,
+        and the panel warns when this is False.
+        """
+        if containers.proxy_mode() == "native":
+            return True
         compose_file = _DOCKER_DIR / "docker-compose.yaml"
         if not compose_file.exists():
             return False
@@ -167,6 +197,7 @@ class CloudRegistration:
     async def _registration_loop(self) -> None:
         """Main registration loop - registers DNS and fetches cert periodically."""
         while True:
+            success = False
             try:
                 # Refresh local IP in case it changed (e.g. DHCP renewal)
                 current_ip = get_network_info().get("ip", "")
@@ -210,8 +241,14 @@ class CloudRegistration:
             except Exception as e:
                 _LOGGER.error("Cloud registration error: %s", e)
 
-            # Wait before next registration
-            await asyncio.sleep(REGISTRATION_INTERVAL)
+            # Wait before the next registration: an hour once it worked, and
+            # soon again when it did not.
+            if success:
+                delay = REGISTRATION_INTERVAL
+            else:
+                delay = self._retry_after or REGISTRATION_RETRY
+            self._retry_after = None
+            await asyncio.sleep(delay)
 
     async def _register_dns(self) -> bool:
         """
@@ -242,6 +279,7 @@ class CloudRegistration:
                     data = await response.json()
                     retry_after = data.get("retryAfter", 3600)
                     _LOGGER.warning("Rate limited, retry after %d seconds", retry_after)
+                    self._retry_after = int(retry_after)
                     return False
                 else:
                     body = await response.text()
@@ -503,6 +541,9 @@ class CloudRegistration:
         This ensures the script is always up-to-date after a pip upgrade,
         even if the user never re-clones the full repo.
         """
+        if containers.proxy_mode() == "native":
+            # The generator writes the cloud block itself; no script is mounted.
+            return
         dest = CADDY_CONFIG_DIR / "init-certs-cloud.sh"
         try:
             src = files("boneio.core.cloud.data").joinpath("init-certs-cloud.sh")
@@ -516,191 +557,222 @@ class CloudRegistration:
         except Exception as e:
             _LOGGER.warning("Could not deploy init-certs-cloud.sh: %s", e)
 
-    def _check_compose_writable(self) -> bool:
-        """
-        Check if docker-compose.yaml is writable.
+    def _check_compose_ownership(self) -> bool:
+        """Check the compose file is managed by the privileged helper.
+
+        The file must *not* be writable by the application, and no error here
+        should tell the operator to ``chown`` it: ``docker compose up`` executes
+        this file, so whoever can write it can start a container as root with
+        the host filesystem mounted.
 
         Returns:
-            True if file is writable, False otherwise (sets _last_error).
+            True when the cloud switch can proceed.
         """
-        compose_file = _DOCKER_DIR / "docker-compose.yaml"
-        if compose_file.exists() and not os.access(compose_file, os.W_OK):
-            compose_path = str(compose_file)
-            self._last_error = f"Permission denied writing {compose_path}. Run via SSH: sudo chown $USER {compose_path}"
-            _LOGGER.error(
-                "Permission denied for %s. Fix with: sudo chown $USER %s",
-                compose_path,
-                compose_path,
-            )
-            return False
-        return True
+        if containers.helper_available():
+            return True
+        self._last_error = (
+            "boneio-containers is not installed yet, so the compose file cannot "
+            "be switched. Apply the pending system migrations and try again."
+        )
+        _LOGGER.error("%s", self._last_error)
+        return False
 
     async def _switch_to_cloud_config(self) -> bool:
-        """
-        Switch Caddy to cloud mode by replacing docker-compose.yaml with
-        the bundled cloud template from boneio.core.cloud.data.
+        """Switch Caddy to cloud mode.
 
-        Changes:
-        - Deploys init-certs-cloud.sh from package to caddy dir
-        - Replaces docker-compose.yaml with cloud version from package
-        - Recreates Caddy container with new config
+        The compose file is no longer written here. The helper copies it from a
+        root-owned template, so this method asks for a template by name and has
+        no way to influence its contents.
 
         Returns:
-            True if switch was successful
+            True if the switch was successful.
         """
-        # Ensure cloud script is deployed from package
+        self._switching = True
+        try:
+            return await self._apply_cloud_config()
+        finally:
+            self._switching = False
+
+    async def _apply_cloud_config(self) -> bool:
+        """The body of :meth:`_switch_to_cloud_config`, without the flag."""
+        # The init script still comes from the package; it is mounted read-only
+        # into the container and is not what compose executes on the host.
         self._ensure_cloud_script()
 
-        compose_file = _DOCKER_DIR / "docker-compose.yaml"
-        try:
-            if not compose_file.exists():
-                _LOGGER.error("docker-compose.yaml not found: %s", compose_file)
-                return False
+        if not self._check_compose_ownership():
+            return False
 
-            # Check permissions before attempting any changes
-            if not self._check_compose_writable():
-                return False
-
-            content = compose_file.read_text()
-
-            # Already switched?
-            if "init-certs-cloud.sh" in content:
-                _LOGGER.debug("Cloud config already active in docker-compose.yaml")
-                return await self._recreate_caddy()
-
-            # Backup original
-            backup = compose_file.with_suffix(".yaml.bak")
-            if not backup.exists():
-                shutil.copy2(compose_file, backup)
-                _LOGGER.info("Backed up docker-compose.yaml to %s", backup)
-
-            # Replace with bundled cloud template
-            cloud_src = files("boneio.core.cloud.data").joinpath("docker-compose-cloud.yaml")
-            cloud_content = cloud_src.read_text(encoding="utf-8")
-            compose_file.write_text(cloud_content)
-            _LOGGER.info("Replaced docker-compose.yaml with cloud template from package")
-
+        if self.is_cloud_config_active():
+            _LOGGER.debug("Cloud config already active in docker-compose.yaml")
             return await self._recreate_caddy()
 
-        except PermissionError:
-            compose_path = str(compose_file)
-            self._last_error = f"Permission denied writing {compose_path}. Run via SSH: sudo chown $USER {compose_path}"
-            _LOGGER.error(
-                "Permission denied for %s. Fix with: sudo chown $USER %s",
-                compose_path,
-                compose_path,
-            )
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, containers.apply_cloud_template
+        )
+        if not result.ok:
+            self._last_error = result.stderr.strip() or "could not apply the cloud template"
+            _LOGGER.error("Failed to switch to cloud config: %s", self._last_error)
             return False
-        except Exception as e:
-            self._last_error = str(e)
-            _LOGGER.error("Failed to switch to cloud config: %s", e)
-            return False
+
+        _LOGGER.info("Switched Caddy to the cloud template")
+        if containers.proxy_mode() == "native":
+            # The helper's verb has already reloaded the packaged Caddy with the
+            # certificate; starting it again only costs seconds of the request.
+            return True
+        # The service definition changed, so ``up`` recreates the container
+        # and it reads the certificate as it starts.
+        return await self._recreate_caddy(restart=False)
 
     async def _restore_local_config(self) -> bool:
-        """
-        Restore original docker-compose.yaml from package data and restart Caddy.
-
-        Uses the bundled docker-compose.yaml from boneio.core.cloud.data so that
-        future pip upgrades automatically bring the latest Caddy/Node-RED versions.
+        """Restore the plain compose template and restart Caddy.
 
         Returns:
-            True if restore was successful
+            True if the restore was successful.
         """
-        compose_file = _DOCKER_DIR / "docker-compose.yaml"
-        try:
-            # Check permissions before attempting any changes
-            if not self._check_compose_writable():
-                return False
+        if not self._check_compose_ownership():
+            return False
 
-            src = files("boneio.core.cloud.data").joinpath("docker-compose.yaml")
-            original_content = src.read_text(encoding="utf-8")
-
-            current_content = compose_file.read_text() if compose_file.exists() else ""
-            if current_content == original_content:
-                _LOGGER.debug("docker-compose.yaml already matches package original")
-                return await self._recreate_caddy()
-
-            compose_file.write_text(original_content)
-            _LOGGER.info("Restored original docker-compose.yaml from package data")
-
+        if not self.is_cloud_config_active():
+            _LOGGER.debug("Caddy is already on the local template")
+            if containers.proxy_mode() == "native":
+                # Nothing to redo: the packaged Caddy serves what its marker
+                # says. Restarting it here cost 15 s of the save that turns cloud
+                # off, after /cloud/disable had already put the local one back.
+                return True
             return await self._recreate_caddy()
 
-        except PermissionError:
-            compose_path = str(compose_file)
-            self._last_error = f"Permission denied writing {compose_path}. Run via SSH: sudo chown $USER {compose_path}"
-            _LOGGER.error(
-                "Permission denied for %s. Fix with: sudo chown $USER %s",
-                compose_path,
-                compose_path,
-            )
-            return False
-        except Exception as e:
-            self._last_error = str(e)
-            _LOGGER.error("Failed to restore local config: %s", e)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, containers.remove_cloud_template
+        )
+        if not result.ok:
+            self._last_error = result.stderr.strip() or "could not restore the template"
+            _LOGGER.error("Failed to restore local config: %s", self._last_error)
             return False
 
-    async def _recreate_caddy(self) -> bool:
-        """
-        Recreate and restart Caddy container to apply new certs or docker-compose config.
+        _LOGGER.info("Restored the local Caddy template")
+        if containers.proxy_mode() == "native":
+            # Reloaded by the helper's verb already, as above.
+            return True
+        return await self._recreate_caddy(restart=False)
 
-        Uses 'docker compose up -d caddy' and 'docker compose restart caddy' to ensure
-        Caddy reloads updated SSL certificates from disk.
+    async def _recreate_caddy(self, restart: bool = True) -> bool:
+        """Recreate and restart Caddy so it picks up new certs or compose config.
+
+        Both steps go through the container helper, so neither passes anything
+        from here to Docker.
+
+        Args:
+            restart: Restart after ``up``. Needed when the compose file did not
+                change — ``up`` then leaves the running container alone and it
+                keeps the certificate it read at start. Not after a template
+                swap: ``up`` has just recreated it, and a restart on top takes
+                the proxy down a second time.
 
         Returns:
-            True if recreate was successful
+            True if the recreate was successful.
         """
-        compose_dir = str(_DOCKER_DIR)
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["docker", "compose", "up", "-d", "caddy"],
-                    cwd=compose_dir,
-                    capture_output=True,
-                    timeout=60,
-                ),
+        loop = asyncio.get_event_loop()
+        up = await loop.run_in_executor(None, containers.start_caddy)
+        if not up.ok:
+            _LOGGER.error(
+                "Failed to recreate Caddy: %s", up.stderr.strip() or "unknown error"
+            )
+            return False
+
+        if not restart:
+            _LOGGER.info("Caddy is up with the new configuration")
+            return True
+
+        # Restart as well: mounted TLS certificates are only re-read on start.
+        restarted = await loop.run_in_executor(None, containers.restart_caddy)
+        if not restarted.ok:
+            _LOGGER.warning(
+                "Caddy was recreated but the restart failed: %s",
+                restarted.stderr.strip() or "unknown error",
             )
 
-            # Also restart caddy to ensure mounted TLS certs are reloaded from disk
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["docker", "compose", "restart", "caddy"],
-                    cwd=compose_dir,
-                    capture_output=True,
-                    timeout=60,
-                ),
-            )
-
-            if result.returncode == 0:
-                _LOGGER.info("Caddy container recreated and restarted successfully")
-                return True
-            else:
-                _LOGGER.error(
-                    "Failed to recreate Caddy: %s",
-                    result.stderr.decode() if result.stderr else "Unknown error",
-                )
-                return False
-
-        except subprocess.TimeoutExpired:
-            _LOGGER.error("Caddy recreate timed out")
-            return False
-        except Exception as e:
-            _LOGGER.error("Failed to recreate Caddy: %s", e)
-            return False
+        _LOGGER.info("Caddy is up and restarted with the new configuration")
+        return True
 
     def is_cloud_config_active(self) -> bool:
         """
-        Check if cloud init-certs script is active in docker-compose.
+        Check if the cloud template is the one in use.
+
+        Asked of the compose file in container mode and of the helper's marker
+        for the packaged Caddy, which has no compose file.
 
         Returns:
             True if cloud config is active
         """
+        return containers.cloud_template_is_live()
+
+
+async def set_enabled(config_helper, enabled: bool, local_ip: str | None = None) -> str:
+    """Turn cloud registration on or off on a running device.
+
+    Registration used to begin only in :mod:`boneio.runner`, so switching it on
+    from the panel wrote a line to config.yaml and asked for a restart —
+    on a controller whose whole point is that it is running. Everything the
+    change needs is already here: :meth:`CloudRegistration.start` does no more
+    than launch the loop that registers the name, fetches the certificate,
+    swaps the compose template and recreates Caddy.
+
+    Idempotent in both directions, because the panel can be open twice and a
+    save can be repeated.
+
+    Args:
+        config_helper: The live :class:`ConfigHelper`.
+        enabled: The state asked for.
+        local_ip: This device's address on the LAN. Read from the system when
+            not given.
+
+    Returns:
+        A short word for what happened: ``started``, ``stopped``, ``unchanged``
+        or ``unavailable``.
+    """
+    existing = getattr(config_helper, "_cloud_reg", None)
+
+    if not enabled:
+        config_helper._cloud_registration = False
+        if existing is None:
+            return "unchanged"
         try:
-            compose_file = _DOCKER_DIR / "docker-compose.yaml"
-            if not compose_file.exists():
-                return False
-            content = compose_file.read_text()
-            return "init-certs-cloud.sh" in content
-        except Exception:
-            return False
+            await existing.stop()
+            # Put the plain template back, or Caddy keeps trying to serve a
+            # certificate for a name that is no longer being renewed.
+            await existing._restore_local_config()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not stop cloud registration cleanly: %s", err)
+        config_helper._cloud_reg = None
+        _LOGGER.info("Cloud registration stopped on request")
+        return "stopped"
+
+    if existing is not None:
+        config_helper._cloud_registration = True
+        return "unchanged"
+
+    serial = getattr(config_helper, "serial_number", None)
+    if not local_ip:
+        try:
+            local_ip = (get_network_info() or {}).get("ip", "")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not read this device's address: %s", err)
+            local_ip = ""
+
+    if not serial or not local_ip:
+        # The setting is saved either way; the next start picks it up. Saying
+        # so is better than reporting success for a service that did not begin.
+        _LOGGER.warning(
+            "Cloud registration is enabled but %s is not known yet; it will "
+            "start on the next boot.",
+            "the serial number" if not serial else "this device's address",
+        )
+        config_helper._cloud_registration = True
+        return "unavailable"
+
+    registration = CloudRegistration(serial_number=serial, local_ip=local_ip)
+    await registration.start()
+    config_helper._cloud_reg = registration
+    config_helper._cloud_registration = True
+    _LOGGER.info("Cloud registration started for %s (IP: %s)", serial, local_ip)
+    return "started"

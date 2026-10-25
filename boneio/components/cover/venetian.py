@@ -33,7 +33,8 @@ class VenetianCover(BaseCover, BaseVenetianCoverABC):
 
         Args:
             tilt_duration: Duration for full tilt movement.
-            actuator_activation_duration: Actuator activation time (unused).
+            actuator_activation_duration: Time from energising the relay until
+                the motor moves; added to every movement.
             restored_state: Persisted position/tilt from disk.
             tilt_restore_after_close: If True, restore previous tilt
                 position after closing the cover (UI/HA calls).
@@ -52,15 +53,17 @@ class VenetianCover(BaseCover, BaseVenetianCoverABC):
 
         super().__init__(
             position=position,
+            actuator_activation_duration=actuator_activation_duration,
             **kwargs,
         )
         _LOGGER.debug(
             "VenetianCover %s initialized: open_time=%dms, close_time=%dms, tilt_duration=%dms, "
-            "position=%d%%, tilt=%d%%, tilt_restore=%s",
+            "actuator_activation=%dms, position=%d%%, tilt=%d%%, tilt_restore=%s",
             self._id,
             self._open_time,
             self._close_time,
             self._tilt_duration,
+            self._actuator_activation_ms,
             position,
             self._tilt_position,
             self._tilt_restore_after_close,
@@ -79,12 +82,12 @@ class VenetianCover(BaseCover, BaseVenetianCoverABC):
         if direction == OPEN:
             relay = self._open_relay
             total_steps = 100 - self._position
-            total_tilt_step = tilt_delta if target_tilt_position is not None else 100 - self._initial_tilt_position
-
         elif direction == CLOSE:
             relay = self._close_relay
             total_steps = self._position
-            total_tilt_step = tilt_delta if target_tilt_position is not None else self._initial_tilt_position
+            if total_steps == 0 and target_position is None:
+                # Down at 0% with the slats still open: closing turns them shut.
+                total_steps = self._initial_tilt_position
         else:
             return
         if target_tilt_position is not None:
@@ -112,85 +115,27 @@ class VenetianCover(BaseCover, BaseVenetianCoverABC):
             self._loop.call_soon_threadsafe(self.send_state, self.state, self.json_position)
             return
 
-        # Calculate actual duration based on remaining distance
-        # duration is full time for 100% movement, scale it by actual distance to travel
-        actual_duration = duration * (total_steps / 100.0)
+        # Slats turn first, over the tilt range left in this direction; only
+        # once they are fully turned does the cover itself travel.
+        sign = 1 if direction == OPEN else -1
+        tilt_room = 100 - self._initial_tilt_position if direction == OPEN else self._initial_tilt_position
+        tilt_room_ms = tilt_duration * tilt_room / 100.0
+        if target_tilt_position is not None:
+            travel_ms = tilt_duration * tilt_delta / 100.0
+        else:
+            end_position = target_position if target_position is not None else (100 if direction == OPEN else 0)
+            travel_ms = tilt_room_ms + duration * abs(end_position - self._initial_position) / 100.0
+            travel_ms += self._endstop_overrun_ms(duration, self._initial_position, end_position)
 
-        relay.turn_on()
-        # Send relay state to WebSocket (not MQTT - that's handled by output_type check)
-        self._loop.call_soon_threadsafe(lambda r=relay: asyncio.ensure_future(r.async_send_state()))
-        start_time = time.monotonic()
-        progress = 0.0
-        tilt_progress = 0.0
-        needed_tilt_duration = tilt_duration * (total_tilt_step / 100)
-        if target_tilt_position is None:
-            tilt_delta = 1.0
+        def apply_movement(moving_ms: float) -> None:
+            tilt_moved = min(tilt_room, moving_ms / tilt_duration * 100.0) if tilt_duration > 0 else tilt_room
+            self._tilt_position = self._initial_tilt_position + sign * tilt_moved
+            # Movement past the tilt range is cover travel — also when a tilt
+            # step overruns, since the motor really did keep going.
+            moved = max(0.0, moving_ms - tilt_room_ms) / duration * 100.0
+            self._position = min(100.0, max(0.0, self._initial_position + sign * moved))
 
-        while not self._stop_event.is_set():
-            current_time = time.monotonic()  # Pobierz aktualny czas tylko raz na iterację
-            elapsed_time = (current_time - start_time) * 1000  # Konwersja na milisekundy
-
-            if elapsed_time < needed_tilt_duration:
-                tilt_progress = elapsed_time / needed_tilt_duration if needed_tilt_duration > 0 else 1.0
-                progress = 0.0
-            else:
-                tilt_progress = 1.0
-                progress = (elapsed_time - needed_tilt_duration) / actual_duration if actual_duration > 0 else 1.0
-
-            if direction == OPEN:
-                # Obliczanie _position dla kierunku OPEN
-                self._position = min(100.0, self._initial_position + progress * total_steps)
-
-                # Obliczanie _tilt_position dla kierunku OPEN
-                if target_tilt_position is not None:
-                    self._tilt_position = min(
-                        target_tilt_position, self._initial_tilt_position + tilt_progress * tilt_delta
-                    )
-                else:  # Fallback jeśli nie ma target_tilt_position
-                    self._tilt_position = min(
-                        100.0, self._initial_tilt_position + tilt_progress * (100 - self._initial_tilt_position)
-                    )
-            elif direction == CLOSE:
-                # Obliczanie _position dla kierunku CLOSE
-                self._position = max(0.0, self._initial_position - progress * total_steps)
-
-                # Obliczanie _tilt_position dla kierunku CLOSE
-                if target_tilt_position is not None:
-                    self._tilt_position = max(
-                        target_tilt_position, self._initial_tilt_position - tilt_progress * tilt_delta
-                    )
-                else:  # Fallback jeśli nie ma target_tilt_position
-                    self._tilt_position = max(
-                        0.0, self._initial_tilt_position - tilt_progress * self._initial_tilt_position
-                    )
-
-            self._last_timestamp = time.time()  # Wall clock for display
-            if current_time - self._last_update_time >= 1:
-                self._loop.call_soon_threadsafe(self.send_state, self.state, self.json_position)
-                self._last_update_time = current_time
-
-            if target_tilt_position is not None and (
-                (direction == OPEN and self._tilt_position >= target_tilt_position)
-                or (direction == CLOSE and self._tilt_position <= target_tilt_position)
-            ):
-                break
-
-            if target_position is not None and (
-                (direction == OPEN and self._position >= target_position)
-                or (direction == CLOSE and self._position <= target_position)
-            ):
-                break
-
-            if progress >= 1.0 or (target_tilt_position and tilt_progress >= 1.0):
-                break
-
-            if target_tilt_position is not None and abs(self._tilt_position - target_tilt_position) < 5:
-                time.sleep(0.01)
-            else:
-                time.sleep(0.05)
-        relay.turn_off()
-        # Send relay state to WebSocket (not MQTT - that's handled by output_type check)
-        self._loop.call_soon_threadsafe(lambda r=relay: asyncio.ensure_future(r.async_send_state()))
+        self._drive_relay(relay, travel_ms, apply_movement)
         self._current_operation = IDLE
         self._loop.call_soon_threadsafe(self.send_state_and_save, self.json_position)
         self._last_update_time = time.monotonic()  # Upewnij się, że aktualizacja jest wysłana na końcu ruchu
@@ -315,6 +260,10 @@ class VenetianCover(BaseCover, BaseVenetianCoverABC):
         )
         await self.set_tilt(tilt_position=0)
 
+    def _is_fully_closed(self) -> bool:
+        """Closed means down at 0% *and* the slats shut, not just 0%."""
+        return self._position <= 0 and self._tilt_position <= 0
+
     def _save_tilt_for_restore(self) -> None:
         """Save current tilt position for later restoration.
 
@@ -373,12 +322,10 @@ class VenetianCover(BaseCover, BaseVenetianCoverABC):
 
         Args:
             config: Dictionary with timing values as TimePeriod objects.
-                   Keys: open_time, close_time, tilt_duration, tilt_restore_after_close
+                   Keys: open_time, close_time, actuator_activation_duration,
+                   tilt_duration, tilt_restore_after_close
         """
-        if "open_time" in config:
-            self._open_time = ensure_time_period(config["open_time"]).total_milliseconds
-        if "close_time" in config:
-            self._close_time = ensure_time_period(config["close_time"]).total_milliseconds
+        super().update_config_times(config)
         if "tilt_duration" in config and config["tilt_duration"]:
             self._tilt_duration = ensure_time_period(config["tilt_duration"]).total_milliseconds
         if "tilt_restore_after_close" in config:

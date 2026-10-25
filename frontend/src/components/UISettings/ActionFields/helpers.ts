@@ -1,4 +1,5 @@
 import { convertTimeperiodToMilliseconds } from '../helpers/configSchemaUtils';
+import type { ActionCondition, ActionDef, ActionInput, CoverActionData, RemoteCoverEntity, RemoteDevice, RemoteOutputEntity } from './types';
 
 /**
  * Fields allowed per action type. When switching action type,
@@ -8,6 +9,7 @@ const ALLOWED_FIELDS_BY_ACTION: Record<string, string[]> = {
   output: ['boneio_output', 'action_output'],
   cover: ['boneio_cover', 'action_cover', 'data', 'restore_tilt'],
   mqtt: ['topic', 'action_mqtt_msg'],
+  virtual_switch: ['boneio_virtual_switch', 'action_output'],
   output_over_mqtt: ['boneio_id', 'boneio_output', 'action_output', 'action_mqtt_msg'],
   cover_over_mqtt: ['boneio_id', 'boneio_cover', 'action_cover', 'action_mqtt_msg', 'data'],
   remote_output: [
@@ -29,14 +31,16 @@ const SHARED_FIELDS = ['action', 'min_duration', 'max_duration', 'repeat', 'repe
  * @param currentAction - The current action object (may contain fields from old type)
  * @returns New action object with only valid fields
  */
-export const cleanActionFields = (newActionType: string, currentAction: Record<string, any> = {}): Record<string, any> => {
+export const cleanActionFields = (newActionType: string, currentAction: ActionInput = {}): Record<string, unknown> => {
   const allowed = ALLOWED_FIELDS_BY_ACTION[newActionType.toLowerCase()] || [];
   const keepSet = new Set([...SHARED_FIELDS, ...allowed]);
 
-  const cleaned: Record<string, any> = { action: newActionType };
-  for (const key of Object.keys(currentAction)) {
-    if (key !== 'action' && keepSet.has(key) && currentAction[key] !== undefined) {
-      cleaned[key] = currentAction[key];
+  // Copied key by key, whatever the fields hold, so read as a plain record.
+  const source = currentAction as Record<string, unknown>;
+  const cleaned: Record<string, unknown> = { action: newActionType };
+  for (const key of Object.keys(source)) {
+    if (key !== 'action' && keepSet.has(key) && source[key] !== undefined) {
+      cleaned[key] = source[key];
     }
   }
   return cleaned;
@@ -65,7 +69,10 @@ export const formatActionLabel = (option: string, t?: (key: string) => string): 
  * @param t - Translation function
  * @returns Error message string or null if valid
  */
-export const validateCondition = (condition: any, t: (key: string) => string): string | null => {
+export const validateCondition = (
+  condition: Partial<ActionCondition> | null | undefined,
+  t: (key: string) => string,
+): string | null => {
   if (!condition || !condition.type) {
     return t('event_form.validation_condition_type_required');
   }
@@ -98,6 +105,32 @@ export const validateCondition = (condition: any, t: (key: string) => string): s
     }
   }
 
+  if (condition.type === 'sun') {
+    const hasWindow = Boolean(condition.after || condition.before);
+    const hasPhase = Boolean(condition.phase);
+    const hasElevation = condition.above !== undefined || condition.below !== undefined;
+    const chosen = [hasWindow, hasPhase, hasElevation].filter(Boolean).length;
+
+    if (chosen === 0) {
+      return t('event_form.validation_condition_sun_empty');
+    }
+    if (chosen > 1) {
+      // The backend refuses a mixture too; catching it here means the message
+      // arrives while the fields are still on screen.
+      return t('event_form.validation_condition_sun_mixed');
+    }
+    if (hasElevation && condition.above !== undefined && condition.below !== undefined
+        && condition.above >= condition.below) {
+      return t('event_form.validation_condition_sun_range');
+    }
+    for (const bound of ['above', 'below'] as const) {
+      const value = condition[bound];
+      if (value !== undefined && (isNaN(value) || Math.abs(value) > 90)) {
+        return t('event_form.validation_condition_sun_degrees');
+      }
+    }
+  }
+
   if (condition.type === 'state') {
     if (!condition.entity) {
       return t('event_form.validation_condition_entity_required');
@@ -119,7 +152,8 @@ export const validateCondition = (condition: any, t: (key: string) => string): s
  * @param t - Translation function
  * @returns Error message string or null if valid
  */
-export const validateAction = (action: any, t: (key: string) => string): string | null => {
+export const validateAction = (input: ActionInput, t: (key: string) => string): string | null => {
+  const action = input as ActionDef;
   if (!action.action) return t('event_form.validation_action_type_required');
   
   const actionType = action.action.toLowerCase();
@@ -132,11 +166,14 @@ export const validateAction = (action: any, t: (key: string) => string): string 
     if (!action.boneio_cover) return t('event_form.validation_cover_required');
   }
   
-  // TILT action requires tilt_position
+  // TILT action requires tilt_position, SET_POSITION requires position
   if (['cover', 'cover_over_mqtt', 'remote_cover', 'esphome_cover'].includes(actionType)) {
     const coverAction = action.action_cover || action.action_esphome_cover;
     if (coverAction === 'TILT' && (action.data?.tilt_position === undefined || action.data?.tilt_position === null || action.data?.tilt_position === '')) {
       return t('event_form.validation_tilt_position_required');
+    }
+    if (coverAction === 'SET_POSITION' && (action.data?.position === undefined || action.data?.position === null || action.data?.position === '')) {
+      return t('event_form.validation_position_required');
     }
   }
   
@@ -226,7 +263,7 @@ export const TILT_ACTIONS = ['TILT', 'TILT_OPEN', 'TILT_CLOSE'];
  * @param cover - Cover object from remote device (ESPHome or MQTT)
  * @returns true if the cover supports tilt control
  */
-export const coverSupportsTilt = (cover: any): boolean => {
+export const coverSupportsTilt = (cover: object | null | undefined): boolean => {
   if (!cover) return false;
   // Both ESPHome and MQTT covers may provide supports_tilt from discovery
   if ('supports_tilt' in cover) return !!cover.supports_tilt;
@@ -234,6 +271,46 @@ export const coverSupportsTilt = (cover: any): boolean => {
   if ('kind' in cover) return cover.kind === 'venetian';
   // Unknown — hide tilt by default (safer UX)
   return false;
+};
+
+/** The `data` key each parameterised cover action reads. */
+const COVER_DATA_KEY_BY_ACTION: Record<string, keyof CoverActionData> = {
+  SET_POSITION: 'position',
+  TILT: 'tilt_position',
+  SMART_TOGGLE: 'always_open_till',
+};
+
+/**
+ * The cover action's `data` after switching to `newAction`: keeps only the
+ * key that action reads, so a position typed for SET_POSITION does not ride
+ * along on OPEN (remote covers read `position` ahead of the action name).
+ * @returns The pruned data, or undefined when nothing is left
+ */
+export const coverDataForAction = (
+  data: CoverActionData | undefined,
+  newAction: string,
+): CoverActionData | undefined => {
+  const key = COVER_DATA_KEY_BY_ACTION[newAction];
+  if (!data || !key || data[key] === undefined) return undefined;
+  return { [key]: data[key] };
+};
+
+/**
+ * Removes SET_POSITION when discovery says the cover cannot be positioned.
+ * Unknown support keeps it: boneIO covers always take a position, and only
+ * ESPHome reports `supports_position`.
+ * @param actionOptions - Cover action option strings
+ * @param selectedCover - Currently selected cover object (or null/undefined)
+ * @returns Filtered list of action options
+ */
+export const filterCoverActionsByPosition = (
+  actionOptions: string[],
+  selectedCover: object | null | undefined,
+): string[] => {
+  if (selectedCover && 'supports_position' in selectedCover && selectedCover.supports_position === false) {
+    return actionOptions.filter(opt => opt !== 'SET_POSITION');
+  }
+  return actionOptions;
 };
 
 /**
@@ -245,10 +322,82 @@ export const coverSupportsTilt = (cover: any): boolean => {
  */
 export const filterCoverActionsByTilt = (
   actionOptions: string[],
-  selectedCover: any,
+  selectedCover: object | null | undefined,
 ): string[] => {
   // If no cover selected yet, show all options
   if (!selectedCover) return actionOptions;
   if (coverSupportsTilt(selectedCover)) return actionOptions;
   return actionOptions.filter(opt => !TILT_ACTIONS.includes(opt));
+};
+
+
+/**
+ * Apply one `onUpdate(field, value)` from a shared editor to an object.
+ *
+ * `__batch` is a sentinel the condition and action editors use to set several
+ * fields at once — it is how they swap between `condition` and `conditions`
+ * without a render in between where both are set. A consumer that treats it as
+ * an ordinary field name writes a junk `__batch` key and silently drops the
+ * update, which is what "Add condition" did in the schedules page until this
+ * became shared code rather than something each form re-implemented.
+ *
+ * An `undefined` value removes the key rather than storing it, so a cleared
+ * field does not end up in the YAML as a null.
+ *
+ * @param target - The object being edited. Not mutated.
+ * @param field - Field name, or `__batch`.
+ * @param value - The new value, or an object of them for `__batch`.
+ * @returns A new object with the change applied.
+ */
+export const applyActionUpdate = <T extends Record<string, unknown>>(
+  target: T,
+  field: string,
+  value: unknown,
+): T => {
+  const next: Record<string, unknown> = { ...target };
+  const changes =
+    field === '__batch' ? (value as Record<string, unknown>) : { [field]: value };
+  for (const [key, entry] of Object.entries(changes)) {
+    if (entry === undefined) delete next[key];
+    else next[key] = entry;
+  }
+  return next as T;
+};
+
+/**
+ * Gets all entities (switches, lights, segments) from a remote device.
+ */
+export const getDeviceEntities = (device: RemoteDevice | undefined): RemoteOutputEntity[] => {
+  if (!device) return [];
+  
+  const isEspHome = device.protocol === 'esphome_api';
+  const isWled = device.protocol === 'wled';
+  
+  if (isEspHome) {
+    const switches = (device.esphome_api?.switches || []).map((s) => ({ ...s, _type: 'switch' as const }));
+    const lights = (device.esphome_api?.lights || []).map((l) => ({ ...l, _type: 'light' as const }));
+    return [...switches, ...lights];
+  } else if (isWled) {
+    return [
+      { id: 'main', name: 'All LEDs', _type: 'wled_main' as const },
+      ...(device.wled?.segments || []).map((s) => ({ 
+        ...s, 
+        id: String(s.id),
+        name: s.name || `Segment ${s.id}`,
+        _type: 'wled_segment' as const,
+      }))
+    ];
+  } else {
+    return device.mqtt?.outputs || [];
+  }
+};
+
+/**
+ * Gets the covers a remote device exposes.
+ */
+export const getDeviceCovers = (device: RemoteDevice | undefined): RemoteCoverEntity[] => {
+  if (!device) return [];
+  return device.protocol === 'esphome_api'
+    ? (device.esphome_api?.covers || [])
+    : (device.mqtt?.covers || []);
 };

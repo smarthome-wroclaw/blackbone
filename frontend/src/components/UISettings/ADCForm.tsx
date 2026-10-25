@@ -88,7 +88,7 @@ const ADCForm: React.FC<ADCFormProps> = ({
     onValidationChange?.(Object.keys(newErrors).length > 0);
   }, [data.pin, existingItems, editingIndex, onValidationChange]);
 
-  const handleChange = (field: keyof ADCData, value: any) => {
+  const handleChange = <K extends keyof ADCData>(field: K, value: ADCData[K]) => {
     onChange({ ...data, [field]: value });
   };
 
@@ -282,7 +282,7 @@ const ADCForm: React.FC<ADCFormProps> = ({
               })}
               <button
                 type="button"
-                className="btn btn-ghost btn-sm"
+                className="btn btn-outline btn-sm"
                 onClick={() => {
                   const newFilters = [...(data.filters || []), { round: 2 }];
                   handleChange('filters', newFilters);

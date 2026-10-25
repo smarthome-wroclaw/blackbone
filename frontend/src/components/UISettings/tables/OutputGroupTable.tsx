@@ -3,19 +3,85 @@ import { useTranslation } from '../../../hooks/useTranslation';
 import { useTableSort } from '@/hooks/useTableSort';
 import TableActions from './TableActions';
 import FilterInput from './FilterInput';
+import { areaMatches } from './areaFilter';
 import MobileCard from './MobileCard';
 import SortableHeader, { ResetSortButton } from './SortableHeader';
 import { Table, Td, Tr, Th, Thead, Tbody } from '@/components/ui/table';
+import type { CoverEntity } from '@/types/config';
 
 interface Area {
   id: string;
   name: string;
 }
 
+/** An `output_group` entry, as far as this table reads it. */
+export interface OutputGroupRow {
+  id?: string;
+  name?: string;
+  area?: string;
+  /** Output IDs in the group. */
+  outputs?: string[];
+  output_type?: string;
+  all_on_behaviour?: boolean;
+}
+
+/** How many outputs a desktop row shows before folding the rest into "+N". */
+const VISIBLE_OUTPUTS = 4;
+
+/**
+ * The group's outputs as badges, in pin order. With a limit, the overflow
+ * folds into a "+N" badge that unfolds the row on click and lists the hidden
+ * pins on hover.
+ */
+const OutputBadges: React.FC<{
+  outputs: string[];
+  coverRelayIds: Set<string>;
+  size: 'xs' | 'sm';
+  limit?: number;
+}> = ({ outputs, coverRelayIds, size, limit }) => {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+
+  const sorted = useMemo(
+    () => [...outputs].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
+    [outputs],
+  );
+  const folds = limit !== undefined && sorted.length > limit + 1;
+  const shown = folds && !expanded ? sorted.slice(0, limit) : sorted;
+  const hidden = folds ? sorted.slice(limit) : [];
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {shown.map((output) => {
+        const isCoverRelay = coverRelayIds.has(output.toUpperCase());
+        return (
+          <span
+            key={output}
+            className={`badge ${size === 'xs' ? 'badge-xs' : 'badge-sm'} uppercase ${isCoverRelay ? 'badge-warning line-through opacity-60' : 'badge-primary'}`}
+            title={isCoverRelay ? t('groups.output_used_as_cover') : undefined}
+          >
+            {output}{isCoverRelay ? ' ⚠' : ''}
+          </span>
+        );
+      })}
+      {folds && (
+        <button
+          type="button"
+          className={`badge ${size === 'xs' ? 'badge-xs' : 'badge-sm'} badge-ghost cursor-pointer hover:bg-base-300`}
+          onClick={() => setExpanded(!expanded)}
+          title={expanded ? undefined : hidden.join(', ')}
+        >
+          {expanded ? '−' : `+${hidden.length}`}
+        </button>
+      )}
+    </div>
+  );
+};
+
 interface OutputGroupTableProps {
-  items: any[];
+  items: OutputGroupRow[];
   allAreas: Area[];
-  allCovers?: any[];
+  allCovers?: CoverEntity[];
   onEdit: (index: number) => void;
   onDelete: (index: number) => void;
 }
@@ -27,7 +93,7 @@ const OutputGroupTable: React.FC<OutputGroupTableProps> = ({ items, allAreas, al
   // Build set of output IDs used as cover relays
   const coverRelayIds = useMemo(() => {
     const ids = new Set<string>();
-    allCovers.forEach((cover: any) => {
+    allCovers.forEach((cover) => {
       if (cover.open_relay) ids.add(cover.open_relay.toUpperCase());
       if (cover.close_relay) ids.add(cover.close_relay.toUpperCase());
     });
@@ -45,22 +111,23 @@ const OutputGroupTable: React.FC<OutputGroupTableProps> = ({ items, allAreas, al
         return (
           (item.name?.toLowerCase().includes(lowerFilter)) ||
           (item.id?.toLowerCase().includes(lowerFilter)) ||
-          outputs.some((o: string) => o.toLowerCase().includes(lowerFilter))
+          outputs.some((o: string) => o.toLowerCase().includes(lowerFilter)) ||
+          areaMatches(item.area, allAreas, lowerFilter)
         );
       });
-  }, [items, filter]);
+  }, [items, filter, allAreas]);
 
   // Sort filtered items
   const sortedItems = useMemo(() => {
     return sortItems(filteredItems, {
-      name: (item: any) => (item.name || item.id || '').toLowerCase(),
-      outputs: (item: any) => (Array.isArray(item.outputs) ? item.outputs.length : 0),
-      output_type: (item: any) => (item.output_type || 'switch').toLowerCase(),
-      area: (item: any) => {
+      name: (item) => (item.name || item.id || '').toLowerCase(),
+      outputs: (item) => (Array.isArray(item.outputs) ? item.outputs.length : 0),
+      output_type: (item) => (item.output_type || 'switch').toLowerCase(),
+      area: (item) => {
         const area = allAreas.find(a => a.id === item.area);
         return (area?.name || item.area || '').toLowerCase();
       },
-      all_on_behaviour: (item: any) => !!item.all_on_behaviour,
+      all_on_behaviour: (item) => !!item.all_on_behaviour,
     });
   }, [filteredItems, sortItems, allAreas]);
 
@@ -96,20 +163,7 @@ const OutputGroupTable: React.FC<OutputGroupTableProps> = ({ items, allAreas, al
               onDelete={() => onDelete(originalIndex)}
               fields={[
                 { label: t('outputs.title'), value: outputs.length > 0 ? (
-                  <div className="flex flex-wrap gap-1">
-                    {outputs.map((output: string, idx: number) => {
-                      const isCoverRelay = coverRelayIds.has(output.toUpperCase());
-                      return (
-                        <span 
-                          key={idx} 
-                          className={`badge badge-xs uppercase ${isCoverRelay ? 'badge-warning line-through opacity-60' : 'badge-primary'}`}
-                          title={isCoverRelay ? t('groups.output_used_as_cover') : undefined}
-                        >
-                          {output}{isCoverRelay ? ' ⚠' : ''}
-                        </span>
-                      );
-                    })}
-                  </div>
+                  <OutputBadges outputs={outputs} coverRelayIds={coverRelayIds} size="xs" />
                 ) : <span className="text-warning text-xs">{t('array_table_widget.no_outputs')}</span> },
                 { label: t('outputs.output_type'), value: <span className="badge badge-info badge-xs">{item.output_type || 'switch'}</span> },
                 ...(areaName ? [{ label: t('outputs.area'), value: areaName }] : []),
@@ -151,24 +205,11 @@ const OutputGroupTable: React.FC<OutputGroupTableProps> = ({ items, allAreas, al
                   </div>
                 </Td>
                 <Td>
-                  <div className="flex flex-wrap gap-1">
-                    {outputs.length > 0 ? (
-                      outputs.map((output: string, idx: number) => {
-                        const isCoverRelay = coverRelayIds.has(output.toUpperCase());
-                        return (
-                          <span 
-                            key={idx} 
-                            className={`badge badge-sm uppercase ${isCoverRelay ? 'badge-warning line-through opacity-60' : 'badge-primary'}`}
-                            title={isCoverRelay ? t('groups.output_used_as_cover') : undefined}
-                          >
-                            {output}{isCoverRelay ? ' ⚠' : ''}
-                          </span>
-                        );
-                      })
-                    ) : (
-                      <span className="text-warning">{t('array_table_widget.no_outputs')}</span>
-                    )}
-                  </div>
+                  {outputs.length > 0 ? (
+                    <OutputBadges outputs={outputs} coverRelayIds={coverRelayIds} size="sm" limit={VISIBLE_OUTPUTS} />
+                  ) : (
+                    <span className="text-warning">{t('array_table_widget.no_outputs')}</span>
+                  )}
                 </Td>
                 <Td>
                   {item.output_type ? (
@@ -180,9 +221,9 @@ const OutputGroupTable: React.FC<OutputGroupTableProps> = ({ items, allAreas, al
                 <Td>{areaName}</Td>
                 <Td>
                   {item.all_on_behaviour ? (
-                    <span className="badge badge-success badge-sm">Yes</span>
+                    <span className="badge badge-success badge-sm">{t('common.yes')}</span>
                   ) : (
-                    <span className="badge badge-ghost badge-sm">No</span>
+                    <span className="badge badge-ghost badge-sm">{t('common.no')}</span>
                   )}
                 </Td>
                 <Td>

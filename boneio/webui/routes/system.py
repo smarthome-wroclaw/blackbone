@@ -6,6 +6,9 @@ import asyncio
 import glob
 import logging
 import os
+from pathlib import Path
+
+from boneio.core import system_ops
 import re
 import subprocess
 from datetime import datetime
@@ -14,16 +17,24 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from boneio.webui.sudo_rate_limiter import (
+    SUDO_AUTH_FAILED_RESPONSE,
+    SUDO_RATE_LIMITED_RESPONSE,
+    sudo_rate_limiter,
+)
+
 from boneio.core.config import ConfigHelper
+from boneio.core.config.secret_masking import collect_secrets, scrub_text
 from boneio.core.config.yaml_util import (
     load_config_from_file,
     update_yaml_field,
-    wait_for_pending_yaml_saves,
 )
+from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
 from boneio.core.utils import overlay as overlay_util
 from boneio.exceptions import ConfigurationException
 from boneio.models.logs import LogEntry, LogsResponse
 from boneio.version import __version__
+from boneio.webui.routes.onboarding import get_configured_before, pending_board_revision
 from boneio.webui.middleware.auth import (
     get_user_store,
     is_anonymous_allowed,
@@ -34,13 +45,29 @@ from boneio.webui.services.logs import (
     get_systemd_logs,
     is_running_as_service,
 )
-from boneio.webui.sudo_rate_limiter import (
-    SUDO_AUTH_FAILED_RESPONSE,
-    SUDO_RATE_LIMITED_RESPONSE,
-    sudo_rate_limiter,
-)
 
 _LOGGER = logging.getLogger(__name__)
+
+def _invalidate_sun(reason: str) -> None:
+    """Drop cached sun times after the clock or the zone moved under them.
+
+    Anchors are cached per (local date, timezone). Changing the zone without
+    this leaves the provider answering with the old one until a restart —
+    sunset an hour out, and every sun schedule with it.
+
+    Never fatal: the timezone was already changed by the time this runs, and
+    failing the request afterwards would report a success as an error.
+    """
+    try:
+        from boneio.webui.app import get_manager as _app_manager
+
+        manager = _app_manager()
+        if manager is not None and getattr(manager, "sun", None) is not None:
+            manager.sun.invalidate()
+            _LOGGER.info("Sun times recomputed: %s", reason)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Could not refresh sun times after %s: %s", reason, err)
+
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -98,13 +125,17 @@ async def get_logs(
             )
             if log_entries:
                 return LogsResponse(
-                    logs=log_entries, has_more=has_more, source="systemd"
+                    logs=_scrub_log_entries(log_entries),
+                    has_more=has_more,
+                    source="systemd",
                 )
 
         log_entries, has_more = get_standalone_logs(limit, before, since, until, grep)
         if log_entries:
             return LogsResponse(
-                logs=log_entries, has_more=has_more, source="standalone"
+                logs=_scrub_log_entries(log_entries),
+                has_more=has_more,
+                source="standalone",
             )
 
         return LogsResponse(
@@ -122,12 +153,53 @@ async def get_logs(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+
+def _scrub_log_entries(entries: list) -> list:
+    """Remove configured secrets from log messages.
+
+    A password reaches the journal whenever something logs a connection string
+    or a traceback that happens to carry one, and the log viewer is readable by
+    any signed-in account. The values are known from the configuration, so they
+    can be taken out on the way to the client.
+
+    Never raises: an unreadable configuration must not cost the operator their
+    logs, which are often what they came for. That tolerance hid a defect for
+    a release — the helper was called by a name that does not exist here, so
+    every call raised NameError, was swallowed, and the logs went out
+    unscrubbed. The failure is logged at warning level now: silence is what
+    let it pass.
+
+    Args:
+        entries: Log entries as returned by the log services.
+
+    Returns:
+        The same entries with secret values replaced.
+    """
+    try:
+        config = get_config_helper().get_config()
+        secrets = collect_secrets(config)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Could not collect secrets for log scrubbing: %s", err)
+        return entries
+
+    if not secrets:
+        return entries
+
+    for entry in entries:
+        message = getattr(entry, "message", None)
+        if isinstance(message, str):
+            entry.message = scrub_text(message, secrets)
+        elif isinstance(entry, dict) and isinstance(entry.get("message"), str):
+            entry["message"] = scrub_text(entry["message"], secrets)
+    return entries
+
+
 @router.post("/restart")
 async def restart_service(background_tasks: BackgroundTasks):
     """Restart the BoneIO service.
 
-    Waits for any pending background YAML saves (from quick-actions)
-    to complete before restarting, so no config changes are lost.
+    Waits for a config save in progress to finish before restarting, so no
+    file is left half written.
 
     Returns:
         Status response indicating if restart was initiated.
@@ -135,44 +207,70 @@ async def restart_service(background_tasks: BackgroundTasks):
     if not is_running_as_service():
         return {"status": "not available"}
 
-    # Flush pending background YAML saves before restarting.
-    # Run in executor to avoid blocking the async event loop.
-    loop = asyncio.get_running_loop()
-    saves_flushed = await loop.run_in_executor(
-        None, wait_for_pending_yaml_saves, 30.0
-    )
-    if not saves_flushed:
-        _LOGGER.warning("Restarting with pending YAML saves — some changes may be lost")
-
     async def shutdown_and_restart():
         if _app_state and _app_state.web_server:
             await asyncio.sleep(0.1)
+            # Held, never released: every save takes it, so none is cut off
+            # halfway and none starts after this point.
+            await asyncio.to_thread(CONFIG_WRITE_LOCK.acquire)
             os._exit(0)
 
     background_tasks.add_task(shutdown_and_restart)
     return {"status": "success"}
 
 
-@router.get("/version")
-async def get_version(config_helper: ConfigHelper = Depends(get_config_helper)):
-    """
-    Get application version and serial number.
-    
+def _may_see_serial(request: Request) -> bool:
+    """Whether this caller should be told the device's serial number.
+
+    /api/version and /api/init answer without a token — the UI needs them to
+    decide whether to show a login form at all — but the serial identifies the
+    unit, feeds its cloud subdomain and its MQTT topics, so it does not belong
+    in an unauthenticated reply.
+
+    Authenticated callers see it. So do callers on a device running with
+    anonymous access allowed, where the whole API is open and withholding this
+    one field would protect nothing.
+
     Args:
-        config_helper: ConfigHelper instance.
-    
+        request: Incoming request; the middleware notes the caller on exempt
+            routes without gating them.
+
     Returns:
-        Dictionary with version, serial_no, and serial_override strings.
+        True if the serial may be included.
     """
-    return {
-        "version": __version__,
-        "serial_no": config_helper.real_serial,
-        "serial_override": config_helper.serial_override,
-    }
+    if getattr(request.state, "user", ""):
+        return True
+    return is_anonymous_allowed() and not is_auth_required()
+
+
+@router.get("/version")
+async def get_version(
+    request: Request,
+    config_helper: ConfigHelper = Depends(get_config_helper),
+):
+    """
+    Get application version and, for authenticated callers, the serial number.
+
+    Args:
+        request: Incoming request, used to decide on the serial.
+        config_helper: ConfigHelper instance.
+
+    Returns:
+        Dictionary with the version, plus serial_no and serial_override when
+        the caller is entitled to them.
+    """
+    payload = {"version": __version__}
+    if _may_see_serial(request):
+        payload["serial_no"] = config_helper.real_serial
+        payload["serial_override"] = config_helper.serial_override
+    return payload
 
 
 @router.get("/init")
-async def get_init(config_helper: ConfigHelper = Depends(get_config_helper)):
+async def get_init(
+    request: Request,
+    config_helper: ConfigHelper = Depends(get_config_helper),
+):
     """
     Combined initialization endpoint returning all data needed for initial page load.
 
@@ -188,7 +286,15 @@ async def get_init(config_helper: ConfigHelper = Depends(get_config_helper)):
     # Cloud status
     cloud_data: dict = {"enabled": False}
     ch: ConfigHelper | None = getattr(_app_state, "config_helper", None)
-    if ch:
+    # The caller may not be signed in: this endpoint answers before the login
+    # form. Whether cloud is on is all the first-run wizard needs. The rest
+    # stays with signed-in callers — the domain spells out the serial withheld
+    # below, and last_error carries docker compose's stderr verbatim.
+    full_view = _may_see_serial(request)
+    if ch and not full_view:
+        cloud_reg = getattr(ch, "_cloud_reg", None)
+        cloud_data = {"enabled": cloud_reg.enabled if cloud_reg else ch.cloud_registration}
+    elif ch:
         cloud_reg = getattr(ch, "_cloud_reg", None)
         if cloud_reg:
             cloud_data = {
@@ -227,6 +333,8 @@ async def get_init(config_helper: ConfigHelper = Depends(get_config_helper)):
     has_boneio = False
     board_version: str | None = None
     has_irrigation = False
+    has_templates = False
+    has_location = False
     try:
         config = config_helper.get_config()
         has_boneio = "boneio" in config
@@ -245,14 +353,36 @@ async def get_init(config_helper: ConfigHelper = Depends(get_config_helper)):
             (isinstance(irrigation_direct, list) and len(irrigation_direct) > 0)
             or len(irrigation_from_templates) > 0
         )
+        # The Templates page shows thermostats, alarms, gates and irrigation.
+        # With any of them it earns a slot of its own in the phone's bottom bar.
+        has_templates = has_irrigation or any(isinstance(t, dict) for t in templates)
+
+        # Everything sun-related is unusable without coordinates, and the panel
+        # hides those options rather than letting someone configure a condition
+        # that can never be evaluated. Both numbers, not just the section:
+        # `location: {}` is a section that tells us nothing.
+        location = config.get("location") or {}
+        has_location = (
+            isinstance(location, dict)
+            and location.get("latitude") is not None
+            and location.get("longitude") is not None
+        )
     except Exception:
         pass
+
+    serial_fields = (
+        {
+            "serial_no": config_helper.real_serial,
+            "serial_override": config_helper.serial_override,
+        }
+        if _may_see_serial(request)
+        else {}
+    )
 
     return {
         "version": __version__,
         "name": config_helper.name,
-        "serial_no": config_helper.real_serial,
-        "serial_override": config_helper.serial_override,
+        **serial_fields,
         "auth_required": auth_required,
         "needs_onboarding": needs_onboarding,
         # Effective state, not the setting. The opt-out only applies while the
@@ -261,16 +391,25 @@ async def get_init(config_helper: ConfigHelper = Depends(get_config_helper)):
         # a password — and point at a config.yaml key that need not even exist,
         # since BONEIO_DEV opts in too.
         "allow_anonymous": is_anonymous_allowed() and not auth_required,
-        "pwa_name": config_helper.pwa_name,
-        "pwa_default": f"bIO {serial_suffix}",
+        # Both default to the serial's suffix, so both are withheld with it.
+        "pwa_name": config_helper.pwa_name if full_view else None,
+        "pwa_default": f"bIO {serial_suffix}" if full_view else None,
         "pwa_max_length": 12,
         "cloud": cloud_data,
         "has_boneio": has_boneio,
         "board_version": board_version,
         "has_irrigation": has_irrigation,
-        "features": {
-            "addons": os.environ.get("BONEIO_ADDONS", "").lower() in {"1", "true", "yes", "on"},
-        },
+        "has_templates": has_templates,
+        "has_location": has_location,
+        # The wizard reads this to drop the import and device-binding steps on
+        # a controller that already has a configuration. It lives here rather
+        # than only on /api/onboarding/status because the wizard never asks
+        # that endpoint — it renders from this payload, and for two releases
+        # the field was computed, returned somewhere nobody read, and
+        # defaulted to false at the only place that used it.
+        "configured_before": get_configured_before(),
+        # The card did not say which controller this is; the wizard asks.
+        "board_type_required": pending_board_revision() is not None,
     }
 
 @router.get("/name")
@@ -334,7 +473,10 @@ async def set_pwa_name(
     # Persist to YAML config
     try:
         if _app_state and _app_state.yaml_config_file:
-            result = update_yaml_field(
+            # A thread: it reads and rewrites the whole file, and waits for
+            # any other config save to finish first.
+            result = await asyncio.to_thread(
+                update_yaml_field,
                 _app_state.yaml_config_file,
                 "web.cloud",
                 "pwa_name",
@@ -354,8 +496,13 @@ async def get_cloud_status():
     """
     Get cloud registration status including domain and last error.
 
+    ``serving`` is what to wait for before sending anybody to ``url``: the
+    template switches first and Caddy is recreated after it, and until then
+    the registered name answers nothing.
+
     Returns:
-        Dict with enabled, domain, cloud_config_active, and last_error fields.
+        Dict with enabled, domain, cloud_config_active, serving, url and
+        last_error fields.
     """
     config_helper: ConfigHelper | None = getattr(_app_state, "config_helper", None)
     if not config_helper:
@@ -367,6 +514,8 @@ async def get_cloud_status():
             "enabled": config_helper.cloud_registration,
             "domain": None,
             "cloud_config_active": False,
+            "serving": False,
+            "url": None,
             "last_error": None,
         }
 
@@ -374,14 +523,11 @@ async def get_cloud_status():
         "enabled": cloud_reg.enabled,
         "domain": cloud_reg.domain,
         "cloud_config_active": cloud_reg.is_cloud_config_active(),
+        "serving": cloud_reg.serving,
+        "url": config_helper.configuration_url if cloud_reg.domain else None,
         "compose_writable": cloud_reg.is_compose_writable,
         "last_error": cloud_reg.last_error,
     }
-
-
-class SudoFixRequest(BaseModel):
-    """Request body for fixing docker-compose.yaml permissions via sudo."""
-    password: str
 
 
 def _get_compose_info() -> dict:
@@ -433,83 +579,11 @@ async def test_compose_permissions():
     return info
 
 
-@router.post("/cloud/fix-permissions")
-async def fix_compose_permissions(body: SudoFixRequest, request: Request):
-    """Fix docker-compose.yaml ownership using sudo chown.
-
-    Accepts the user's sudo password, runs 'sudo chown' on docker-compose.yaml,
-    and returns success/error. The password is never logged or stored.
-    Rate-limited to prevent brute-force attacks.
-
-    Returns:
-        Status response with success or error message.
-    """
-    client_ip = request.client.host if request.client else "unknown"
-    if not sudo_rate_limiter.check(client_ip):
-        return SUDO_RATE_LIMITED_RESPONSE
-
-    info = _get_compose_info()
-    compose_path = info["compose_path"]
-    current_user = info["current_user"]
-
-    _LOGGER.info(
-        "Fix permissions requested. File: %s, exists: %s, writable: %s, owner: %s, current_user: %s",
-        compose_path,
-        info.get("file_exists"),
-        info.get("writable"),
-        info.get("file_owner"),
-        current_user,
-    )
-
-    if not info["file_exists"]:
-        return {"status": "error", "message": f"File not found: {compose_path}"}
-
-    if info.get("writable"):
-        return {"status": "success", "message": "File is already writable"}
-
-    try:
-        cmd = ["sudo", "-S", "chown", f"{current_user}:{current_user}", compose_path]
-        _LOGGER.info("Running: %s", " ".join(cmd))
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=(body.password + "\n").encode()),
-            timeout=10,
-        )
-
-        stdout_str = stdout.decode().strip()
-        stderr_str = stderr.decode().strip()
-        _LOGGER.info(
-            "sudo chown result: returncode=%s, stdout=%r, stderr=%r",
-            proc.returncode, stdout_str, stderr_str,
-        )
-
-        if proc.returncode == 0:
-            after = _get_compose_info()
-            _LOGGER.info("After fix: %s", after)
-            return {
-                "status": "success",
-                "message": "Permissions fixed successfully",
-                "before": info,
-                "after": after,
-            }
-        else:
-            if "incorrect password" in stderr_str.lower() or "sorry" in stderr_str.lower():
-                sudo_rate_limiter.record_failure(client_ip)
-                return SUDO_AUTH_FAILED_RESPONSE
-            return {"status": "error", "message": f"sudo failed: {stderr_str}"}
-
-    except TimeoutError:
-        _LOGGER.error("sudo chown timed out for %s", compose_path)
-        return {"status": "error", "message": "sudo command timed out"}
-    except Exception as e:
-        _LOGGER.error("Failed to fix permissions: %s", e)
-        return {"status": "error", "message": str(e)}
+# There is deliberately no endpoint that chowns docker-compose.yaml back to the
+# application (the old POST /cloud/fix-permissions). The file is root-owned
+# because `docker compose up` executes it: whoever can write it can start a
+# container as root with the host filesystem mounted. The read-only diagnostic
+# above still reports the file's owner and mode.
 
 
 @router.post("/cloud/disable")
@@ -560,13 +634,15 @@ async def check_configuration():
 async def get_restart_status():
     """
     Get restart status.
-    
+
     Returns:
-        Dictionary with restart_pending flag.
+        Dictionary with restart_required, true once a saved section needs
+        an application restart to take effect.
     """
-    if _app_state:
-        return {"restart_pending": getattr(_app_state, 'restart_pending', False)}
-    return {"restart_pending": False}
+    try:
+        return {"restart_required": bool(get_config_helper().restart_required)}
+    except Exception:  # noqa: BLE001
+        return {"restart_required": False}
 
 
 @router.get("/hardware/errors")
@@ -590,6 +666,12 @@ async def get_hardware_errors():
     return {"errors": errors}
 
 
+#: The same rule ``boneio-system`` applies before it runs hostnamectl. Checked
+#: here too so a name the helper would refuse comes back as a 400 that says
+#: why, not as a 500 carrying the helper's stderr.
+_HOSTNAME_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
 class HostnameRequest(BaseModel):
     """Request model for hostname change."""
     hostname: str
@@ -604,7 +686,8 @@ async def get_hostname():
         Dictionary with hostname string.
     """
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["hostname"],
             capture_output=True,
             text=True,
@@ -631,33 +714,37 @@ async def set_hostname(request: HostnameRequest):
     Returns:
         Status response indicating if hostname was changed.
     """
-    new_hostname = request.hostname.strip()
-    
+    # Lower-cased rather than refused: hostnames are case-insensitive, and
+    # "Kotlownia" typed into the panel means kotlownia, not a mistake.
+    new_hostname = request.hostname.strip().lower()
+
     if not new_hostname:
         raise HTTPException(status_code=400, detail="Hostname cannot be empty")
-    
+
     if len(new_hostname) > 63:
         raise HTTPException(status_code=400, detail="Hostname too long (max 63 characters)")
-    
-    if not all(c.isalnum() or c in '-_' for c in new_hostname):
-        raise HTTPException(status_code=400, detail="Hostname can only contain alphanumeric characters, hyphens, and underscores")
-    
-    try:
-        subprocess.run(
-            ["sudo", "hostnamectl", "set-hostname", new_hostname],
-            check=True,
-            capture_output=True,
-            text=True
+
+    if not _HOSTNAME_RE.match(new_hostname):
+        raise HTTPException(
+            status_code=400,
+            detail="Hostname can only contain letters, digits and hyphens, "
+            "and cannot start or end with a hyphen",
         )
-        
-        _LOGGER.info(f"Hostname changed to: {new_hostname}")
-        return {"status": "success", "hostname": new_hostname}
-    except subprocess.CalledProcessError as e:
-        _LOGGER.error("Failed to set hostname: %s", e.stderr)
-        raise HTTPException(status_code=500, detail=f"Failed to set hostname: {e.stderr}") from e
-    except Exception as e:
-        _LOGGER.error("Error setting hostname: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    # Through the helper rather than `sudo hostnamectl set-hostname *`: that
+    # rule's wildcard took whatever this endpoint passed. The helper checks
+    # the name again on the root side, which is the check that matters; the
+    # one above only makes a refusal readable.
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, system_ops.hostname_set, new_hostname
+    )
+    if not result.ok:
+        raise HTTPException(
+            status_code=500,
+            detail=result.stderr.strip() or "Failed to set hostname",
+        )
+    _LOGGER.info("Hostname changed to: %s", new_hostname)
+    return {"status": "success", "hostname": new_hostname}
 
 
 @router.post("/reboot")
@@ -674,7 +761,8 @@ async def reboot_device(background_tasks: BackgroundTasks):
     async def execute_reboot():
         await asyncio.sleep(1)
         try:
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 ["sudo", "reboot"],
                 check=True,
                 capture_output=True,
@@ -778,7 +866,8 @@ async def shutdown_device(background_tasks: BackgroundTasks):
     async def execute_shutdown():
         await asyncio.sleep(1)
         try:
-            subprocess.run(
+            await asyncio.to_thread(
+                subprocess.run,
                 ["sudo", "shutdown", "-h", "now"],
                 check=True,
                 capture_output=True,
@@ -803,8 +892,20 @@ class TimezoneRequest(BaseModel):
 
 
 class NtpRequest(BaseModel):
-    """Request model for NTP enable/disable."""
-    enabled: bool
+    """Request model for NTP synchronisation.
+
+    Both fields are optional so the UI can change one without restating the
+    other: a request with only ``servers`` changes where the time comes from and
+    leaves the on/off state alone.
+
+    Attributes:
+        enabled: Turn synchronisation on or off. None leaves it as it is.
+        servers: NTP servers to use. An empty list restores the distribution
+            defaults; None leaves the current choice alone.
+    """
+
+    enabled: bool | None = None
+    servers: list[str] | None = None
 
 
 def _parse_timedatectl() -> dict:
@@ -854,7 +955,7 @@ async def get_timezone():
     Returns:
         Dictionary with timezone, NTP status, and current time.
     """
-    info = _parse_timedatectl()
+    info = await asyncio.to_thread(_parse_timedatectl)
 
     # timedatectl show uses key=value pairs
     timezone = info.get("Timezone", "")
@@ -889,6 +990,32 @@ async def get_timezone():
     }
 
 
+_ZONEINFO_ROOT = Path("/usr/share/zoneinfo")
+
+
+def _is_known_timezone(tz: str) -> bool:
+    """Whether *tz* is a timezone this system actually has.
+
+    Args:
+        tz: Candidate IANA name, e.g. ``"Europe/Warsaw"``.
+
+    Returns:
+        True when tzdata knows it.
+    """
+    try:
+        import zoneinfo
+
+        return tz in zoneinfo.available_timezones()
+    except Exception:
+        # No tzdata module or no database: fall back to the filesystem, but
+        # require the resolved path to stay inside the zoneinfo tree.
+        candidate = (_ZONEINFO_ROOT / tz).resolve()
+        return (
+            candidate.is_file()
+            and candidate.is_relative_to(_ZONEINFO_ROOT.resolve())
+        )
+
+
 @router.post("/timezone")
 async def set_timezone(request: TimezoneRequest):
     """
@@ -904,22 +1031,27 @@ async def set_timezone(request: TimezoneRequest):
     if not tz:
         raise HTTPException(status_code=400, detail="Timezone cannot be empty")
 
-    # Validate timezone exists in system
-    zoneinfo_path = f"/usr/share/zoneinfo/{tz}"
-    if not os.path.isfile(zoneinfo_path):
+    # Validate against tzdata. The previous check was
+    # os.path.isfile(f"/usr/share/zoneinfo/{tz}"), which passes for
+    # "../../etc/passwd" — that resolves to a file that exists. timedatectl
+    # rejects such a name itself, so it was not an escalation, but a check that
+    # can be walked out of its own directory is not a check.
+    if not _is_known_timezone(tz):
         raise HTTPException(
             status_code=400,
             detail=f"Invalid timezone: {tz}. Must be a valid IANA timezone.",
         )
 
     try:
-        subprocess.run(
+        await asyncio.to_thread(
+            subprocess.run,
             ["sudo", "timedatectl", "set-timezone", tz],
             check=True,
             capture_output=True,
             text=True,
         )
         _LOGGER.info("Timezone changed to: %s", tz)
+        _invalidate_sun(f"timezone changed to {tz}")
         return {"status": "success", "timezone": tz}
     except subprocess.CalledProcessError as e:
         _LOGGER.error("Failed to set timezone: %s", e.stderr)
@@ -929,6 +1061,80 @@ async def set_timezone(request: TimezoneRequest):
     except Exception as e:
         _LOGGER.error("Error setting timezone: %s", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+#: How many servers the UI offers. Mirrors NTP_MAX_SERVERS in boneio-system;
+#: the helper enforces it, this only produces a better error message.
+_NTP_MAX_SERVERS = 5
+
+
+def _timesync_status() -> dict:
+    """Read which server the clock is actually following.
+
+    ``timedatectl show-timesync`` needs no privileges, so this does not go
+    through the helper. It answers the question the UI exists to answer: the
+    operator typed an address, did the device accept it?
+
+    Returns:
+        Dict with the server name and address, empty when unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["timedatectl", "show-timesync", "--all"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return {}
+
+    info: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            info[key.strip()] = value.strip()
+
+    return {
+        "server_name": info.get("ServerName", ""),
+        "server_address": info.get("ServerAddress", ""),
+        "poll_interval_usec": info.get("PollIntervalUSec", ""),
+    }
+
+
+def _configured_ntp_servers() -> tuple[list[str], str]:
+    """Return the configured servers and where they came from.
+
+    Returns:
+        ``(servers, source)`` where source is ``"boneio"`` when boneIO wrote a
+        drop-in, ``"system"`` when the distribution's own configuration is in
+        force, and ``"unknown"`` when the helper is not installed yet.
+    """
+    result = system_ops.ntp_get()
+    if not result.ok:
+        return [], "unknown"
+    payload = result.json() or {}
+    servers = [str(entry) for entry in payload.get("servers", [])]
+    return servers, "boneio" if payload.get("dropin") else "system"
+
+
+@router.get("/ntp")
+async def get_ntp():
+    """Report NTP state: on/off, synchronised, configured and active servers.
+
+    Returns:
+        Dict describing the current time synchronisation setup.
+    """
+    info = await asyncio.to_thread(_parse_timedatectl)
+    servers, source = _configured_ntp_servers()
+    return {
+        "enabled": info.get("NTP", "").lower() in ("yes", "active"),
+        "synchronized": info.get("NTPSynchronized", "").lower() == "yes",
+        "servers": servers,
+        "source": source,
+        "max_servers": _NTP_MAX_SERVERS,
+        **(await asyncio.to_thread(_timesync_status)),
+    }
 
 
 @router.post("/ntp")
@@ -942,24 +1148,64 @@ async def set_ntp(request: NtpRequest):
     Returns:
         Status response.
     """
-    action = "true" if request.enabled else "false"
-    try:
-        subprocess.run(
-            ["sudo", "timedatectl", "set-ntp", action],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        _LOGGER.info("NTP %s", "enabled" if request.enabled else "disabled")
-        return {"status": "success", "ntp_enabled": request.enabled}
-    except subprocess.CalledProcessError as e:
-        _LOGGER.error("Failed to set NTP: %s", e.stderr)
+    if request.enabled is None and request.servers is None:
         raise HTTPException(
-            status_code=500, detail=f"Failed to set NTP: {e.stderr}"
-        ) from e
-    except Exception as e:
-        _LOGGER.error("Error setting NTP: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+            status_code=400, detail="Nothing to change: give 'enabled', 'servers', or both."
+        )
+
+    # Servers first: switching synchronisation on should already point at the
+    # right source, not spend a poll interval on the public pool before the
+    # second request lands.
+    if request.servers is not None:
+        servers = [entry.strip() for entry in request.servers if entry and entry.strip()]
+        if len(servers) > _NTP_MAX_SERVERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"At most {_NTP_MAX_SERVERS} NTP servers can be configured.",
+            )
+        if len(set(servers)) != len(servers):
+            raise HTTPException(status_code=400, detail="Duplicate NTP server in the list.")
+
+        result = system_ops.ntp_set(servers)
+        if not result.ok:
+            # The helper refuses invalid names; that is a bad request, not a
+            # server fault, and its message names the offending entry.
+            detail = (result.stderr or result.stdout).strip() or "Failed to set NTP servers"
+            status = 400 if "REFUSED" in detail or "not a usable" in detail else 500
+            _LOGGER.error("Failed to set NTP servers: %s", detail)
+            raise HTTPException(status_code=status, detail=detail)
+        _LOGGER.info(
+            "NTP servers set to: %s", ", ".join(servers) if servers else "system defaults"
+        )
+
+    if request.enabled is not None:
+        action = "true" if request.enabled else "false"
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                ["sudo", "timedatectl", "set-ntp", action],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            _LOGGER.info("NTP %s", "enabled" if request.enabled else "disabled")
+        except subprocess.CalledProcessError as e:
+            _LOGGER.error("Failed to set NTP: %s", e.stderr)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to set NTP: {e.stderr}"
+            ) from e
+        except Exception as e:
+            _LOGGER.error("Error setting NTP: %s", e)
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    servers_now, source = await asyncio.to_thread(_configured_ntp_servers)
+    info = await asyncio.to_thread(_parse_timedatectl)
+    return {
+        "status": "success",
+        "ntp_enabled": info.get("NTP", "").lower() in ("yes", "active"),
+        "servers": servers_now,
+        "source": source,
+    }
 
 
 @router.get("/timezones")
@@ -971,7 +1217,8 @@ async def list_timezones():
         List of timezone strings.
     """
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["timedatectl", "list-timezones"],
             capture_output=True,
             text=True,
@@ -990,11 +1237,6 @@ async def list_timezones():
 # ── Timezone Sudoers ─────────────────────────────────────────────────────
 
 
-class TimezoneSudoersFixRequest(BaseModel):
-    """Request body for creating timedatectl sudoers file."""
-    password: str
-
-
 @router.get("/timezone/sudoers/check")
 async def check_timezone_sudoers():
     """Check if sudoers NOPASSWD is configured for timedatectl commands.
@@ -1009,34 +1251,11 @@ async def check_timezone_sudoers():
     return await check_sudo_nopasswd_for_timedatectl()
 
 
-@router.post("/timezone/sudoers/fix")
-async def fix_timezone_sudoers(body: TimezoneSudoersFixRequest, request: Request):
-    """Create /etc/sudoers.d/boneio-timedatectl with NOPASSWD rules.
-
-    Accepts the user's sudo password, validates the sudoers content,
-    and installs it. The password is never logged or stored.
-    Rate-limited to prevent brute-force attacks.
-
-    Returns:
-        Status response with success or error message.
-    """
-    client_ip = request.client.host if request.client else "unknown"
-    if not sudo_rate_limiter.check(client_ip):
-        return SUDO_RATE_LIMITED_RESPONSE
-
-    from boneio.webui.routes.timezone_sudoers import (
-        create_timedatectl_sudoers_file,
-    )
-
-    result = await create_timedatectl_sudoers_file(body.password)
-
-    # Record failure if sudo auth failed (generic message already returned)
-    if result.get("status") == "error" and result.get("_auth_failed"):
-        sudo_rate_limiter.record_failure(client_ip)
-        del result["_auth_failed"]
-        result["message"] = SUDO_AUTH_FAILED_RESPONSE["message"]
-
-    return result
+# POST /timezone/sudoers/fix is gone. It accepted the operator's sudo password
+# over HTTP to write /etc/sudoers.d/boneio-timedatectl; the pentest report lists
+# that as a path to intercepting the password, which on these controllers is
+# shared across devices. The file is installed by migration 1.6.7 instead, over
+# a channel that needs no password. The read-only check above stays.
 
 
 # ── Device Tree Overlay management ──────────────────────────────────
@@ -1051,6 +1270,8 @@ _VERSION_TO_OVERLAY: dict[str, str] = {
     "0.7": "BONEIO-BLACK-PINS-v0.4-v0.8.dtbo",
     "0.8": "BONEIO-BLACK-PINS-v0.4-v0.8.dtbo",
     "1.0": "BONEIO-BLACK-PINS-v1.0.dtbo",
+    # 1.1 uses the same overlay as 1.0 — the pinout did not change.
+    "1.1": "BONEIO-BLACK-PINS-v1.0.dtbo",
 }
 
 # All valid overlay basenames (for security — reject unknown filenames)
@@ -1166,8 +1387,6 @@ class OverlayChangeRequest(BaseModel):
 
     overlay: str
     """Overlay basename to set (e.g. ``BONEIO-BLACK-PINS-v0.4-v0.8.dtbo``)."""
-    password: str
-    """Sudo password for writing to /boot/uEnv.txt."""
 
 
 @router.get("/system/overlay")
@@ -1222,67 +1441,27 @@ async def get_overlay_status():
 
 
 @router.post("/system/overlay")
-async def change_overlay(body: OverlayChangeRequest, request: Request):
-    """Change the device tree overlay in /boot/uEnv.txt via sudo.
+async def change_overlay(body: OverlayChangeRequest):
+    """Change the device tree overlay in uEnv.txt.
 
-    This is a potentially dangerous operation — the wrong overlay
-    can make GPIO pins non-functional. A system restart is required
-    for the change to take effect.
-
-    Safety measures:
-    - Rate-limited to prevent sudo password brute-force
-    - Validates overlay is in whitelist
-    - Verifies .dtbo file exists on disk before modifying uEnv.txt
-    - Creates backup of uEnv.txt before modification
-    - Uses ``sudo -S sed -i`` (skips commented lines)
-    - Calls ``os.sync()`` after modification to flush to disk
-    - Verifies the change was applied
+    A wrong overlay leaves GPIO pins non-functional and the change needs a
+    restart to take effect, so this is still a deliberate, verified operation.
+    What it no longer does is ask for the operator's system password and hand
+    root a ``sed -i`` expression composed here. boneio-system takes an overlay
+    name from the four this board ships, edits the file against a compiled
+    pattern, and keeps the same backup it always did.
 
     Args:
-        body: Request with the overlay basename and sudo password.
+        body: Request with the overlay basename.
 
     Returns:
         Status response with previous and new overlay values.
     """
-    client_ip = request.client.host if request.client else "unknown"
-    if not sudo_rate_limiter.check(client_ip):
-        return JSONResponse(
-            status_code=429,
-            content=SUDO_RATE_LIMITED_RESPONSE,
-        )
     overlay = body.overlay.strip()
-
-    # Defense-in-depth: reject sed metacharacters even if whitelist is misconfigured
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", overlay):
-        _LOGGER.warning("Overlay name rejected (unsafe characters): %r", overlay)
-        return JSONResponse(
-            status_code=422,
-            content={
-                "status": "error",
-                "message": "Invalid overlay name — only alphanumerics, dots, hyphens and underscores allowed.",
-            },
-        )
-
-    # Security: only allow known overlay filenames
     if overlay not in _VALID_OVERLAYS:
         return JSONResponse(
-            status_code=422,
-            content={
-                "status": "error",
-                "message": f"Invalid overlay '{overlay}'. Allowed: {sorted(_VALID_OVERLAYS)}",
-            },
-        )
-
-    # Fix #2: verify the .dtbo file actually exists on disk
-    if not _overlay_file_exists(overlay):
-        _LOGGER.error("Overlay file '%s' not found on disk", overlay)
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "error",
-                "message": f"Overlay file '{overlay}' not found on disk. "
-                "Install the overlay first (make install).",
-            },
+            status_code=400,
+            content={"status": "error", "message": f"Unknown overlay: {overlay}"},
         )
 
     uenv = _find_uenv()
@@ -1293,7 +1472,6 @@ async def change_overlay(body: OverlayChangeRequest, request: Request):
         )
 
     previous = _read_current_overlay(uenv)
-
     if previous == overlay:
         return {
             "status": "unchanged",
@@ -1301,86 +1479,22 @@ async def change_overlay(body: OverlayChangeRequest, request: Request):
             "message": "Overlay already set to requested value",
         }
 
-    # Fix #3: backup uEnv.txt before modification (cp -n = no-clobber)
-    backup_path = uenv + ".boneio.bak"
-    backup_cmd = ["sudo", "-S", "cp", "-n", uenv, backup_path]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *backup_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(
-            proc.communicate(input=(body.password + "\n").encode()),
-            timeout=10,
-        )
-        if proc.returncode == 0:
-            _LOGGER.info("Backup created: %s", backup_path)
-        else:
-            _LOGGER.warning("Backup creation returned %d (may already exist)", proc.returncode)
-    except Exception as exc:
-        _LOGGER.warning("Could not create backup: %s (continuing anyway)", exc)
-
-    # Fix #4: sed skips commented lines using address /^[[:space:]]*#/!
-    # Only modifies uncommented uboot_overlay_addr lines containing BONEIO-BLACK-PINS
-    # Fix #7: handle both path-prefixed and bare overlay names in uEnv.txt
-    sed_pattern = (
-        r"/^[[:space:]]*#/!s|"
-        r"\(uboot_overlay_addr[0-9]*=\)\(.*\/\)\{0,1\}BONEIO-BLACK-PINS[^ ]*|"
-        rf"\1\2{overlay}|"
-    )
-
-    cmd = ["sudo", "-S", "sed", "-i", sed_pattern, uenv]
-    _LOGGER.info("Overlay change: running sed on %s (%s → %s)", uenv, previous, overlay)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=(body.password + "\n").encode()),
-            timeout=10,
-        )
-
-        stderr_str = stderr.decode().strip()
-
-        if proc.returncode != 0:
-            if "incorrect password" in stderr_str.lower() or "sorry" in stderr_str.lower():
-                sudo_rate_limiter.record_failure(client_ip)
-                return JSONResponse(
-                    status_code=403,
-                    content=SUDO_AUTH_FAILED_RESPONSE,
-                )
-            _LOGGER.error("sudo sed failed: %s", stderr_str)
-            return JSONResponse(
-                status_code=500,
-                content={"status": "error", "message": f"sudo sed failed: {stderr_str}"},
-            )
-
-    except TimeoutError:
-        _LOGGER.error("sudo sed timed out for overlay change on %s", uenv)
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "sudo command timed out"},
-        )
-    except Exception as exc:
-        _LOGGER.error("Failed to change overlay in %s: %s", uenv, exc)
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(exc)},
-        )
-
-    # Fix #1: flush filesystem buffers before returning restart_required
-    # Critical on vfat (/boot/firmware) — reboot before flush = corrupted/empty uEnv.txt
     loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, system_ops.overlay_set, overlay)
+    if not result.ok:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": result.stderr.strip() or "overlay change failed",
+            },
+        )
+
+    # Flush before reporting restart_required. /boot/firmware is vfat, so a
+    # reboot before the flush can leave uEnv.txt truncated or empty.
     await loop.run_in_executor(None, os.sync)
     _LOGGER.info("Filesystem sync completed after overlay change")
 
-    # Verify the change was applied
     new_overlay = _read_current_overlay(uenv)
     if new_overlay != overlay:
         _LOGGER.error(
@@ -1390,17 +1504,17 @@ async def change_overlay(body: OverlayChangeRequest, request: Request):
             status_code=500,
             content={
                 "status": "error",
-                "message": f"Overlay change not verified. Expected '{overlay}', found '{new_overlay}'.",
+                "message": (
+                    f"Overlay change not verified. Expected '{overlay}', "
+                    f"found '{new_overlay}'."
+                ),
             },
         )
 
     _LOGGER.warning(
-        "Device tree overlay changed: '%s' → '%s' in %s (restart required)",
-        previous,
-        overlay,
-        uenv,
+        "Device tree overlay changed: '%s' -> '%s' in %s (restart required)",
+        previous, overlay, uenv,
     )
-
     return {
         "status": "changed",
         "previous_overlay": previous,

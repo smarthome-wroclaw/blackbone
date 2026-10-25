@@ -115,6 +115,10 @@ class OutputManager:
         self._manager = manager
         self._outputs: dict[str, BasicOutput] = {}
         self._configured_output_groups = {}
+        # (ha_type, id) of every discovery topic this manager announced for
+        # its own outputs and groups. A reload removes what it no longer
+        # announces; the shared types (switch, valve…) are not cleared.
+        self._ha_topics: set[tuple[str, str]] = set()
         self._interlock_manager = SoftwareInterlockManager()
         self._outputs_group = output_group
         
@@ -323,7 +327,7 @@ class OutputManager:
                 area=area,
                 member_unique_ids=member_unique_ids,
             )
-            self._manager.publish_ha_discovery(
+            self._publish_discovery(
                 id=_id, ha_type=output_group.output_type, payload=payload,
             )
             
@@ -612,7 +616,16 @@ class OutputManager:
             reload_config: If True, reload configuration from file and clear existing outputs
             preserved_states: Optional dict of output_id -> is_active state to preserve during reload
         """
+        # Remote outputs come from the remote_outputs section and are not
+        # rebuilt here. They are kept as the same objects: a new one would
+        # also mean a second state callback on the remote device.
+        remote_outputs: dict[str, Any] = {}
         if reload_config:
+            remote_outputs = {
+                output_id: output
+                for output_id, output in self._outputs.items()
+                if getattr(output, "is_remote", False)
+            }
             # Clear existing outputs and event listeners
             for output_id, output in list(self._outputs.items()):
                 # Remove event listeners
@@ -628,10 +641,11 @@ class OutputManager:
             self._outputs.clear()
             # Clear interlock manager to remove stale output references
             self._interlock_manager.clear()
-            # Clear autodiscovery messages for outputs
-            from boneio.const import LED, LIGHT, SWITCH, VALVE
-            for output_type in [LIGHT, LED, SWITCH, VALVE]:
-                self._manager._config_helper.clear_autodiscovery_type(ha_type=output_type)
+            # The discovery cache is not cleared here: switch, light and valve
+            # are shared with schedules, virtual switches, irrigation, modbus
+            # and remote outputs, and the MQTT client deletes from HA any
+            # discovery topic the cache does not hold. reload_outputs removes
+            # the topics this manager stopped announcing.
         
         _LOGGER.debug("Initializing outputs")
         
@@ -725,7 +739,7 @@ class OutputManager:
                     config_helper=self._manager._config_helper,
                     area=area,
                 )
-                self._manager.publish_ha_discovery(
+                self._publish_discovery(
                     id=_id, ha_type=out.output_type, payload=payload,
                 )
                 
@@ -747,12 +761,26 @@ class OutputManager:
                         output_discovery_payload=payload,
                         area=area,
                     )
-                    self._manager.publish_ha_discovery(
+                    self._publish_discovery(
                         id=f"{_id}_duration", ha_type="number", payload=number_payload,
                     )
             
             # Delayed state send
             self._manager.loop.create_task(self._delayed_send_state(out))
+
+        if reload_config:
+            self._prune_expander_groups()
+
+        for output_id, output in remote_outputs.items():
+            if output_id in self._outputs:
+                # Same rule as at startup: the local output wins.
+                _LOGGER.warning(
+                    "Remote output '%s' conflicts with existing output, dropping it", output_id
+                )
+                continue
+            self._outputs[output_id] = output
+            if output.interlock_groups:
+                self._interlock_manager.register(output, output.interlock_groups)
 
     async def reload_outputs(self) -> None:
         """Reload output configuration from file.
@@ -807,6 +835,10 @@ class OutputManager:
         # This must happen before _initialize_outputs clears the autodiscovery cache
         area_changed = False
         for output_id, output in self._outputs.items():
+            # Remote outputs are not in this section, so they would always
+            # look moved to no area; the remote devices reload owns them.
+            if getattr(output, "is_remote", False):
+                continue
             old_area = getattr(output, 'area', None)
             new_area = new_output_areas.get(output_id)
             
@@ -834,13 +866,13 @@ class OutputManager:
                 self._remove_group_ha_discovery(group_id)
         
         # SECOND: Cleanup existing output groups before clearing outputs
-        # Groups hold references to outputs, so they must be cleaned up first
-        # Also remove old HA Discovery entries (send empty payload to remove from HA)
+        # Groups hold references to outputs, so they must be cleaned up first.
+        # Their discovery stays: a group that is gone or changed type (e.g.
+        # switch -> light) is removed by the diff below. Removing every group
+        # here made HA delete and recreate each one on every reload.
         for group in self._configured_output_groups.values():
             try:
                 group.cleanup()
-                # Remove old HA Discovery for this group (handles type changes like switch->light)
-                self._remove_group_ha_discovery(group.id)
             except Exception as e:
                 _LOGGER.warning(f"Error cleaning up group {group.id}: {e}")
         self._configured_output_groups.clear()
@@ -852,6 +884,8 @@ class OutputManager:
         
         # THIRD: Reload outputs (this clears old outputs and sends new HA discovery)
         # Pass preserved states to maintain current output states during reload
+        announced_before = self._ha_topics
+        self._ha_topics = set()
         self._initialize_outputs(
             relay_pins=relay_pins, 
             reload_config=True,
@@ -861,6 +895,16 @@ class OutputManager:
         # FOURTH: Reload output groups with new output references
         self._outputs_group = output_groups
         self._configure_output_groups()
+
+        # Deleted outputs, a changed type, an output now driving a cover, a
+        # dropped duration number: announced before, not any more.
+        for ha_type, entity_id in announced_before - self._ha_topics:
+            self._unpublish_discovery(ha_type, entity_id)
+
+        # Outputs and groups are new objects now. Covers, irrigation,
+        # templates and virtual energy sensors took theirs at their own setup
+        # and would keep driving and reading the old ones.
+        self._rebind_dependents()
         
         _LOGGER.info(
             "Output reload complete: %d outputs, %d groups",
@@ -871,6 +915,84 @@ class OutputManager:
         # Broadcast updated states to WebSocket clients
         self._broadcast_all_states()
     
+    def _prune_expander_groups(self) -> None:
+        """Drop deleted or moved outputs from ``grouped_outputs_by_expander``.
+
+        A reload writes the rebuilt outputs into these per-expander dicts but
+        never took anything out, so a deleted output stayed on its OLED screen.
+        Each group gets a new dict instead of being changed in place: the OLED
+        thread iterates them, and the outer dict is shared with it by
+        reference, so it must stay the same object.
+        """
+        for expander_id, group in list(self.grouped_outputs_by_expander.items()):
+            current = {
+                output_id: output
+                for output_id, output in group.items()
+                if self._outputs.get(output_id) is output
+            }
+            if len(current) != len(group):
+                self.grouped_outputs_by_expander[expander_id] = current
+
+    def resolve_current(self, output: Any, include_groups: bool = False) -> Any:
+        """The object registered now under ``output``'s id.
+
+        A reload rebuilds local outputs and groups as new objects, so whoever
+        kept one swaps it for this. An id that is gone keeps the old object:
+        the owner's own reload deals with a config that no longer has it.
+
+        Args:
+            output: The output (or group) held so far, or None.
+            include_groups: Also look among output groups.
+
+        Returns:
+            The current object, the old one if its id is gone, or None.
+        """
+        if output is None:
+            return None
+        current = self._outputs.get(output.id)
+        if current is None and include_groups:
+            current = self._configured_output_groups.get(output.id)
+        if current is None:
+            _LOGGER.warning("Output %s is gone after the reload, keeping the old object", output.id)
+            return output
+        return current
+
+    def _rebind_dependents(self) -> None:
+        """Point every subsystem holding outputs at the current objects."""
+        for name in ("covers", "irrigation", "templates", "sensors"):
+            owner = getattr(self._manager, name, None)
+            rebind = getattr(owner, "rebind_outputs", None)
+            if rebind is None:
+                continue
+            try:
+                rebind()
+            except Exception:
+                _LOGGER.exception("Could not rebind outputs in %s", name)
+
+    def _publish_discovery(
+        self, id: str, ha_type: str, payload: dict, remote: bool = False
+    ) -> None:
+        """Announce an entity to HA and remember it as this manager's own.
+
+        Args:
+            id: Entity identifier.
+            ha_type: HA entity type.
+            payload: Discovery payload.
+            remote: A remote output — announced here, but owned by the remote
+                devices reload, so a reload of outputs must not remove it.
+        """
+        self._manager.publish_ha_discovery(id=id, ha_type=ha_type, payload=payload)
+        if not remote:
+            self._ha_topics.add((ha_type, id))
+
+    def _unpublish_discovery(self, ha_type: str, entity_id: str) -> None:
+        """Remove one discovery topic from HA and from the cache."""
+        config_helper = self._manager._config_helper
+        topic = f"{config_helper.ha_discovery_prefix}/{ha_type}/{config_helper.serial_number}/{entity_id}/config"
+        _LOGGER.info("Output %s no longer announced as %s, removing %s", entity_id, ha_type, topic)
+        self._manager.send_message(topic=topic, payload=None, retain=True)
+        config_helper.remove_autodiscovery_msg(ha_type, topic)
+
     def _remove_output_ha_discovery(self, output_id: str, old_area: str | None = None) -> None:
         """Remove HA Discovery entries for an output.
         
@@ -920,6 +1042,7 @@ class OutputManager:
             self._manager.send_message(topic=topic, payload=None, retain=True)
             # Remove from internal cache
             self._manager._config_helper.remove_autodiscovery_msg(ha_type, topic)
+            self._ha_topics.discard((ha_type, output_id))
 
     def _remove_group_ha_discovery(self, group_id: str) -> None:
         """Remove HA Discovery entries for a group.
@@ -940,6 +1063,7 @@ class OutputManager:
             self._manager.send_message(topic=topic, payload=None, retain=True)
             # Remove from internal cache
             self._manager._config_helper.remove_autodiscovery_msg(ha_type, topic)
+            self._ha_topics.discard((ha_type, group_id))
 
     def _broadcast_all_states(self) -> None:
         """Broadcast current state of all outputs and groups via WebSocket."""
@@ -962,6 +1086,10 @@ class OutputManager:
         """Send Home Assistant autodiscovery for all outputs and groups."""
         # Send autodiscovery for outputs
         for output_id, output in self._outputs.items():
+            # Remote outputs are published only when show_in_ha is set
+            if not getattr(output, "show_in_ha", True):
+                continue
+            remote = bool(getattr(output, "is_remote", False))
             if output.output_type not in (NONE, COVER):
                 ha_func = _OUTPUT_HA_FUNC.get(output.output_type, ha_switch_availabilty_message)
                 payload = ha_func(
@@ -970,8 +1098,8 @@ class OutputManager:
                     config_helper=self._manager._config_helper,
                     area=getattr(output, 'area', None),
                 )
-                self._manager.publish_ha_discovery(
-                    id=output_id, ha_type=output.output_type, payload=payload,
+                self._publish_discovery(
+                    id=output_id, ha_type=output.output_type, payload=payload, remote=remote,
                 )
 
                 # Duration number entity for adjustable outputs
@@ -986,8 +1114,9 @@ class OutputManager:
                         output_discovery_payload=payload,
                         area=getattr(output, 'area', None),
                     )
-                    self._manager.publish_ha_discovery(
+                    self._publish_discovery(
                         id=f"{output_id}_duration", ha_type="number", payload=number_payload,
+                        remote=remote,
                     )
         
         # Send autodiscovery for groups
@@ -1002,9 +1131,10 @@ class OutputManager:
                 name=group.name if hasattr(group, 'name') else group_id,
                 config_helper=self._manager._config_helper,
                 output_type=group.output_type,
+                area=getattr(group, 'area', None),
                 member_unique_ids=member_unique_ids,
             )
-            self._manager.publish_ha_discovery(
+            self._publish_discovery(
                 id=group_id, ha_type=group.output_type, payload=payload,
             )
 

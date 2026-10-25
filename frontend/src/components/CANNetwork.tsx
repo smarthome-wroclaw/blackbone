@@ -1,7 +1,10 @@
 import { useState, useCallback, useEffect } from 'react';
 import { FaServer, FaPlus, FaSave, FaEdit, FaCheck, FaExclamationTriangle } from 'react-icons/fa';
 import axios from '@/api/axios';
+import type { AxiosError } from 'axios';
 import { NumericInput } from '@/components/ui/NumericInput';
+
+type ApiError = AxiosError<{ detail?: string }>;
 
 interface CANNode {
   node_id: number;
@@ -29,8 +32,9 @@ export default function CANNetwork() {
     try {
       const { data } = await axios.get('/api/can/nodes');
       setNodes(data.nodes || []);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to fetch CAN nodes');
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      setError(apiErr.response?.data?.detail || apiErr.message || 'Failed to fetch CAN nodes');
     } finally {
       setLoading(false);
     }
@@ -51,8 +55,9 @@ export default function CANNetwork() {
       });
       setNewNodeId((prev) => prev + 1);
       fetchNodes();
-    } catch (err: any) {
-      alert('Failed to assign ID: ' + (err.response?.data?.detail || err.message));
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      alert('Failed to assign ID: ' + (apiErr.response?.data?.detail || apiErr.message));
     } finally {
       setAssigningId(null);
     }
@@ -68,8 +73,9 @@ export default function CANNetwork() {
       });
       setSaveResult({ status: 'success', message: data.message });
       setTimeout(() => setSaveResult(null), 3000);
-    } catch (err: any) {
-      setSaveResult({ status: 'error', message: err.response?.data?.detail || err.message });
+    } catch (err: unknown) {
+      const apiErr = err as ApiError;
+      setSaveResult({ status: 'error', message: apiErr.response?.data?.detail || apiErr.message });
     } finally {
       setSavingConfig(false);
     }
@@ -83,7 +89,7 @@ export default function CANNetwork() {
       <div className="flex justify-between items-center">
         <h2 className="text-xl font-bold">CAN Network Management</h2>
         <button
-          className={`btn btn-sm btn-ghost gap-2 ${loading ? 'loading' : ''}`}
+          className={`btn btn-sm btn-outline gap-2 ${loading ? 'loading' : ''}`}
           onClick={fetchNodes}
           disabled={loading}
         >
@@ -99,7 +105,7 @@ export default function CANNetwork() {
       )}
 
       {/* Unconfigured Nodes */}
-      <div className="card bg-base-200">
+      <div className="stg-card">
         <div className="card-body">
           <h2 className="card-title text-lg text-warning">
             <FaPlus /> Pending Devices (Unconfigured)
@@ -157,7 +163,7 @@ export default function CANNetwork() {
       </div>
 
       {/* Active Slaves */}
-      <div className="card bg-base-200">
+      <div className="stg-card">
         <div className="card-body">
           <h2 className="card-title text-lg text-success">
             <FaServer /> Active Slaves

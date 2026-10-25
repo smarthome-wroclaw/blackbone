@@ -6,7 +6,6 @@
  *   - boneio_input (replaced by read-only sensor ID)
  *   - bounce_time  (not applicable to remote inputs)
  *   - initial_send (not applicable)
- *   - clear_message (not applicable)
  *
  * The show_in_ha toggle defaults to OFF and uses remote-specific labels.
  */
@@ -32,8 +31,11 @@ import type {
   CoverEntity,
   BinarySensorEntity,
   RemoteDeviceEntity,
+  EventEntity,
   Action,
 } from '@/types/config';
+import type { JsonSchema } from '@/types/jsonSchema';
+import type { ActionInput, OutputGroupRecord } from './ActionFields/types';
 
 /* ------------------------------------------------------------------ */
 /*  Device class options — same as BinarySensorForm                    */
@@ -48,25 +50,42 @@ const DEFAULT_DEVICE_CLASSES = [
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
 /* ------------------------------------------------------------------ */
+/** A remote input entry: the binary_sensor / event fields plus where its state comes from. */
+export type RemoteInputData = BinarySensorEntity & Omit<EventEntity, keyof BinarySensorEntity> & {
+  /** Remote device (from remote_devices) the input lives on. */
+  device_id?: string;
+  /** Protocol of that device (mqtt, esphome_api, ...). */
+  remote_source?: string;
+  /** Input ID on the remote device. */
+  input_id?: string;
+  /** MQTT state topic override (mqtt devices only). */
+  topic?: string;
+  /** 'event' for event mode; absent means binary_sensor. */
+  mode?: string;
+  _type?: 'binary_sensor' | 'event';
+};
+
 interface RemoteInputFormProps {
-  data: any;
-  onChange: (data: any) => void;
+  data: RemoteInputData;
+  onChange: (data: RemoteInputData) => void;
   onSave: () => void;
   onCancel: () => void;
   isNew: boolean;
-  schema?: any;
+  schema?: JsonSchema;
   allOutputs?: OutputEntity[];
-  allOutputGroups?: any[];
+  allOutputGroups?: OutputGroupRecord[];
   allCovers?: CoverEntity[];
   allAreas?: AreaEntity[];
   allRemoteDevices?: RemoteDeviceEntity[];
   allBinarySensors?: BinarySensorEntity[];
   /** Remote inputs for condition entity picker */
   allRemoteInputs?: Array<Record<string, unknown>>;
+  /** Virtual switches — flags with no hardware, usable in conditions. */
+  allVirtualSwitches?: Array<Record<string, unknown>>;
   onValidationChange?: (hasErrors: boolean) => void;
   attemptedSubmit?: boolean;
   savedOutputs?: OutputEntity[];
-  savedOutputGroups?: any[];
+  savedOutputGroups?: OutputGroupRecord[];
   savedCovers?: CoverEntity[];
   /** Optional initial tab (e.g., 'single', 'double', 'long', 'pressed'). */
   initialTab?: 'basic' | 'single' | 'double' | 'triple' | 'long' | 'sequences' | 'advanced' | 'pressed' | 'released';
@@ -86,6 +105,7 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
   allRemoteDevices = [],
   allBinarySensors = [],
   allRemoteInputs = [],
+  allVirtualSwitches = [],
   onValidationChange,
   attemptedSubmit = false,
   savedOutputs,
@@ -107,47 +127,47 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
     'basic' | 'single' | 'double' | 'triple' | 'long' | 'sequences' | 'advanced'
   >(
     initialTab && ['single', 'double', 'triple', 'long', 'sequences', 'advanced'].includes(initialTab)
-      ? initialTab as any
+      ? initialTab as 'single' | 'double' | 'triple' | 'long' | 'sequences' | 'advanced'
       : 'basic'
   );
 
   /* ---------- schema-derived enums ---------- */
   const deviceClassOptions =
-    schema?.items?.properties?.device_class?.enum || DEFAULT_DEVICE_CLASSES;
+    (schema?.items?.properties?.device_class?.enum as string[] | undefined) || DEFAULT_DEVICE_CLASSES;
   const rawActionTypeOptions =
-    schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action?.enum ||
-    schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action?.enum || [
+    (schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action?.enum as string[] | undefined) ||
+    (schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action?.enum as string[] | undefined) || [
       'mqtt', 'output', 'cover', 'output_over_mqtt', 'cover_over_mqtt', 'remote_output', 'remote_cover',
     ];
   // Deduplicate: schema may provide both uppercase and lowercase variants
   const actionTypeOptions = [...new Set(rawActionTypeOptions.map((o: string) => o.toLowerCase()))] as string[];
   const actionOutputOptions =
-    schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_output?.enum ||
-    schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_output?.enum || [
+    (schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_output?.enum as string[] | undefined) ||
+    (schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_output?.enum as string[] | undefined) || [
       'TOGGLE', 'ON', 'OFF', 'BRIGHTNESS_UP', 'BRIGHTNESS_DOWN', 'BRIGHTNESS_UP_CYCLE', 'BRIGHTNESS_DOWN_CYCLE', 'SET_BRIGHTNESS', 'CYCLE_COLOR', 'CYCLE_PRESET',
     ];
   const actionCoverOptions =
-    schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_cover?.enum ||
-    schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_cover?.enum || [
-      'TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'TILT', 'TILT_OPEN', 'TILT_CLOSE',
+    (schema?.items?.properties?.actions?.properties?.single?.items?.properties?.action_cover?.enum as string[] | undefined) ||
+    (schema?.items?.properties?.actions?.properties?.pressed?.items?.properties?.action_cover?.enum as string[] | undefined) || [
+      'TOGGLE', 'OPEN', 'CLOSE', 'STOP', 'TOGGLE_OPEN', 'TOGGLE_CLOSE', 'SMART_TOGGLE', 'SET_POSITION', 'TILT', 'TILT_OPEN', 'TILT_CLOSE',
     ];
 
   /* ---------- field helpers ---------- */
-  const updateField = (field: string, value: any) => {
+  const updateField = (field: string, value: unknown) => {
     onChange({ ...data, [field]: value });
   };
 
   /* ---------- action CRUD (shared for both modes) ---------- */
-  const updateAction = (type: string, index: number, field: string, value: any) => {
+  const updateAction = (type: string, index: number, field: string, value: unknown) => {
     const actions = { ...data.actions };
     if (!actions[type]) actions[type] = [];
-    const updated = [...actions[type]];
+    const updated: ActionInput[] = [...actions[type]];
 
     if (field === 'action') {
-      updated[index] = cleanActionFields(value, updated[index]) as any;
+      updated[index] = cleanActionFields(value as string, updated[index]);
     } else if (field === '__batch') {
-      const cur = { ...updated[index] };
-      for (const [k, v] of Object.entries(value as Record<string, any>)) {
+      const cur: Record<string, unknown> = { ...updated[index] };
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         if (v === undefined) delete cur[k];
         else cur[k] = v;
       }
@@ -163,7 +183,8 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
       updated[index] = { ...updated[index], [field]: value };
     }
 
-    actions[type] = updated;
+    // The edited entries are raw records; they carry the Action fields the editor writes.
+    actions[type] = updated as Action[];
     onChange({ ...data, actions });
   };
 
@@ -177,7 +198,7 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
   const removeAction = (type: string, index: number) => {
     const actions = { ...data.actions };
     if (!actions[type]) return;
-    actions[type] = actions[type].filter((_: any, i: number) => i !== index);
+    actions[type] = actions[type].filter((_: Action, i: number) => i !== index);
     onChange({ ...data, actions });
   };
 
@@ -195,7 +216,7 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
 
     actionTypes.forEach((type) => {
       const acts = data.actions?.[type] || [];
-      acts.forEach((action: any, idx: number) => {
+      acts.forEach((action: Action, idx: number) => {
         const err = validateAction(action, t);
         if (err) errors.push(`${type} action ${idx + 1}: ${err}`);
       });
@@ -231,6 +252,7 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
       clickType={type as 'pressed' | 'released' | 'single' | 'double' | 'triple' | 'long' | 'double_then_long' | 'single_then_long' | 'double_then_single'}
       allBinarySensors={allBinarySensors}
       allRemoteInputs={allRemoteInputs}
+      allVirtualSwitches={allVirtualSwitches}
       excludeEntityId={data.id}
       preferredArea={data.area}
     />
@@ -246,7 +268,7 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
           {t('inputs.add_action')}
         </button>
       </div>
-      {data.actions?.[type]?.length > 0
+      {data.actions?.[type]?.length
         ? data.actions[type].map((a: Action, i: number) => renderActionRow(a, type, i))
         : (
           <div className="text-center py-8 text-base-content/60">
@@ -355,6 +377,24 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
               selectedDevice?.esphome_api?.binary_sensors ||
               selectedDevice?.esphome_api?._discovered_binary_sensors ||
               [];
+
+            // An MQTT device announces nothing, so there is no list to pick
+            // from — the id is whatever the publisher calls it, and for a
+            // boneIO peer it also decides the default topic.
+            if (data.remote_source === 'mqtt') {
+              return (
+                <input
+                  type="text"
+                  className="input input-bordered w-full font-mono"
+                  placeholder="in_01"
+                  value={data.input_id || ''}
+                  onChange={(e) => updateField('input_id', e.target.value)}
+                  disabled={!data.device_id}
+                  spellCheck={false}
+                />
+              );
+            }
+
             return (
               <Select
                 value={data.input_id || '_none_'}
@@ -385,6 +425,31 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
             </label>
           )}
         </div>
+
+        {/* Topic — mqtt only. Left empty it defaults to where a boneIO
+            publishes its own inputs, which is the common case. */}
+        {data.remote_source === 'mqtt' && (
+          <div className="form-control">
+            <label className="label">
+              <span className="label-text font-medium">{t('inputs.mqtt_topic')}</span>
+            </label>
+            <input
+              type="text"
+              className="input input-bordered w-full font-mono"
+              placeholder={
+                data.device_id && data.input_id
+                  ? `${data.device_id}/input/${data.input_id}`
+                  : 'device/input/in_01'
+              }
+              value={data.topic || ''}
+              onChange={(e) => updateField('topic', e.target.value || undefined)}
+              spellCheck={false}
+            />
+            <label className="label">
+              <span className="label-text-alt opacity-60">{t('inputs.mqtt_topic_hint')}</span>
+            </label>
+          </div>
+        )}
 
         {/* Area */}
         <AreaSelect
@@ -589,7 +654,7 @@ const RemoteInputForm: React.FC<RemoteInputFormProps> = ({
                       onChange={(e) => updateMqttSequence(seqType, e.target.checked)}
                     />
                     <h4 className="text-base font-semibold">{t(labelKey)}</h4>
-                    {data.actions?.[seqType]?.length > 0 && (
+                    {!!data.actions?.[seqType]?.length && (
                       <span className="badge badge-sm">{data.actions[seqType].length}</span>
                     )}
                   </div>

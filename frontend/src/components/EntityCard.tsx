@@ -8,7 +8,7 @@ import { formatTimestamp } from '../utils/formatters';
 
 import { ImSwitch } from "react-icons/im";
 import { useTranslation } from '@/hooks/useTranslation';
-import { suppressNextPointerRelease } from '@/utils/longPress';
+import { openOnContextMenu, suppressNextPointerRelease } from '@/utils/longPress';
 import RangeSlider from './RangeSlider';
 
 // Color palette for interlock groups - each group gets a consistent color
@@ -37,7 +37,7 @@ function getInterlockColor(groupName: string): string {
 /**
  * Format duration in seconds for display.
  */
-function formatDuration(seconds: number): string {
+export function formatDuration(seconds: number): string {
   if (seconds >= 3600) {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -89,10 +89,16 @@ interface OutputItemProps {
   actionSlot?: React.ReactNode;
   /** Title text for hover/accessibility. */
   longPressTitle?: string;
+  /**
+   * The area line under the name: the area's display name, or `null` to
+   * leave the line out (the card already sits in its area's panel). Omitted,
+   * the card shows the raw area id it was given.
+   */
+  areaLabel?: string | null;
 }
 
 // Returns icon component and ON color for given type
-function getIconAndOnColor(type: string, isGroup: boolean = false): { Icon: React.ElementType, onColor: string } {
+export function getIconAndOnColor(type: string, isGroup: boolean = false): { Icon: React.ElementType, onColor: string } {
   // For groups with light type, use group light icon
   if (isGroup && type === 'light') {
     return { Icon: HiLightBulb, onColor: 'text-yellow-400' };
@@ -130,6 +136,7 @@ const EntityCard: React.FC<OutputItemProps> = ({
   iconSlot,
   actionSlot,
   longPressTitle,
+  areaLabel,
 }) => {
   const { t } = useTranslation();
   const { Icon, onColor } = getIconAndOnColor(output.type, isGroup);
@@ -170,13 +177,15 @@ const EntityCard: React.FC<OutputItemProps> = ({
 
   return (
     <div
-      className={`bg-base-100 shadow-sm rounded-lg p-4 transition-all duration-500 select-none flex ${isGrid ? 'flex-col' : 'justify-between items-center'} ${isHighlighted ? 'ring-4 ring-primary shadow-lg shadow-primary/30 scale-[1.02]' : ''} ${onLongPress ? 'cursor-pointer' : ''}`}
+      className={`stg-inset ${onLongPress ? 'stg-inset-interactive' : ''} p-4 transition-all duration-500 select-none flex ${isGrid ? 'flex-col' : 'justify-between items-center'} ${isHighlighted ? 'ring-4 ring-primary shadow-lg shadow-primary/30 scale-[1.02]' : ''} ${onLongPress ? 'cursor-pointer' : ''}`}
       onMouseDown={handlePressStart}
       onMouseUp={handlePressEnd}
       onMouseLeave={handlePressEnd}
       onTouchStart={handlePressStart}
       onTouchMove={handlePressEnd}
       onTouchEnd={handlePressEnd}
+      onContextMenu={onLongPress ? openOnContextMenu(() => { handlePressEnd(); onLongPress(output); }) : undefined}
+      style={onLongPress ? { WebkitTouchCallout: 'none' } : undefined}
       title={onLongPress ? (longPressTitle || t('outputs.long_press_to_edit')) : undefined}
     >
       <div className={`flex items-center gap-3 ${isGrid ? 'mb-3' : ''}`}>
@@ -187,7 +196,9 @@ const EntityCard: React.FC<OutputItemProps> = ({
             {output.id}
             {output.remote && <FaWifi className="inline ml-1 text-blue-400 shrink-0" title="Remote" />}
           </span>
-          <span className="text-xs text-gray-400 truncate">{t('outputs.area_short')}: {output.area || t('outputs.no_area')}</span>
+          {areaLabel !== null && (
+            <span className="text-xs text-gray-400 truncate">{t('outputs.area_short')}: {areaLabel || output.area || t('outputs.no_area')}</span>
+          )}
           {output.interlock_groups && output.interlock_groups.length > 0 && (
             <div className="flex items-center gap-1 mt-1">
               <FaLock className="text-xs text-gray-400" />

@@ -4,6 +4,8 @@ import type {
   OutputEntity,
   RemoteDeviceEntity,
 } from '@/types/config';
+import type { JsonSchema } from '@/types/jsonSchema';
+import type { OutputGroupRecord } from '../ActionFields/types';
 import { buildAiConfigContext, type AiEntityType } from './aiConfig';
 import type { EventEntity, BinarySensorEntity } from '@/types/config';
 
@@ -12,9 +14,9 @@ type SupportedEntity = EventEntity | BinarySensorEntity;
 interface WizardPromptParams<T extends SupportedEntity> {
   entityType: AiEntityType;
   data: T;
-  schema?: any;
+  schema?: JsonSchema;
   allOutputs?: OutputEntity[];
-  allOutputGroups?: any[];
+  allOutputGroups?: OutputGroupRecord[];
   allCovers?: CoverEntity[];
   allAreas?: AreaEntity[];
   allRemoteDevices?: RemoteDeviceEntity[];
@@ -51,7 +53,7 @@ export function buildAiWizardPrompt<T extends SupportedEntity>(params: WizardPro
     '   - Brightness level (0-255)',
     '   - Color temperature (if supported)',
     '6. When the user mentions a "cover" or "blind" or "roller shutter", ask about:',
-    '   - Cover action (TOGGLE, OPEN, CLOSE, STOP, SMART_TOGGLE, TILT)',
+    '   - Cover action (TOGGLE, OPEN, CLOSE, STOP, SMART_TOGGLE, SET_POSITION, TILT)',
     '   - Position (0-100) if applicable',
     '7. When the user mentions MQTT action, ask for the MQTT topic and message payload.',
     '8. Skip questions about features the user says they don\'t need.',

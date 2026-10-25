@@ -68,6 +68,12 @@ class InstallFile(MigrationAction):
     group: str = "root"
     template_vars: dict[str, str] = field(default_factory=dict)
     validate_cmd: str | None = None
+    #: Named validator for the protocol 2 helper: "sudoers", "sshd" or
+    #: "python". v2 refuses a command string, because a signature says who
+    #: wrote a plan, not what it may run as root. Migrations applied during the
+    #: transition carry both spellings — the legacy helper reads validate_cmd,
+    #: v2 reads this and ignores the string.
+    validate: str | None = None
     on_change: MigrationAction | None = None
     expected_sha256: str | None = None
 
@@ -84,6 +90,8 @@ class InstallFile(MigrationAction):
         }
         if self.validate_cmd:
             d["validate_cmd"] = self.validate_cmd
+        if self.validate:
+            d["validate"] = self.validate
         if self.on_change:
             d["on_change"] = self.on_change.to_dict()
         if self.expected_sha256:
@@ -275,6 +283,26 @@ class AptInstall(MigrationAction):
 
 
 @dataclass
+class AptPurge(MigrationAction):
+    """Purge Debian packages, and nothing but them (idempotent).
+
+    Packages that are not installed are skipped. The helper simulates the purge
+    first and refuses when apt would take anything off the device that is not
+    on this list — a dependency chain is not allowed to widen what a signed
+    plan said it removes. There is deliberately no autoremove.
+
+    Args:
+        packages: Package names to purge.
+    """
+
+    packages: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict."""
+        return {"action": "apt_purge", "packages": list(self.packages)}
+
+
+@dataclass
 class PipInstallWheel(MigrationAction):
     """Install a wheel bundled in the migration assets into a virtualenv.
 
@@ -282,11 +310,24 @@ class PipInstallWheel(MigrationAction):
     ownership. The wheel content is verified against ``expected_sha256``
     before installation.
 
+    A plan is frozen and signed at release time but executed on a controller, so
+    nothing here may name the build machine. ``python`` and ``run_as`` therefore
+    accept the placeholders ``@venv`` and ``@service_user``, which the helper
+    resolves from the root-owned systemd unit, and ``wheel_candidates`` lists
+    every bundled wheel so the device can pick the one matching its own
+    interpreter instead of the one that happened to match CI's.
+
     Args:
-        wheel: Path of the wheel relative to ``boneio/migrations/assets/``.
-        python: Absolute path of the target interpreter (the venv python).
-        run_as: Unprivileged user that owns the virtualenv.
+        wheel: Path of one wheel relative to ``boneio/migrations/assets/``.
+            Mutually exclusive with *wheel_candidates*.
+        wheel_candidates: Bundled wheels to choose between on the device, by
+            interpreter tag and platform. Their digests are injected into the
+            signed plan as *wheel_digests*.
+        python: Absolute path of the target interpreter, or ``@venv``.
+        run_as: Unprivileged user that owns the virtualenv, or
+            ``@service_user``.
         expected_sha256: SHA-256 of the wheel, injected from MANIFEST.sha256.
+        wheel_digests: SHA-256 per candidate, injected from MANIFEST.sha256.
         skip_if: Python expression evaluated with the target interpreter;
             when it evaluates truthy the installation is skipped.
         verify: Python expression evaluated with the target interpreter after
@@ -295,25 +336,43 @@ class PipInstallWheel(MigrationAction):
             migration continues.
     """
 
-    wheel: str
     python: str
     run_as: str
+    wheel: str | None = None
+    wheel_candidates: tuple[str, ...] = ()
     expected_sha256: str | None = None
+    wheel_digests: dict[str, str] | None = None
     skip_if: str | None = None
     verify: str | None = None
     optional: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the wheel selection.
+
+        Raises:
+            ValueError: If neither or both of the wheel fields are given.
+        """
+        if bool(self.wheel) == bool(self.wheel_candidates):
+            raise ValueError(
+                "PipInstallWheel needs exactly one of wheel or wheel_candidates"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         d: dict[str, Any] = {
             "action": "pip_install_wheel",
-            "wheel": self.wheel,
             "python": self.python,
             "run_as": self.run_as,
             "optional": self.optional,
         }
+        if self.wheel:
+            d["wheel"] = self.wheel
+        if self.wheel_candidates:
+            d["wheel_candidates"] = list(self.wheel_candidates)
         if self.expected_sha256:
             d["expected_sha256"] = self.expected_sha256
+        if self.wheel_digests:
+            d["wheel_digests"] = dict(self.wheel_digests)
         if self.skip_if:
             d["skip_if"] = self.skip_if
         if self.verify:
@@ -412,3 +471,86 @@ def render_template(content: str, template_vars: dict[str, str]) -> str:
     if not template_vars:
         return content
     return Template(content).safe_substitute(template_vars)
+
+
+@dataclass
+class SetFilePermissions(MigrationAction):
+    """Set owner, group and mode on a file that already exists.
+
+    For files the device owns and a migration must not overwrite — a password
+    database, for one. InstallFile would replace the contents; this only
+    corrects who may read them.
+
+    Args:
+        path: Absolute path whose permissions to correct.
+        mode: Final mode, e.g. ``0o640``.
+        owner: Owning user.
+        group: Owning group.
+    """
+
+    path: str
+    mode: int = 0o640
+    owner: str = "root"
+    group: str = "root"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict."""
+        return {
+            "action": "set_file_permissions",
+            "path": self.path,
+            "mode": self.mode,
+            "owner": self.owner,
+            "group": self.group,
+        }
+
+
+@dataclass
+class RemoveFromGroup(MigrationAction):
+    """Take an account out of a supplementary group.
+
+    The helper does not accept an arbitrary pair: it carries its own list of
+    the memberships it may take away, and refuses anything else. A plan is
+    signed on a build machine and runs on a device whose accounts it cannot
+    see, so "remove account A from group B" is a shape that has to be narrow at
+    the privileged end, not at this one.
+
+    Args:
+        account: The account to remove.
+        group: The supplementary group to remove it from.
+    """
+
+    account: str
+    group: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict."""
+        return {
+            "action": "remove_from_group",
+            "account": self.account,
+            "group": self.group,
+        }
+
+
+@dataclass
+class FstabAddOptions(MigrationAction):
+    """Add mount options to the ``/etc/fstab`` entries of one mount point.
+
+    fstab is per device — the MMC it boots from, whether it has swap — so it
+    cannot be installed whole. The helper edits only the options field of the
+    matching lines, and only with options it lists for that mount point.
+
+    Args:
+        mountpoint: The mount point whose entries to change.
+        options: Options to add where they are missing.
+    """
+
+    mountpoint: str
+    options: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict."""
+        return {
+            "action": "fstab_add_options",
+            "mountpoint": self.mountpoint,
+            "options": list(self.options),
+        }

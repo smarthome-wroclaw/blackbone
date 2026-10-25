@@ -10,13 +10,35 @@ import asyncio
 import logging
 import time
 
-from boneio.const import PRESSED, RELEASED, ClickTypes
+from boneio.const import BOUNCE_TIME_MAX_MS, PRESSED, RELEASED, ClickTypes
 from boneio.core.events import EventBus
-from boneio.core.utils import TimePeriod
+from boneio.core.utils.timeperiod import parse_time_to_ms
 from boneio.models import InputState
 from boneio.models.events import InputEvent
 
 _LOGGER = logging.getLogger(__name__)
+
+# Fallback debounce when a config carries no bounce_time at all. The per-type
+# schema defaults (120ms binary_sensor, 30ms event) normally win long before
+# this, via Cerberus at startup or the update_* methods on reload.
+DEFAULT_BOUNCE_TIME_MS = 50
+
+
+def warn_if_bounce_too_long(seconds: float, name: str | None, pin: str | None) -> None:
+    """Log a debounce past what the panel accepts.
+
+    The panel refuses such a value on save, but one already in a config (or
+    written by hand) still loads — refusing it would stop the controller.
+    """
+    if seconds * 1000 > BOUNCE_TIME_MAX_MS:
+        _LOGGER.warning(
+            "Input %s (%s): bounce_time %.0fms is over the %dms limit; "
+            "presses shorter than that are ignored",
+            name,
+            pin,
+            seconds * 1000,
+            BOUNCE_TIME_MAX_MS,
+        )
 
 
 class GpioBaseClass:
@@ -58,10 +80,16 @@ class GpioBaseClass:
     ) -> None:
         """Initialize GPIO input base class."""
         self._pin = pin
-        bounce_time: TimePeriod = kwargs.get("bounce_time", TimePeriod(milliseconds=50))
-        self._bounce_time = bounce_time.total_in_seconds
+        # A TimePeriod at startup, where Cerberus has coerced it — but the
+        # hot-reload path reads the YAML without validation, so an input added
+        # while the app runs arrives with a bare number of milliseconds (WebUI)
+        # or a string such as "30ms" (hand-written config).
+        self._bounce_time = (
+            parse_time_to_ms(kwargs.get("bounce_time"), DEFAULT_BOUNCE_TIME_MS) / 1000.0
+        )
         self._loop = asyncio.get_running_loop()
         self._name = name
+        warn_if_bounce_too_long(self._bounce_time, name, pin)
         self._actions = actions
         self._input_type = input_type
         # Normalize boneio_input to lowercase for consistent ID matching

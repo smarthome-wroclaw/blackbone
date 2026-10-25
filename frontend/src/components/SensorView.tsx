@@ -1,11 +1,13 @@
 import { useContext, useState, useMemo } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
-import { WebSocketContext } from '../App';
+import { WebSocketContext } from '@/contexts/WebSocketContext';
 import ViewToggle from './ViewToggle';
 import GraphCard from './GraphCard';
 import { EntityGrid, SENSOR_GRID_CLASS } from './EntityGrid';
 import { isSensorEvent, SensorState } from '../hooks/useWebSocket';
 import { useSensorHistory } from '../hooks/useSensorHistory';
+import { LongPressWrapper } from '@/components/ui/LongPressWrapper';
+import EntityInfoCard from './entityCard/EntityInfoCard';
 
 /** Sensor group definition with display metadata */
 interface SensorGroup {
@@ -104,6 +106,14 @@ export default function SensorView() {
       });
   }, [validSensors, t]);
 
+  // Long-press card: the sensor with room for its graph. No event list — a
+  // value that changes every few seconds says more as a line than as rows —
+  // and no menu, because a sensor has neither MQTT commands nor one settings
+  // section to send it to.
+  const [card, setCard] = useState<{ open: boolean; id: string | null }>({ open: false, id: null });
+  const cardSensor = card.id ? validSensors.find(s => s.id === card.id) : undefined;
+  const cardGroup = cardSensor ? sensorGroups.find(g => g.sensors.some(s => s.id === cardSensor.id)) : undefined;
+
   const handleViewToggle = (gridView: boolean) => {
     setIsGrid(gridView);
     localStorage.setItem('sensorViewMode', gridView ? 'grid' : 'list');
@@ -111,10 +121,12 @@ export default function SensorView() {
 
   return (
     <div className="container mx-auto p-4">
-      <div className="card bg-base-200 shadow-xl">
-        <div className="card-body">
+      {/* No panel around the list: the page is a tinted field and the
+          entities are the cards on it. */}
+      <div>
+        <div className="flex flex-col gap-2">
           <div className="flex justify-between items-center mb-4">
-            <h2 className="card-title">{t('sensors.view_title')}</h2>
+            <h2 className="text-xl font-bold tracking-tight">{t('sensors.view_title')}</h2>
             <ViewToggle isGrid={isGrid} onToggle={handleViewToggle} />
           </div>
 
@@ -126,17 +138,26 @@ export default function SensorView() {
             <>
               {sensorGroups.map(group => (
                 <section key={group.key}>
-                  <div className="divider">
-                    <span>{group.icon}</span>
-                    {group.label}
-                    <span className="text-xs font-normal text-base-content/50">
-                      ({group.sensors.length})
-                    </span>
-                  </div>
-                  <EntityGrid isGrid={isGrid} gridClassName={SENSOR_GRID_CLASS}>
+                  <EntityGrid
+                    isGrid={isGrid}
+                    gridClassName={SENSOR_GRID_CLASS}
+                    title={
+                      <>
+                        <span>{group.icon}</span>
+                        {group.label}
+                        <span className="text-xs font-normal text-base-content/50">
+                          ({group.sensors.length})
+                        </span>
+                      </>
+                    }
+                  >
                     {group.sensors.map(sensor => (
-                      <GraphCard
+                      <LongPressWrapper
                         key={sensor.id}
+                        className={isGrid ? 'h-full' : undefined}
+                        onLongPress={() => setCard({ open: true, id: sensor.id })}
+                      >
+                      <GraphCard
                         id={sensor.id}
                         name={sensor.name}
                         value={sensor.state}
@@ -149,6 +170,7 @@ export default function SensorView() {
                         fillColor={group.fillColor}
                         attributes={sensor.attributes}
                       />
+                      </LongPressWrapper>
                     ))}
                   </EntityGrid>
                 </section>
@@ -157,6 +179,31 @@ export default function SensorView() {
           )}
         </div>
       </div>
+
+      {cardSensor && (
+        <EntityInfoCard
+          open={card.open}
+          onOpenChange={(open) => !open && setCard(prev => ({ ...prev, open: false }))}
+          icon={<span>{cardGroup?.icon ?? '📊'}</span>}
+          title={cardSensor.name}
+          subtitle={cardSensor.id}
+          maxWidthClass="sm:max-w-xl"
+        >
+          <GraphCard
+            id={cardSensor.id}
+            name={t('entity_card.current_value')}
+            value={cardSensor.state}
+            unit={cardSensor.unit}
+            timestamp={cardSensor.timestamp}
+            historyPoints={historyMap.get(cardSensor.id) || []}
+            isGrid
+            accentColor={cardGroup?.accentColor}
+            strokeColor={cardGroup?.strokeColor}
+            fillColor={cardGroup?.fillColor}
+            attributes={cardSensor.attributes}
+          />
+        </EntityInfoCard>
+      )}
     </div>
   );
 }

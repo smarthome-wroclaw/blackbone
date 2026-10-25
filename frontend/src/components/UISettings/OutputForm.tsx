@@ -1,6 +1,8 @@
+import { NoticeCallout } from './ui';
 import React, { useState } from 'react';
 import SimpleTimePeriodInput from './widgets/SimpleTimePeriodInput';
 import AreaSelect from './widgets/AreaSelect';
+import PinAvailabilityHint from './widgets/PinAvailabilityHint';
 import SettingsToggleGroup from './widgets/SettingsToggleGroup';
 import { sanitizeId } from './helpers/idValidation';
 import { useTranslation } from '@/hooks/useTranslation';
@@ -14,6 +16,8 @@ import {
 } from '@/components/ui/select';
 
 import type { AreaOption } from './widgets/AreaSelect';
+import type { JsonSchema } from '@/types/jsonSchema';
+import type { OutputEntity } from '@/types/config';
 
 interface CoverEntity {
   id?: string;
@@ -23,16 +27,30 @@ interface CoverEntity {
   close_relay?: string;
 }
 
+/** One `output` list item as edited here (other keys pass through untouched). */
+interface OutputFormData extends OutputEntity {
+  [key: string]: unknown;
+  interlock_group?: string;
+  adjustable_duration?: boolean;
+  duration_default?: string;
+  duration_min?: string;
+  duration_max?: string;
+  duration_unit?: string;
+}
+
+/** Per-field UI hints; only `ui:description` is read here. */
+type OutputUiSchema = Record<string, { 'ui:description'?: string } | undefined>;
+
 interface OutputFormProps {
-  data: any;
-  onChange: (data: any) => void;
+  data: OutputFormData;
+  onChange: (data: OutputFormData) => void;
   onSave: () => void;
   onCancel: () => void;
   isNew: boolean;
-  schema?: any;
-  uiSchema?: any;
+  schema?: JsonSchema;
+  uiSchema?: OutputUiSchema;
   deviceType?: string;
-  allOutputs?: any[];
+  allOutputs?: OutputEntity[];
   editingIndex?: number | null;
   allAreas?: AreaOption[];
   interlockGroups?: string[];
@@ -140,11 +158,9 @@ const OutputForm: React.FC<OutputFormProps> = ({
     ? [...new Set([currentOutput, ...availableOutputs])].sort()
     : availableOutputs;
 
-  console.log("boneio output options", boneioOutputOptions);
-  
-  const outputTypeOptions = schema?.items?.properties?.output_type?.enum || [];
+  const outputTypeOptions = (schema?.items?.properties?.output_type?.enum as string[] | undefined) || [];
 
-  const updateField = (field: string, value: any) => {
+  const updateField = (field: string, value: unknown) => {
     const newData = { ...data, [field]: value };
     
     // When changing to cover type, clear incompatible fields
@@ -200,17 +216,16 @@ const OutputForm: React.FC<OutputFormProps> = ({
     <div className="space-y-4">
       {/* Warning alert when output is used in a cover */}
       {isUsedInCover && (
-        <div className="alert alert-warning">
-          <svg xmlns="http://www.w3.org/2000/svg" className="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-          <div>
-            <h3 className="font-bold">{t('outputs.used_in_cover_title')}</h3>
-            <div className="text-sm">
-              {t('outputs.used_in_cover_message')} <strong>{usedInCover?.name || usedInCover?.id || usedInCover?.pin || usedInCover?.open_relay || 'unknown'}</strong>
-            </div>
-          </div>
-        </div>
+        <NoticeCallout
+          variant="warning"
+          title={t('outputs.used_in_cover_title')}
+          message={
+            <>
+              {t('outputs.used_in_cover_message')}{' '}
+              <strong>{usedInCover?.name || usedInCover?.id || usedInCover?.pin || usedInCover?.open_relay || 'unknown'}</strong>
+            </>
+          }
+        />
       )}
 
       {/* Tabs - show only basic for cover type, both for others */}
@@ -228,7 +243,7 @@ const OutputForm: React.FC<OutputFormProps> = ({
                 onValueChange={(value) => updateField('boneio_output', value)}
                 disabled={isUsedInCover}
               >
-                <SelectTrigger className={`w-full uppercase ${usedOutputs.length > 0 && boneioOutputOptions.length === 0 ? 'border-warning' : ''} ${isUsedInCover ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                <SelectTrigger className={`w-full uppercase ${!data.boneio_output && boneioOutputOptions.length === 0 ? 'border-warning' : ''} ${isUsedInCover ? 'opacity-50 cursor-not-allowed' : ''}`}>
                   <SelectValue placeholder={t('outputs.select_output')} />
                 </SelectTrigger>
                 <SelectContent>
@@ -329,7 +344,7 @@ const OutputForm: React.FC<OutputFormProps> = ({
                         onValueChange={(value) => updateField('boneio_output', value)}
                         disabled={isUsedInCover}
                       >
-                        <SelectTrigger className={`w-full uppercase ${usedOutputs.length > 0 && boneioOutputOptions.length === 0 ? 'border-warning' : ''} ${isUsedInCover ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                        <SelectTrigger className={`w-full uppercase ${!data.boneio_output && boneioOutputOptions.length === 0 ? 'border-warning' : ''} ${isUsedInCover ? 'opacity-50 cursor-not-allowed' : ''}`}>
                           <SelectValue placeholder={t('outputs.select_output')} />
                         </SelectTrigger>
                         <SelectContent>
@@ -343,31 +358,12 @@ const OutputForm: React.FC<OutputFormProps> = ({
                       <label className="label">
                         <span className="label-text-alt whitespace-normal wrap-break-word">{getFieldDescription('boneio_output')}</span>
                       </label>
-                      {usedOutputs.length > 0 && boneioOutputOptions.length === 1 && (
-                        <label className="label max-w-full">
-                          <span 
-                            className="label-text-alt text-warning" 
-                            style={{ 
-                              wordWrap: 'break-word', 
-                              wordBreak: 'break-all', 
-                              whiteSpace: 'normal',
-                              maxWidth: '100%'
-                            }}
-                          >
-                            {t('outputs.all_outputs_used')}
-                          </span>
-                        </label>
-                      )}
-                      {usedOutputs.length > 0 && (
-                        <label className="label max-w-full">
-                          <span className="label-text-alt text-info whitespace-normal break-all">
-                            {t('outputs.used_outputs')}: {usedOutputs.length > 5 
-                              ? `${usedOutputs.slice(0, 3).join(', ')}, ... (+${usedOutputs.length - 3} more)`
-                              : usedOutputs.join(', ')
-                            }
-                          </span>
-                        </label>
-                      )}
+                      <PinAvailabilityHint
+                        available={availableOutputs}
+                        total={allBoneioOutputs.length}
+                        current={data.boneio_output}
+                        allUsedMessage={t('outputs.all_outputs_used')}
+                      />
                     </div>
 
                     {/* Output Type */}
@@ -488,17 +484,17 @@ const OutputForm: React.FC<OutputFormProps> = ({
                     />
                   </div>
 
-                  <div className="alert alert-info">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current shrink-0 w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <div>
-                      <h3 className="font-bold">{t('outputs.momentary_actions_title')}</h3>
-                      <div className="text-sm">
-                        <p>{t('outputs.momentary_actions_desc1')}</p>
+                  <NoticeCallout
+                    variant="info"
+                    title={t('outputs.momentary_actions_title')}
+                    message={
+                      <>
+                      <p>{t('outputs.momentary_actions_desc1')}</p>
                         <p>{t('outputs.momentary_actions_desc2')}</p>
                         <p>{t('outputs.momentary_actions_desc3')}</p>
-                      </div>
-                    </div>
-                  </div>
+                      </>
+                    }
+                  />
 
                   {/* Adjustable Duration */}
                   <div className="divider">{t('outputs.divider_adjustable_duration')}</div>
@@ -578,16 +574,16 @@ const OutputForm: React.FC<OutputFormProps> = ({
                     </div>
                   )}
 
-                  <div className="alert alert-info">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current shrink-0 w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <div>
-                      <h3 className="font-bold">{t('outputs.adjustable_duration_info_title')}</h3>
-                      <div className="text-sm">
-                        <p>{t('outputs.adjustable_duration_info_desc1')}</p>
+                  <NoticeCallout
+                    variant="info"
+                    title={t('outputs.adjustable_duration_info_title')}
+                    message={
+                      <>
+                      <p>{t('outputs.adjustable_duration_info_desc1')}</p>
                         <p>{t('outputs.adjustable_duration_info_desc2')}</p>
-                      </div>
-                    </div>
-                  </div>
+                      </>
+                    }
+                  />
 
                   <div className="divider">{t('outputs.divider_interlock')}</div>
 
@@ -671,16 +667,16 @@ const OutputForm: React.FC<OutputFormProps> = ({
                     </div>
                   </div>
 
-                  <div className="alert alert-info">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current shrink-0 w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <div>
-                      <h3 className="font-bold">{t('outputs.software_interlock_title')}</h3>
-                      <div className="text-sm">
-                        <p>{t('outputs.software_interlock_desc1')}</p>
+                  <NoticeCallout
+                    variant="info"
+                    title={t('outputs.software_interlock_title')}
+                    message={
+                      <>
+                      <p>{t('outputs.software_interlock_desc1')}</p>
                         <p>{t('outputs.software_interlock_desc2')}</p>
-                      </div>
-                    </div>
-                  </div>
+                      </>
+                    }
+                  />
                 </div>
               ),
             },

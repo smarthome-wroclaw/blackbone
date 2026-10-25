@@ -1,3 +1,4 @@
+import { NoticeCallout } from './ui';
 /**
  * RemoteOutputForm — dedicated form for editing remote output entries.
  *
@@ -185,7 +186,7 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
     if (wledDevices.length === 0) return;
 
     let cancelled = false;
-    axios.get<Record<string, WledCacheData>>('/api/remote_devices/wled_info')
+    axios.get<Record<string, WledCacheData>>('/api/remote-devices/wled_info')
       .then(res => { if (!cancelled) setWledCache(res.data); })
       .catch(() => { /* WLED cache not available — segments stay empty */ });
     return () => { cancelled = true; };
@@ -234,6 +235,8 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
 
   /* ---------- selected output capabilities ---------- */
   const selectedOutput = allAvailableOutputs.find(o => o.id === data.output_id);
+  // A cover entity can only be a cover, and only a cover entity can be one.
+  const isCoverEntity = selectedOutput?._type === 'cover';
   const isLightEntity = selectedOutput?._type === 'light';
   const selectedLight = isLightEntity
     ? [...availableLights, ...wledSegments].find(l => l.id === data.output_id)
@@ -256,11 +259,15 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
     <div className="space-y-4">
       {/* Validation errors */}
       {attemptedSubmit && validationErrors.length > 0 && (
-        <div className="alert alert-error sticky top-0 z-10">
-          <ul className="list-disc list-inside">
-            {validationErrors.map((e, i) => <li key={i}>{e}</li>)}
-          </ul>
-        </div>
+        <NoticeCallout
+          variant="error"
+          className="sticky top-0 z-10 bg-base-100"
+          message={
+            <ul className="list-disc list-inside">
+              {validationErrors.map((e, i) => <li key={i}>{e}</li>)}
+            </ul>
+          }
+        />
       )}
 
       <TabsBox
@@ -367,7 +374,9 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
                           ? 'cover'
                           : found?._type === 'light'
                             ? 'light'
-                            : data.output_type || 'switch';
+                            : data.output_type && data.output_type !== 'cover'
+                              ? data.output_type
+                              : 'switch';
                         onChange({ ...data, output_id: outputId, output_type: autoType });
                       }}
                       disabled={!data.device_id}
@@ -401,6 +410,18 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
                             {availableLights.map((li) => (
                               <SelectItem key={`li_${li.id}`} value={li.id}>
                                 💡 {li.name ? `${li.name} (${li.id})` : li.id}
+                              </SelectItem>
+                            ))}
+                          </>
+                        )}
+                        {availableCovers.length > 0 && (
+                          <>
+                            <SelectItem value="_header_covers" disabled>
+                              🪟 {t('outputs.categories.covers')}
+                            </SelectItem>
+                            {availableCovers.map((cv) => (
+                              <SelectItem key={`cv_${cv.id}`} value={cv.id}>
+                                🪟 {cv.name ? `${cv.name} (${cv.id})` : cv.id}
                               </SelectItem>
                             ))}
                           </>
@@ -439,10 +460,10 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="switch" disabled={outputTypeLocked || isCoverType}>{t('outputs.categories.switches')}</SelectItem>
-                        <SelectItem value="light" disabled={isCoverType}>{t('outputs.categories.lights')}</SelectItem>
-                        <SelectItem value="valve" disabled={outputTypeLocked || isCoverType}>{t('outputs.categories.valves')}</SelectItem>
-                        <SelectItem value="cover">{t('covers.title')}</SelectItem>
+                        <SelectItem value="switch" disabled={outputTypeLocked || isCoverEntity}>{t('outputs.categories.switches')}</SelectItem>
+                        <SelectItem value="light" disabled={isCoverEntity}>{t('outputs.categories.lights')}</SelectItem>
+                        <SelectItem value="valve" disabled={outputTypeLocked || isCoverEntity}>{t('outputs.categories.valves')}</SelectItem>
+                        <SelectItem value="cover" disabled={!!selectedOutput && !isCoverEntity}>{t('covers.title')}</SelectItem>
                       </SelectContent>
                     </Select>
                     <label className="label">
@@ -533,17 +554,17 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
                   />
                 </div>
 
-                <div className="alert alert-info">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current shrink-0 w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                  <div>
-                    <h3 className="font-bold">{t('outputs.momentary_actions_title')}</h3>
-                    <div className="text-sm">
+                <NoticeCallout
+                  variant="info"
+                  title={t('outputs.momentary_actions_title')}
+                  message={
+                    <>
                       <p>{t('outputs.momentary_actions_desc1')}</p>
                       <p>{t('outputs.momentary_actions_desc2')}</p>
                       <p>{t('outputs.momentary_actions_desc3')}</p>
-                    </div>
-                  </div>
-                </div>
+                    </>
+                  }
+                />
 
                 {/* --- Adjustable Duration --- */}
                 <div className="divider">{t('outputs.divider_adjustable_duration')}</div>
@@ -624,16 +645,16 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
                     </div>
                   )}
 
-                <div className="alert alert-info">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current shrink-0 w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                  <div>
-                    <h3 className="font-bold">{t('outputs.adjustable_duration_info_title')}</h3>
-                    <div className="text-sm">
+                <NoticeCallout
+                  variant="info"
+                  title={t('outputs.adjustable_duration_info_title')}
+                  message={
+                    <>
                       <p>{t('outputs.adjustable_duration_info_desc1')}</p>
                       <p>{t('outputs.adjustable_duration_info_desc2')}</p>
-                    </div>
-                  </div>
-                </div>
+                    </>
+                  }
+                />
 
                 {/* --- Interlock --- */}
                 <div className="divider">{t('outputs.divider_interlock')}</div>
@@ -743,15 +764,15 @@ const RemoteOutputForm: React.FC<RemoteOutputFormProps> = ({
                   />
                 )}
 
-                <div className="alert alert-info">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" className="stroke-current shrink-0 w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                  <div>
-                    <h3 className="font-bold">{t('outputs.software_interlock_title')}</h3>
-                    <div className="text-sm">
+                <NoticeCallout
+                  variant="info"
+                  title={t('outputs.software_interlock_title')}
+                  message={
+                    <>
                       <p>{t('remote_outputs.interlock_shared_desc')}</p>
-                    </div>
-                  </div>
-                </div>
+                    </>
+                  }
+                />
                     </>
                   );
                 })()}

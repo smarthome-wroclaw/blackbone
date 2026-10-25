@@ -1,28 +1,32 @@
 import { useState, useEffect } from 'react';
 import Editor, { BeforeMount, OnMount, loader } from '@monaco-editor/react';
-import * as monaco from 'monaco-editor';
+import * as monaco from '../monaco-editor';
 import axios from '@/api/axios';
+import { fetchSchema } from '@/api/schemaCache';
 import { useTheme } from '../hooks/useTheme';
 import { FaChevronRight, FaChevronDown, FaRegFolder, FaRegFolderOpen, FaRegFile } from 'react-icons/fa';
 import { GoSidebarExpand } from 'react-icons/go';
 import ConfigCheckModal from './ConfigCheckModal';
 import { configureMonacoYaml, MonacoYaml } from 'monaco-yaml';
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
+import editorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 import yamlWorker from '../yaml.worker.ts?worker';
+import { installMonacoWorkerCompat } from '../monaco-worker-compat';
 
 // Configure Monaco workers and loader (lazy-loaded with this component)
-(self as any).MonacoEnvironment = {
+self.MonacoEnvironment = {
   getWorker(_: string, label: string) {
     if (label === 'yaml') {
       return new yamlWorker();
     }
-    if (label === 'json') {
-      return new jsonWorker();
-    }
     return new editorWorker();
   }
 };
+
+// monaco-yaml still asks for its worker through the pre-0.52 createWebWorker
+// options, which the bundled Monaco no longer understands. Without this the
+// YAML worker is never started and every language feature fails with
+// "Missing requestHandler or method: ...". See monaco-worker-compat.ts.
+installMonacoWorkerCompat(monaco);
 
 loader.config({ monaco });
 
@@ -85,11 +89,10 @@ export default function ConfigEditor() {
     }
   };
 
-  const handleBeforeMount: BeforeMount = async (monaco: any) => {
+  const handleBeforeMount: BeforeMount = async (monaco) => {
     if (!monacoYaml) {
       // Load all schemas
-      const schemaResponse = await axios.get('/schema/config.schema.json');
-      const mainSchema = schemaResponse.data;
+      const mainSchema = await fetchSchema();
       
       monacoYaml = await configureMonacoYaml(monaco, {
         enableSchemaRequest: true,
@@ -101,10 +104,10 @@ export default function ConfigEditor() {
             schema: mainSchema
           },
           // Section schemas for included files
-          ...Object.keys(mainSchema.properties).map(section => ({
+          ...Object.entries(mainSchema.properties ?? {}).map(([section, sectionSchema]) => ({
             uri: window.location.origin + `/schema/${section}.schema.json`,
             fileMatch: [`${section}.yaml`, `${section}.yml`],
-            schema: mainSchema.properties[section]
+            schema: sectionSchema
           }))
         ],
         validate: true,
@@ -112,7 +115,7 @@ export default function ConfigEditor() {
     }
   };
 
-  const handleEditorMount: OnMount = async (editor: any, monaco: any) => {
+  const handleEditorMount: OnMount = async (editor, monaco) => {
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       handleSave();

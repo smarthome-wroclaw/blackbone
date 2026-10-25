@@ -1,3 +1,5 @@
+import type { ConfigRecord } from './jsonSchema';
+
 /**
  * TypeScript types for boneIO configuration entities.
  * Generated based on config.schema.json
@@ -6,9 +8,6 @@
 // ============================================
 // Common types
 // ============================================
-
-/** GPIO mode options */
-export type GpioMode = 'gpio' | 'gpio_pu' | 'gpio_pd' | 'gpio_input';
 
 /** Device class for event entities */
 export type EventDeviceClass = 'button' | 'doorbell' | 'motion';
@@ -39,7 +38,7 @@ export type OutputAction = 'TOGGLE' | 'ON' | 'OFF';
 /** Cover action options */
 export type CoverAction =
   | 'TOGGLE' | 'OPEN' | 'CLOSE' | 'STOP'
-  | 'TOGGLE_OPEN' | 'TOGGLE_CLOSE' | 'SMART_TOGGLE'
+  | 'TOGGLE_OPEN' | 'TOGGLE_CLOSE' | 'SMART_TOGGLE' | 'SET_POSITION'
   | 'TILT' | 'TILT_OPEN' | 'TILT_CLOSE';
 
 /** BoneIO input pin identifiers (IN_01 to IN_49 on boards 0.5+, IN_01 to IN_52 on boards 0.2–0.4) */
@@ -112,9 +111,9 @@ export interface Action {
   /** Transition time in seconds */
   transition?: number;
   /** Light/WLED presets for cycle actions */
-  presets?: any;
+  presets?: (string | number)[];
   /** Light/WLED colors for cycle actions */
-  colors?: any;
+  colors?: number[][];
 }
 
 /** Action type keys for event entity */
@@ -146,12 +145,8 @@ export interface EventEntity {
   pin?: string;
   /** BoneIO predefined input reference */
   boneio_input?: BoneioInput;
-  /** @deprecated GPIO mode — now handled by kernel overlay, ignored at runtime */
-  gpio_mode?: GpioMode;
   /** Bounce time in milliseconds */
   bounce_time?: number | string;
-  /** Clear MQTT message after action (like Zigbee2MQTT) */
-  clear_message?: boolean;
   /** Show entity in Home Assistant */
   show_in_ha?: boolean;
   /** Invert sensor state */
@@ -217,8 +212,6 @@ export interface BinarySensorEntity {
   pin?: string;
   /** BoneIO predefined input reference */
   boneio_input?: BoneioInput;
-  /** @deprecated GPIO mode — now handled by kernel overlay, ignored at runtime */
-  gpio_mode?: GpioMode;
   /** Bounce time in milliseconds */
   bounce_time?: number | string;
   /** Show entity in Home Assistant */
@@ -227,8 +220,6 @@ export interface BinarySensorEntity {
   inverted?: boolean;
   /** Send initial state on startup */
   initial_send?: boolean;
-  /** Clear MQTT message after action (like Zigbee2MQTT) */
-  clear_message?: boolean;
   /** Sensor kind (sensor or button) */
   kind?: BinarySensorKind;
   /** Device class for Home Assistant */
@@ -286,6 +277,14 @@ export interface CoverEntity {
   restore_state?: boolean;
   /** Tilt time in milliseconds (for blinds) */
   tilt_time?: number | string;
+  /** Full tilt travel time (venetian) */
+  tilt_duration?: number | string;
+  /** Actuator activation time (venetian) */
+  actuator_activation_duration?: number | string;
+  /** Extra relay time on a move to fully open/closed, % of open/close time */
+  endstop_overrun?: number;
+  /** Pause before driving the cover the other way */
+  direction_change_wait_time?: number | string;
   /** Cover platform: 'time_based' (standard) or 'venetian' (with tilt support) */
   platform?: 'time_based' | 'venetian';
 }
@@ -327,6 +326,10 @@ export interface OutputEntity {
   device_id?: string;
   /** Remote output/entity ID on the remote device (remote outputs only) */
   output_id?: string;
+  /** Software interlock group name, or several names */
+  interlock_group?: string | string[];
+  /** What to do when the remote device drops: 'turn_off' or ignore (remote outputs only) */
+  on_disconnect?: string;
 }
 
 // ============================================
@@ -375,6 +378,8 @@ export interface ESPHomeLightEntity {
   min_mireds?: number;
   /** Maximum color temperature in mireds */
   max_mireds?: number;
+  /** Effect names reported by discovery (used by CYCLE_PRESET) */
+  effects?: string[];
 }
 
 /** ESPHome cover entity */
@@ -526,23 +531,23 @@ export interface RemoteDeviceEntity {
 
 /** Complete boneIO configuration */
 export interface BoneIOConfig {
-  mqtt?: Record<string, any>;
-  web?: Record<string, any>;
-  oled?: Record<string, any>;
-  modbus?: Record<string, any>;
-  dallas?: Record<string, any>;
-  lm75?: Record<string, any>;
-  pca9685?: Record<string, any>;
-  mcp23017?: Record<string, any>;
-  pcf8575?: Record<string, any>;
+  mqtt?: ConfigRecord;
+  web?: ConfigRecord;
+  oled?: ConfigRecord;
+  modbus?: ConfigRecord;
+  dallas?: ConfigRecord;
+  lm75?: ConfigRecord;
+  pca9685?: ConfigRecord;
+  mcp23017?: ConfigRecord;
+  pcf8575?: ConfigRecord;
   output?: OutputEntity[];
   input?: InputEntity[];
   binary_sensor?: BinarySensorEntity[];
   event?: EventEntity[];
   cover?: CoverEntity[];
   areas?: AreaEntity[];
-  sensor?: Record<string, any>[];
-  adc?: Record<string, any>[];
-  modbus_devices?: Record<string, any>[];
-  output_group?: Record<string, any>[];
+  sensor?: ConfigRecord[];
+  adc?: ConfigRecord[];
+  modbus_devices?: ConfigRecord[];
+  output_group?: ConfigRecord[];
 }

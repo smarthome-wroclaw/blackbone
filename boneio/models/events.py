@@ -18,6 +18,7 @@ from boneio.models.state import (
     InputState,
     ModbusDeviceState,
     OutputState,
+    ScheduleState,
     SensorState,
 )
 
@@ -98,6 +99,20 @@ class ModbusDeviceEvent(BaseModel):
     state: ModbusDeviceState
 
 
+class ModbusStatusEvent(BaseModel):
+    """Modbus device status - fired when a device starts or stops failing.
+
+    Attributes:
+        event_type: Type of event (always "modbus_status")
+        entity_id: The device's coordinator id
+        failing: A register group of the device fails to read
+    """
+
+    event_type: Literal["modbus_status"] = "modbus_status"
+    entity_id: str
+    failing: bool
+
+
 class HostEvent(BaseModel):
     """Host event - triggered when host system information changes.
     
@@ -124,6 +139,25 @@ class GroupEvent(BaseModel):
     event_type: Literal["group"] = "group"
     entity_id: str
     state: GroupState
+
+
+class ScheduleEvent(BaseModel):
+    """Schedule event — fired when a schedule runs, is re-planned, or is
+    switched on or off.
+
+    The panel is the only place a schedule's runtime is visible, and a page
+    that shows a snapshot from whenever it was opened is worse than no page:
+    it looks current and is not.
+
+    Attributes:
+        event_type: Type of event (always "schedule")
+        entity_id: The schedule's id
+        state: The schedule's full status
+    """
+
+    event_type: Literal["schedule"] = "schedule"
+    entity_id: str
+    state: ScheduleState
 
 
 class ConfigReloadEvent(BaseModel):
@@ -170,7 +204,7 @@ class MqttStateEvent(BaseModel):
 # Discriminated union for all events
 # The discriminator field "event_type" allows Pydantic to automatically
 # determine which event type to use when parsing
-Event = InputEvent | OutputEvent | CoverEvent | SensorEvent | ModbusDeviceEvent | HostEvent | GroupEvent | ConfigReloadEvent | InputsReloadedEvent | MqttStateEvent
+Event = InputEvent | OutputEvent | CoverEvent | SensorEvent | ModbusDeviceEvent | ModbusStatusEvent | HostEvent | GroupEvent | ScheduleEvent | ConfigReloadEvent | InputsReloadedEvent | MqttStateEvent
 
 __all__ = [
     "InputEvent",
@@ -178,6 +212,7 @@ __all__ = [
     "CoverEvent",
     "SensorEvent",
     "ModbusDeviceEvent",
+    "ModbusStatusEvent",
     "HostEvent",
     "GroupEvent",
     "ConfigReloadEvent",

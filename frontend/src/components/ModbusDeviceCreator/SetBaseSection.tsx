@@ -47,7 +47,7 @@ export default function SetBaseSection({
   };
 
   return (
-    <div className="card bg-base-200">
+    <div className="stg-inset">
       <div className="card-body">
         <h3 className="card-title text-lg">{t('modbus_creator.set_base_config')}</h3>
         
@@ -114,7 +114,7 @@ export default function SetBaseSection({
                         </button>
                       </div>
                     ))}
-                    <button className="btn btn-ghost btn-xs" onClick={addBaudrateMapping}>
+                    <button className="btn btn-outline btn-xs" onClick={addBaudrateMapping}>
                       <FaPlus size={10} /> Add
                     </button>
                   </div>

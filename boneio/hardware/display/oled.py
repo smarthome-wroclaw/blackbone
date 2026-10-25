@@ -4,6 +4,9 @@ import asyncio
 import contextlib
 import logging
 import subprocess
+import threading
+from collections.abc import Callable
+from datetime import timedelta
 from itertools import cycle
 from typing import TYPE_CHECKING
 
@@ -27,6 +30,100 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class _DeferredDisplay:
+    """A luma device whose frame transfer happens on its own thread.
+
+    Drawing a screen is cheap — a 128x64 PIL image — but handing it to the
+    panel is an I2C transfer of about a kilobyte that first waits for the bus
+    lock shared with the relay expanders and every I2C sensor. That transfer
+    used to run on the event loop, and the screens that redraw on output and
+    input events run it straight from the event bus worker: every relay that
+    switched put a kilobyte of I2C in front of the GPIO reader.
+
+    Everything except ``display()`` is forwarded to the real device, so the
+    drawing code is unchanged and still builds its image on the caller's
+    thread. ``display()`` only hands the finished image over and returns.
+
+    Frames are coalesced rather than queued. A screen is a snapshot of current
+    state, so when several arrive while the panel is busy only the newest is
+    worth sending — a burst of output events leaves one redraw behind it, not
+    a backlog to work through.
+    """
+
+    def __init__(self, device) -> None:
+        """Wrap `device` and start its transfer thread.
+
+        Args:
+            device: The luma device to forward to.
+        """
+        self._device = device
+        self._pending = None
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._thread = threading.Thread(
+            target=self._run, name="oled-display", daemon=True
+        )
+        self._thread.start()
+
+    def __getattr__(self, name):
+        """Forward anything this wrapper does not define to the real device."""
+        return getattr(self._device, name)
+
+    def display(self, image) -> None:
+        """Queue `image` for transfer, replacing any frame not yet sent."""
+        with self._lock:
+            self._pending = image
+            # Cleared under the lock, and set again only while the lock is held
+            # and nothing is pending — otherwise a frame handed over just as the
+            # thread finished the previous one could be marked idle while still
+            # unsent, and flush() would return before the panel had it.
+            self._idle.clear()
+        self._wake.set()
+
+    def _run(self) -> None:
+        """Transfer frames until stopped."""
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            if self._stopping.is_set():
+                return
+            while True:
+                with self._lock:
+                    image, self._pending = self._pending, None
+                    if image is None:
+                        self._idle.set()
+                        break
+                try:
+                    self._device.display(image)
+                except Exception as err:  # noqa: BLE001 - the panel is cosmetic
+                    _LOGGER.error("Failed to send a frame to the OLED: %s", err)
+
+    def flush(self, timeout: float = 2.0) -> bool:
+        """Wait for the queued frame to reach the panel.
+
+        Used where the picture has to be on screen before the next step —
+        the goodbye screen before the machine powers off.
+
+        Args:
+            timeout: Seconds to wait.
+
+        Returns:
+            True if nothing is left to send.
+        """
+        return self._idle.wait(timeout)
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Send whatever is queued, then end the thread."""
+        self.flush(timeout)
+        self._stopping.set()
+        self._wake.set()
+        self._thread.join(timeout)
+
+
 # Try to use TTF fonts, fallback to default PIL fonts if not available
 try:
     fonts = {
@@ -49,6 +146,15 @@ except OSError:
 
 # Screen layout constants
 START_ROW = 17
+
+#: Pseudo-screen for a notice that needs somebody at the device, such as the
+#: first administrator not created yet. Never part of ``oled.screens``.
+NOTICE = "notice"
+#: How often the condition behind a notice is checked again.
+NOTICE_RECHECK_S = 5.0
+#: Idle time after which a display showing a normal screen goes back to the
+#: notice, in place of going to sleep.
+NOTICE_RETURN_S = 60.0
 UPTIME_ROWS = list(range(22, 60, 10))
 OUTPUT_ROWS = list(range(14, 60, 6))
 INPUT_ROWS = list(range(12, 60, 6))
@@ -61,6 +167,35 @@ def shorten_name(name: str) -> str:
     if len(name) > 6:
         return f"{name[:4]}{name[-2:]}"
     return name
+
+
+def _split_to_width(draw: ImageDrawType, line: str, font, width: int) -> list[str]:
+    """Break a line too wide for the panel, after a ``.``, ``:`` or ``/``.
+
+    For addresses: a cloud name with its port is wider than 128 px at 7 pt,
+    and cut at the edge it loses the port, which is the part nobody can guess.
+
+    Args:
+        draw: Canvas the line is drawn on, for measuring.
+        line: The text.
+        font: Font it is drawn in.
+        width: Pixels available.
+
+    Returns:
+        The line, or its pieces.
+    """
+    out: list[str] = []
+    while line and draw.textlength(line, font=font) > width:
+        cut = max(
+            (i + 1 for i, ch in enumerate(line) if ch in ".:/" and draw.textlength(line[: i + 1], font=font) <= width),
+            default=0,
+        )
+        if cut == 0:
+            break
+        out.append(line[:cut])
+        line = line[cut:]
+    out.append(line)
+    return out
 
 
 class Oled:
@@ -106,6 +241,12 @@ class Oled:
         self._cancel_sleep_handle = None
         self._sleep_timeout = sleep_timeout
 
+        # A notice shown ahead of the configured screens; see show_notice().
+        self._notice: tuple[str, list[str]] | None = None
+        self._notice_needed: Callable[[], bool] | None = None
+        self._notice_lines_fn: Callable[[], list[str]] | None = None
+        self._notice_check_handle: asyncio.TimerHandle | None = None
+
         # Shutdown confirmation state machine
         # States: None -> "wait_release" -> "confirm" -> "progress" -> shutdown
         # - Long press held 2s+ → show confirm screen, enter "wait_release"
@@ -128,12 +269,12 @@ class Oled:
 
         # Initialize I2C display (reuse early device if provided)
         if device is not None:
-            self._device = device
+            self._device = _DeferredDisplay(device)
             _LOGGER.debug("OLED display reusing early-initialized device")
         else:
             try:
                 serial = i2c(port=2, address=0x3C)
-                self._device = sh1106(serial)
+                self._device = _DeferredDisplay(sh1106(serial))
                 _LOGGER.debug("OLED display initialized successfully")
             except (DeviceNotFoundError, OSError) as err:
                 raise I2CError(f"OLED display not found: {err}") from err
@@ -478,6 +619,9 @@ class Oled:
             draw.text((20, 10), "Goodbye!", font=fonts["big"], fill=WHITE)
             draw.text((15, 35), "System shutting down...", font=fonts["extraSmall"], fill=WHITE)
 
+        # On the panel before the machine goes down, not merely queued.
+        self._device.flush()
+
         # Small delay so the user sees the message
         await asyncio.sleep(1)
 
@@ -500,8 +644,136 @@ class Oled:
             _LOGGER.error("Error shutting down device: %s", e)
             self.render_display()
 
+    # --- Notice ---
+
+    def show_notice(
+        self, title: str, lines: Callable[[], list[str]], still_needed: Callable[[], bool]
+    ) -> None:
+        """Put a notice first on the display and keep the display awake for it.
+
+        For a state nobody can fix without walking up to a browser — a device
+        with no administrator yet refuses its API, and a headless controller
+        has no other way of saying so. While the notice stands the display
+        does not sleep: the button still leafs through the configured screens,
+        and after a minute without a press the display comes back to the
+        notice. ``still_needed`` is asked every few seconds, so the notice
+        goes by itself however the state was fixed — the wizard, the accounts
+        CLI, a restored backup.
+
+        Args:
+            title: Short title, in the big font.
+            lines: Returns the lines below it; asked again at every check, so
+                an address that was not known at boot (DHCP still running)
+                appears once it is.
+            still_needed: Returns False once the notice can go.
+        """
+        self._notice = (title, self._notice_lines(lines))
+        self._notice_lines_fn = lines
+        self._notice_needed = still_needed
+        self._sleep = False
+        self._show(NOTICE)
+        self._schedule_notice_check()
+
+    def clear_notice(self) -> None:
+        """Take the notice down and go back to the configured screens."""
+        if self._notice_check_handle is not None:
+            self._notice_check_handle.cancel()
+            self._notice_check_handle = None
+        if self._notice is None:
+            return
+        self._notice = None
+        self._notice_needed = None
+        self._notice_lines_fn = None
+        if self._current_screen == NOTICE:
+            self._show(self.first_screen())
+
+    @property
+    def notice(self) -> tuple[str, list[str]] | None:
+        """The notice being shown, as (title, lines), or None."""
+        return self._notice
+
+    def first_screen(self) -> str:
+        """The screen the display starts on: the notice, if there is one."""
+        if self._notice is not None:
+            return NOTICE
+        return self._screen_order[0] if self._screen_order else UPTIME
+
+    def _show(self, screen: str) -> None:
+        with contextlib.suppress(KeyError):
+            self._event_bus.remove_event_listener(listener_id=f"oled_{self._current_screen}")
+        self._current_screen = screen
+        self.render_display()
+
+    def _schedule_notice_check(self) -> None:
+        if self._notice_check_handle is not None:
+            self._notice_check_handle.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._notice_check_handle = None
+            return
+        self._notice_check_handle = loop.call_later(NOTICE_RECHECK_S, self._check_notice)
+
+    def _check_notice(self) -> None:
+        self._notice_check_handle = None
+        if self._notice is None or self._notice_needed is None:
+            return
+        try:
+            needed = self._notice_needed()
+        except Exception as err:  # noqa: BLE001 - keep the notice, say why
+            _LOGGER.debug("Could not check the OLED notice: %s", err)
+            needed = True
+        if needed:
+            if self._notice_lines_fn is not None:
+                lines = self._notice_lines(self._notice_lines_fn)
+                if lines != self._notice[1]:
+                    self._notice = (self._notice[0], lines)
+                    if self._current_screen == NOTICE and not self._sleep:
+                        self._draw_notice()
+            self._schedule_notice_check()
+        else:
+            _LOGGER.info("OLED notice no longer needed, back to the configured screens")
+            self.clear_notice()
+
+    @staticmethod
+    def _notice_lines(lines: Callable[[], list[str]]) -> list[str]:
+        try:
+            return list(lines())
+        except Exception as err:  # noqa: BLE001 - a notice without lines still says enough
+            _LOGGER.debug("Could not build the OLED notice lines: %s", err)
+            return []
+
+    def _draw_notice(self) -> None:
+        """Title where every screen has it, then up to four lines.
+
+        No warning sign as on the recovery notice: its row is needed, since a
+        cloud address with its port takes two lines.
+        """
+        if self._notice is None:
+            return
+        title, lines = self._notice
+        with canvas(self._device) as draw:
+            draw.text((1, 1), title, font=fonts["big"], fill=WHITE)
+            y = START_ROW
+            wrapped: list[str] = []
+            for line in lines:
+                wrapped.extend(_split_to_width(draw, line, fonts["extraSmall"], 124))
+            for line in wrapped[:4]:
+                draw.text((3, y), line, font=fonts["extraSmall"], fill=WHITE)
+                y += 11
+
     def render_display(self) -> None:
         """Render display - main method that decides what to display."""
+
+        if self._current_screen == NOTICE:
+            if self._notice is not None:
+                self._draw_notice()
+                # Awake for as long as it is shown.
+                if self._cancel_sleep_handle:
+                    self._cancel_sleep_handle()
+                    self._cancel_sleep_handle = None
+                return
+            self._current_screen = self.first_screen()
 
         data = self._host_data.get(self._current_screen)
         if data:
@@ -545,13 +817,16 @@ class Oled:
                         )
         else:
             self._next_screen()
+            return
 
-        if self._sleep_timeout.total_seconds > 0:
+        if self._notice is not None:
+            self.start_sleep_timer(NOTICE_RETURN_S)
+        elif self._sleep_timeout.total_seconds > 0:
             self.start_sleep_timer()
 
     def _update_display(self) -> None:
         """Update OLED display without re-registering listeners."""
-        if self._sleep:
+        if self._sleep or self._current_screen == NOTICE:
             return
 
         try:
@@ -637,19 +912,31 @@ class Oled:
                 )
                 row_no += 15
 
-    def start_sleep_timer(self) -> None:
-        """Start sleep timer."""
+    def start_sleep_timer(self, seconds: float | None = None) -> None:
+        """Start sleep timer.
+
+        Args:
+            seconds: Idle time instead of the configured screensaver timeout.
+        """
         if self._cancel_sleep_handle:
             self._cancel_sleep_handle()
 
+        delay = (
+            timedelta(seconds=seconds) if seconds is not None else self._sleep_timeout.as_timedelta
+        )
         self._cancel_sleep_handle = async_track_point_in_time(
             loop=asyncio.get_running_loop(),
             job=self._sleep_callback,
-            point_in_time=utcnow() + self._sleep_timeout.as_timedelta,
+            point_in_time=utcnow() + delay,
         )
 
     async def _sleep_callback(self, timestamp) -> None:
         """Sleep callback."""
+        if self._notice is not None:
+            # Not while a notice stands: back to it instead.
+            self._cancel_sleep_handle = None
+            self._show(NOTICE)
+            return
         self._sleep = True
         self._cancel_sleep_handle = None
         with canvas(self._device) as draw:
@@ -672,6 +959,9 @@ class Oled:
         """Shutdown OLED display."""
         if self._cancel_sleep_handle:
             self._cancel_sleep_handle()
+        if self._notice_check_handle is not None:
+            self._notice_check_handle.cancel()
+            self._notice_check_handle = None
         # Clear display
         try:
             with canvas(self._device) as draw:

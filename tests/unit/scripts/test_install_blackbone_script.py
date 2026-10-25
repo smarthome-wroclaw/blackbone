@@ -33,18 +33,36 @@ def test_installer_targets_blackbone_and_verifies_service():
     content = INSTALLER.read_text(encoding="utf-8")
 
     assert 'readonly PACKAGE_NAME="blackbone"' in content
-    assert 'install --upgrade --force-reinstall "$PACKAGE_NAME"' in content
+    assert 'install --upgrade --force-reinstall "$PACKAGE_SPEC"' in content
     assert 'systemctl is-active --quiet "$SERVICE_NAME"' in content
 
 
 def test_installer_removes_legacy_distribution_before_installing_blackbone():
     content = INSTALLER.read_text(encoding="utf-8")
     uninstall = '"$PIP_BIN" uninstall --yes "$LEGACY_PACKAGE_NAME"'
-    install = '"$PIP_BIN" install --upgrade --force-reinstall "$PACKAGE_NAME"'
+    install = '"$PIP_BIN" install --upgrade --force-reinstall "$PACKAGE_SPEC"'
 
     assert 'readonly LEGACY_PACKAGE_NAME="boneio"' in content
     assert '"$PIP_BIN" show "$LEGACY_PACKAGE_NAME"' in content
     assert content.index(uninstall) < content.index(install)
+
+
+def test_installer_accepts_a_local_wheel_for_pre_release_testing():
+    content = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'readonly PACKAGE_SPEC="${BLACKBONE_PACKAGE_PATH:-${PACKAGE_NAME}}"' in content
+    assert 'fail "BLACKBONE_PACKAGE_PATH is set, but the package file is not readable:' in content
+
+
+def test_installer_repins_migration_trust_before_restarting_service():
+    content = INSTALLER.read_text(encoding="utf-8")
+
+    assert "backup_migration_trust" in content
+    assert "install_fork_migration_trust \"$migration_assets\"" in content
+    assert "--selftest" in content
+    assert content.index("install_fork_migration_trust \"$migration_assets\"") < content.index(
+        'systemctl restart "$SERVICE_NAME"'
+    )
 
 
 def test_installer_verification_code_is_valid_python():

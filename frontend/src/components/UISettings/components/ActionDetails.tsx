@@ -6,13 +6,20 @@ import React from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { normalizeCovers } from '../helpers/coverUtils';
 import { normalizeOutputs } from '../helpers/outputUtils';
+import type { AreaEntity, CoverEntity, OutputEntity, RemoteDeviceEntity } from '@/types/config';
+import type { ActionCondition, ActionDef } from '../ActionFields/types';
+
+/** A binary_sensor / event item: only its action lists are read here. */
+interface ActionDetailsItem {
+  actions?: Record<string, ActionDef[] | undefined>;
+}
 
 interface ActionDetailsProps {
-  item: any;
-  allAreas: any[];
-  allOutputs: any[];
-  allCovers: any[];
-  allRemoteDevices: any[];
+  item: ActionDetailsItem;
+  allAreas: AreaEntity[];
+  allOutputs: OutputEntity[];
+  allCovers: CoverEntity[];
+  allRemoteDevices: RemoteDeviceEntity[];
 }
 
 /**
@@ -43,10 +50,11 @@ const ACTION_TYPES = ['pressed', 'released', 'single', 'double', 'triple', 'long
 /**
  * Check if item has any configured actions.
  */
-export function hasActions(item: any): boolean {
+export function hasActions(item: { actions?: unknown }): boolean {
   if (!item.actions || typeof item.actions !== 'object') return false;
+  const itemActions = item.actions as Record<string, unknown>;
   return ACTION_TYPES.some(type => {
-    const actions = item.actions?.[type];
+    const actions = itemActions[type];
     return Array.isArray(actions) && actions.length > 0;
   });
 }
@@ -54,9 +62,9 @@ export function hasActions(item: any): boolean {
 /**
  * Render condition badges for an action.
  */
-function ConditionBadges({ action }: { action: any }) {
+function ConditionBadges({ action }: { action: ActionDef }) {
   const { t } = useTranslation();
-  const conditions: any[] = [];
+  const conditions: ActionCondition[] = [];
   let mode = 'and';
 
   if (action.conditions?.list?.length) {
@@ -70,7 +78,7 @@ function ConditionBadges({ action }: { action: any }) {
 
   const separator = mode === 'or' ? ` ${t('event_form.condition_mode_or').split(' ')[0]} ` : ' + ';
 
-  const formatLabel = (cond: any): string => {
+  const formatLabel = (cond: ActionCondition): string => {
     if (!cond?.type) return '';
     if (cond.type === 'time') {
       const parts: string[] = [];
@@ -84,6 +92,29 @@ function ConditionBadges({ action }: { action: any }) {
       if (cond.before) parts.push(cond.before);
       return `📅 ${parts.join('–') || '?'}`;
     }
+    if (cond.type === 'sun') {
+      if (cond.phase) return `☀ ${t(`sun.phase_${cond.phase}`)}`;
+      if (cond.above !== undefined || cond.below !== undefined) {
+        const above = cond.above !== undefined ? `>${cond.above}°` : '';
+        const below = cond.below !== undefined ? `<${cond.below}°` : '';
+        return `☀ ${[above, below].filter(Boolean).join(' ')}`;
+      }
+      // Offsets arrive as seconds from the backend; minutes is what anyone
+      // reading a badge wants, and the sign carries the direction.
+      const offset = (value: string | number | undefined) => {
+        if (value === undefined || value === null || value === '') return '';
+        const minutes = typeof value === 'number'
+          ? Math.round(value / 60)
+          : parseInt(String(value), 10);
+        if (!minutes || isNaN(minutes)) return '';
+        // A leading space and a real minus sign: "Sunset-15m" reads as one word.
+        return minutes > 0 ? ` +${minutes}m` : ` \u2212${Math.abs(minutes)}m`;
+      };
+      const parts: string[] = [];
+      if (cond.after) parts.push(`${t(`sun.anchor_${cond.after}`)}${offset(cond.after_offset)}`);
+      if (cond.before) parts.push(`${t(`sun.anchor_${cond.before}`)}${offset(cond.before_offset)}`);
+      return `☀ ${parts.join('–') || '?'}`;
+    }
     if (cond.type === 'state') {
       const entity = cond.entity_id || cond.entity || '?';
       const state = cond.state?.replace('is_', '') || '?';
@@ -93,7 +124,7 @@ function ConditionBadges({ action }: { action: any }) {
   };
 
   return (
-    <div className="flex items-center gap-1 mt-0.5">
+    <div className="flex items-center gap-1">
       <span className="badge badge-warning badge-xs gap-0.5 opacity-80" title={t('event_form.conditions')}>
         {conditions.map((c, i) => (
           <span key={i}>
@@ -110,58 +141,65 @@ function ConditionBadges({ action }: { action: any }) {
  * Resolve action target display text (output name, cover name, remote device).
  */
 function resolveActionTarget(
-  action: any,
-  allOutputs: any[],
-  allCovers: any[],
-  allAreas: any[],
-  allRemoteDevices: any[],
-): { details: string[]; areaName: string } {
-  const details: string[] = [];
+  action: ActionDef,
+  allOutputs: OutputEntity[],
+  allCovers: CoverEntity[],
+  allAreas: AreaEntity[],
+  allRemoteDevices: RemoteDeviceEntity[],
+): { target: string; verb: string; areaName: string } {
+  let target = '';
   let areaName = '';
 
   if (action.boneio_output) {
     const normalized = normalizeOutputs(allOutputs);
-    const output = normalized.find((o: any) => o.id === action.boneio_output);
-    details.push(output?.name ? `${output.name} (${action.boneio_output})` : action.boneio_output);
+    const output = normalized.find((o) => o.id === action.boneio_output);
+    target = output?.name ? `${output.name} (${action.boneio_output})` : action.boneio_output;
     if (output?.area) {
       const area = allAreas.find(a => a.id === output.area);
       areaName = area?.name || output.area;
     }
   } else if (action.boneio_cover) {
     const normalized = normalizeCovers(allCovers);
-    const cover = normalized.find((c: any) => c.id === action.boneio_cover);
-    details.push(cover?.name ? `${cover.name} (${action.boneio_cover})` : action.boneio_cover);
+    const cover = normalized.find((c) => c.id === action.boneio_cover);
+    target = cover?.name ? `${cover.name} (${action.boneio_cover})` : action.boneio_cover;
     if (cover?.area) {
       const area = allAreas.find(a => a.id === cover.area);
       areaName = area?.name || cover.area;
     }
   } else if (action.topic) {
-    details.push(action.topic);
+    target = action.topic;
   } else if (action.remote_device) {
     const device = allRemoteDevices.find(rd => rd.id === action.remote_device);
     const deviceName = device?.name || action.remote_device;
     let targetName = '';
     if (action.output_id) {
-      const remoteOutput = device?.mqtt?.outputs?.find((o: any) => o.id === action.output_id);
+      const remoteOutput = device?.mqtt?.outputs?.find((o) => o.id === action.output_id);
       targetName = remoteOutput?.name || action.output_id;
     } else if (action.cover_id) {
-      const remoteCover = device?.mqtt?.covers?.find((c: any) => c.id === action.cover_id);
+      const remoteCover = device?.mqtt?.covers?.find((c) => c.id === action.cover_id);
       targetName = remoteCover?.name || action.cover_id;
     }
-    details.push(targetName ? `${deviceName} → ${targetName}` : deviceName);
+    target = targetName ? `${deviceName} → ${targetName}` : deviceName;
   }
 
-  if (action.action_output) details.push(action.action_output);
-  else if (action.action_cover) details.push(action.action_cover);
+  const verb = action.action_output || action.action_cover || '';
 
-  return { details, areaName };
+  return { target, verb, areaName };
 }
 
 /**
  * Renders the expanded action details panel for a binary_sensor/event item.
  */
 const ActionDetails: React.FC<ActionDetailsProps> = ({ item, allAreas, allOutputs, allCovers, allRemoteDevices }) => {
+  const { t } = useTranslation();
   const getLabel = useActionLabels();
+  // Same wording as the action type picker in the form.
+  const typeLabel = (type: string | undefined) => {
+    if (!type) return '';
+    const key = `actions.type_${type}`;
+    const translated = t(key);
+    return translated !== key ? translated : type;
+  };
 
   if (!item.actions) return null;
 
@@ -173,35 +211,27 @@ const ActionDetails: React.FC<ActionDetailsProps> = ({ item, allAreas, allOutput
   if (available.length === 0) return null;
 
   return (
-    <div className="mt-2 space-y-2">
+    <div className="divide-y divide-base-300/60">
       {available.map(type => {
         const actions = item.actions?.[type];
         return (
-          <div key={type} className="space-y-1.5">
-            <div className="font-semibold text-xs text-base-content/70">{getLabel(type)}</div>
-            <div className="space-y-1.5">
-              {actions?.map((action: any, idx: number) => {
-                const { details, areaName } = resolveActionTarget(action, allOutputs, allCovers, allAreas, allRemoteDevices);
+          <div key={type} className="grid grid-cols-1 sm:grid-cols-[10rem_1fr] gap-x-4 gap-y-1 py-2 text-xs">
+            <div className="font-semibold text-base-content/70 sm:pt-0.5">{getLabel(type)}</div>
+            <div className="space-y-1.5 min-w-0">
+              {actions?.map((action: ActionDef, idx: number) => {
+                const { target, verb, areaName } = resolveActionTarget(action, allOutputs, allCovers, allAreas, allRemoteDevices);
                 return (
-                  <div key={idx} className="bg-base-100 rounded-lg p-2.5 text-xs space-y-1">
-                    {/* Action type + target */}
-                    <div className="flex items-start gap-2 min-w-0">
-                      <span className="badge badge-primary badge-xs shrink-0 mt-0.5">
-                        {action.action}
-                      </span>
-                      {details.length > 0 && (
-                        <span className="text-base-content/80 break-all leading-tight">
-                          {details.join(' ')}
-                        </span>
-                      )}
-                    </div>
-                    {/* Area */}
-                    {areaName && (
-                      <div className="text-base-content/50 pl-0.5">
-                        📍 {areaName}
-                      </div>
+                  <div key={idx} className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+                    <span className="badge badge-primary badge-xs shrink-0">{typeLabel(action.action)}</span>
+                    {target && (
+                      <span className="text-base-content/80 break-all">{target}</span>
                     )}
-                    {/* Conditions */}
+                    {verb && (
+                      <span className="badge badge-ghost badge-xs font-mono uppercase shrink-0">{verb}</span>
+                    )}
+                    {areaName && (
+                      <span className="text-base-content/50 shrink-0">📍 {areaName}</span>
+                    )}
                     <ConditionBadges action={action} />
                   </div>
                 );

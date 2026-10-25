@@ -3,10 +3,12 @@ import { useTranslation } from '../../../hooks/useTranslation';
 import { useTableSort } from '@/hooks/useTableSort';
 import TableActions from './TableActions';
 import FilterInput from './FilterInput';
+import { areaMatches } from './areaFilter';
 import MobileCard from './MobileCard';
 import SortableHeader, { ResetSortButton } from './SortableHeader';
 import { Table, Td, Tr, Th, Thead, Tbody } from '@/components/ui/table';
 import { formatTimeperiod } from '@/utils/formatters';
+import type { CoverEntity } from '@/types/config';
 
 interface Area {
   id: string;
@@ -14,7 +16,7 @@ interface Area {
 }
 
 interface CoverTableProps {
-  items: any[];
+  items: CoverEntity[];
   allAreas: Area[];
   onEdit: (index: number) => void;
   onDelete: (index: number) => void;
@@ -35,19 +37,18 @@ const CoverTable: React.FC<CoverTableProps> = ({ items, allAreas, onEdit, onDele
         (item.id?.toLowerCase().includes(lowerFilter)) ||
         (item.open_relay?.toLowerCase().includes(lowerFilter)) ||
         (item.close_relay?.toLowerCase().includes(lowerFilter)) ||
-        (item.stop_relay?.toLowerCase().includes(lowerFilter))
+        areaMatches(item.area, allAreas, lowerFilter)
       );
-  }, [items, filter]);
+  }, [items, filter, allAreas]);
 
   // Sort filtered items
   const sortedItems = useMemo(() => {
     return sortItems(filteredItems, {
-      name: (item: any) => (item.name || item.id || '').toLowerCase(),
-      platform: (item: any) => (item.platform || (item.tilt_duration ? 'venetian' : 'time_based')).toLowerCase(),
-      open_relay: (item: any) => (item.open_relay || '').toLowerCase(),
-      close_relay: (item: any) => (item.close_relay || '').toLowerCase(),
-      stop_relay: (item: any) => (item.stop_relay || '').toLowerCase(),
-      area: (item: any) => {
+      name: (item) => (item.name || item.id || '').toLowerCase(),
+      platform: (item) => (item.platform || (item.tilt_duration ? 'venetian' : 'time_based')).toLowerCase(),
+      open_relay: (item) => (item.open_relay || '').toLowerCase(),
+      close_relay: (item) => (item.close_relay || '').toLowerCase(),
+      area: (item) => {
         const area = allAreas.find(a => a.id === item.area);
         return (area?.name || item.area || '').toLowerCase();
       },
@@ -90,7 +91,6 @@ const CoverTable: React.FC<CoverTableProps> = ({ items, allAreas, onEdit, onDele
                 { label: t('covers.platform'), value: <span className="badge badge-info badge-xs">{platform}</span> },
                 { label: t('covers.open_relay'), value: item.open_relay?.toUpperCase() || '-' },
                 { label: t('covers.close_relay'), value: item.close_relay?.toUpperCase() || '-' },
-                { label: t('covers.stop_relay'), value: item.stop_relay?.toUpperCase() || '-' },
                 { label: t('covers.times'), value: (
                   <span className="text-xs">
                     {item.open_time ? formatTimeperiod(item.open_time) : '-'} / {item.close_time ? formatTimeperiod(item.close_time) : '-'}
@@ -112,7 +112,6 @@ const CoverTable: React.FC<CoverTableProps> = ({ items, allAreas, onEdit, onDele
             <SortableHeader column="platform" sortConfig={sortConfig} onToggleSort={toggleSort}>{t('covers.platform')}</SortableHeader>
             <SortableHeader column="open_relay" sortConfig={sortConfig} onToggleSort={toggleSort}>{t('covers.open_relay')}</SortableHeader>
             <SortableHeader column="close_relay" sortConfig={sortConfig} onToggleSort={toggleSort}>{t('covers.close_relay')}</SortableHeader>
-            <SortableHeader column="stop_relay" sortConfig={sortConfig} onToggleSort={toggleSort}>{t('covers.stop_relay')}</SortableHeader>
             <Th>{t('covers.times')}</Th>
             <SortableHeader column="area" sortConfig={sortConfig} onToggleSort={toggleSort}>{t('outputs.area')}</SortableHeader>
             <Th>{t('outputs.actions')}</Th>
@@ -142,7 +141,6 @@ const CoverTable: React.FC<CoverTableProps> = ({ items, allAreas, onEdit, onDele
                 </Td>
                 <Td className="uppercase">{item.open_relay || '-'}</Td>
                 <Td className="uppercase">{item.close_relay || '-'}</Td>
-                <Td className="uppercase">{item.stop_relay || '-'}</Td>
                 <Td>
                   <div className="text-xs capitalize">
                     <div>{t('covers.open')}: {item.open_time ? formatTimeperiod(item.open_time) : '-'}</div>

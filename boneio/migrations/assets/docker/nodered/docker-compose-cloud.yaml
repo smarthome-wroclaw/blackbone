@@ -1,0 +1,49 @@
+services:
+  node-red:
+    image: nodered/node-red:4.1.2-22-minimal
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Warsaw
+    volumes:
+      - ./node-red/data:/data
+      - ./node-red/settings.js:/data/settings.js:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+  caddy:
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    restart: unless-stopped
+    hostname: ${HOSTNAME}
+    ports:
+      - "${HTTP_PORT:-8091}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    environment:
+      - HOST_HOSTNAME=${HOSTNAME}
+      # The panel's own port. Caddy proxies to it, and until this was passed in
+      # the Caddyfile carried a hardcoded 8090 — so changing web.port left a
+      # device whose expose is 'proxy' answering on no port at all.
+      #
+      # Changing this needs `up -d`, not `restart`: a container's environment
+      # is fixed when it is created.
+      - WEB_PORT=${WEB_PORT:-8090}
+      # The port the host publishes 443 on. Caddy only ever sees 443 from
+      # inside the container, so a redirect built from what it sees would send
+      # browsers to a port nothing listens on.
+      - PUBLIC_HTTPS_PORT=${HTTPS_PORT:-8443}
+    volumes:
+      - ./caddy/502.html:/srv/502.html:ro
+      - ./caddy/init-certs-cloud.sh:/init-certs-cloud.sh:ro
+      - ./caddy/ssl:/data/ssl:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+      - /etc/hostname:/etc/host_hostname:ro
+    entrypoint: /bin/sh
+    command: ["/init-certs-cloud.sh"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+
+networks:
+  edge:

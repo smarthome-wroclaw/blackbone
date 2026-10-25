@@ -463,3 +463,156 @@ class TestDelayFieldsPreserved:
         action = {"action": action_type, "restore_tilt": True, **extra}
         assert _clean_action_fields(action) == []
         assert action["restore_tilt"] is True
+
+
+# ---------------------------------------------------------------------------
+# sun conditions
+# ---------------------------------------------------------------------------
+
+def _entity_with_condition(condition: dict) -> list:
+    return [
+        {
+            "boneio_input": "in_01",
+            "actions": {
+                "single": [
+                    {
+                        "action": "output",
+                        "boneio_output": "out_01",
+                        "action_output": "TOGGLE",
+                        "condition": condition,
+                    }
+                ]
+            },
+        }
+    ]
+
+
+class TestSunConditionValidation:
+    """A sun condition fails open at runtime, so save time is where a
+    misconfiguration has to be caught — otherwise the operator gets an action
+    that appears to be gated and never is."""
+
+    WINDOW = {"type": "sun", "after": "sunset", "before": "sunrise"}
+
+    def test_a_sun_condition_without_a_location_is_refused(self):
+        errors = _validate_section_actions(
+            "event", _entity_with_condition(self.WINDOW), has_location=False
+        )
+        assert len(errors) == 1
+        assert "no location is configured" in errors[0]
+
+    def test_a_sun_condition_with_a_location_is_accepted(self):
+        assert (
+            _validate_section_actions(
+                "event", _entity_with_condition(self.WINDOW), has_location=True
+            )
+            == []
+        )
+
+    def test_an_unknown_location_state_does_not_block_the_save(self):
+        """None means the caller could not tell; guessing "missing" would
+        refuse saves on a device that is configured."""
+        assert (
+            _validate_section_actions("event", _entity_with_condition(self.WINDOW))
+            == []
+        )
+
+    def test_other_condition_types_are_unaffected_by_a_missing_location(self):
+        condition = {"type": "time", "after": "05:00", "before": "22:00"}
+        assert (
+            _validate_section_actions(
+                "event", _entity_with_condition(condition), has_location=False
+            )
+            == []
+        )
+
+    @pytest.mark.parametrize(
+        ("condition", "fragment"),
+        [
+            ({"type": "sun"}, "empty"),
+            ({"type": "sun", "after": "sunset", "phase": "day"}, "mixes"),
+            ({"type": "sun", "after": "05:00"}, "Unknown sun anchor"),
+            ({"type": "sun", "phase": "magic_hour"}, "Unknown sun phase"),
+            ({"type": "sun", "above": 30, "below": 10}, "inverted"),
+        ],
+    )
+    def test_a_malformed_sun_condition_is_refused(self, condition, fragment):
+        errors = _validate_section_actions(
+            "event", _entity_with_condition(condition), has_location=True
+        )
+        assert len(errors) == 1
+        assert fragment in errors[0]
+
+    def test_a_non_number_elevation_is_left_to_the_schema(self):
+        # Compared as it was, "x" >= 10 raised and the save answered 500.
+        condition = {"type": "sun", "above": "x", "below": 10}
+        assert _validate_section_actions(
+            "event", _entity_with_condition(condition), has_location=True
+        ) == []
+
+    def test_the_schema_reports_a_non_number_elevation_instead_of_raising(self):
+        from boneio.core.config.yaml_util import CustomValidator, _get_schema
+
+        schema = {"event": _get_schema()["event"]}
+        validator = CustomValidator(schema, purge_unknown=True)
+        doc = {"event": _entity_with_condition({"type": "sun", "above": "x", "below": 10})}
+        assert not validator.validate(validator.normalized(doc, always_return_document=True), schema)
+        assert "above" in str(validator.errors)
+
+    def test_a_sun_condition_inside_a_group_is_checked_too(self):
+        entity = _entity_with_condition({"type": "time", "after": "05:00"})
+        action = entity[0]["actions"]["single"][0]
+        del action["condition"]
+        action["conditions"] = {
+            "mode": "and",
+            "list": [
+                {"type": "time", "after": "05:00"},
+                {"type": "sun", "phase": "magic_hour"},
+            ],
+        }
+        errors = _validate_section_actions("event", entity, has_location=True)
+        assert len(errors) == 1
+        assert "Unknown sun phase" in errors[0]
+
+
+class TestVirtualSwitchSelfReference:
+    """A switch whose own actions set itself cannot work: the change that would
+    run the actions is the one they are trying to make. The runtime guard stops
+    the recursion by refusing to act, so the config would load, look right, and
+    do half of what it says."""
+
+    def _config(self, target: str) -> str:
+        """Two switches named, not id-ed: the ids are made from the names, so
+        'Away' is `away` and the self-reference is still detectable."""
+        return (
+            "boneio:\n  name: T\n"
+            "virtual_switch:\n"
+            "  - name: Away\n"
+            "    actions:\n"
+            "      on_turn_on:\n"
+            "        - action: virtual_switch\n"
+            f"          boneio_virtual_switch: {target}\n"
+            '          action_output: "OFF"\n'
+            "  - name: Other\n"
+        )
+
+    def _load(self, text: str):
+        import os
+        import tempfile
+
+        from boneio.core.config.yaml_util import load_config_from_file
+
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "config.yaml")
+        with open(path, "w") as handle:
+            handle.write(text)
+        return load_config_from_file(config_file=path)
+
+    def test_setting_itself_is_refused(self):
+        with pytest.raises(Exception) as excinfo:
+            self._load(self._config("away"))
+        assert "sets itself" in str(excinfo.value)
+
+    def test_setting_another_switch_is_fine(self):
+        config = self._load(self._config("other"))
+        assert len(config["virtual_switch"]) == 2
