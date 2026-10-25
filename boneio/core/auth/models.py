@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-<<<<<<< ours
 from dataclasses import dataclass
-=======
-from dataclasses import dataclass, field
->>>>>>> theirs
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -41,21 +37,6 @@ class User:
     role: Role = Role.ADMIN
     created_at: str = ""
     updated_at: str = ""
-<<<<<<< ours
-=======
-    # Bumped whenever the password changes. Login tokens carry the value they
-    # were issued under, and one that no longer matches is refused, which is
-    # how a password change signs every other session out.
-    session_version: int = 0
-    # Single browser sessions cut off after too many wrong passwords, as
-    # session id → the unix time its token expires, after which the entry is
-    # pointless and gets pruned.
-    revoked_sessions: dict[str, int] = field(default_factory=dict)
-    # Wrong passwords typed per session while it was signed in, as session id
-    # → {"count": n, "until": token expiry}. Kept here, not in memory, so a
-    # restart does not hand a guessing session a fresh allowance.
-    session_failures: dict[str, dict] = field(default_factory=dict)
->>>>>>> theirs
 
     def to_dict(self) -> dict:
         """Serialise for ``users.json``.
@@ -69,12 +50,6 @@ class User:
             "role": str(self.role),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-<<<<<<< ours
-=======
-            "session_version": self.session_version,
-            "revoked_sessions": dict(self.revoked_sessions),
-            "session_failures": {k: dict(v) for k, v in self.session_failures.items()},
->>>>>>> theirs
         }
 
     @classmethod
@@ -104,29 +79,12 @@ class User:
         except ValueError:
             role = Role.VIEWER
 
-<<<<<<< ours
         return cls(
-=======
-        # Absent in every users.json written before 1.6.0.dev23, and those
-        # accounts' tokens carry no version either: both read as 0.
-        try:
-            session_version = int(raw.get("session_version", 0))
-        except (TypeError, ValueError):
-            session_version = 0
-
-        return cls(
-            revoked_sessions=_int_map(raw.get("revoked_sessions")),
-            session_failures=_failure_map(raw.get("session_failures")),
->>>>>>> theirs
             username=username,
             password_hash=password_hash,
             role=role,
             created_at=str(raw.get("created_at", "")),
             updated_at=str(raw.get("updated_at", "")),
-<<<<<<< ours
-=======
-            session_version=session_version,
->>>>>>> theirs
         )
 
     def to_public_dict(self) -> dict:
@@ -141,46 +99,3 @@ class User:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
-<<<<<<< ours
-=======
-
-
-def _int_map(raw) -> dict[str, int]:
-    """Read a ``{str: int}`` map from users.json, dropping what does not fit.
-
-    Args:
-        raw: Whatever the file holds under the key.
-
-    Returns:
-        The well-formed entries.
-    """
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, int] = {}
-    for key, value in raw.items():
-        if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool):
-            out[key] = value
-    return out
-
-
-def _failure_map(raw) -> dict[str, dict]:
-    """Read the per-session failure counts, dropping what does not fit.
-
-    Args:
-        raw: Whatever the file holds under the key.
-
-    Returns:
-        ``{session_id: {"count": int, "until": int}}`` for the entries that
-        have both.
-    """
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, dict] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str) or not isinstance(value, dict):
-            continue
-        count, until = value.get("count"), value.get("until")
-        if all(isinstance(v, int) and not isinstance(v, bool) for v in (count, until)):
-            out[key] = {"count": count, "until": until}
-    return out
->>>>>>> theirs

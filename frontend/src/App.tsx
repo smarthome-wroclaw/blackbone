@@ -60,10 +60,6 @@ function prefetchRouteChunks() {
 
 import LoginView from './components/LoginView';
 import OnboardingWizard from './components/OnboardingWizard';
-<<<<<<< ours
-=======
-import SecurityUpdatePrompt from './components/SecurityUpdatePrompt';
->>>>>>> theirs
 import Layout from './components/Layout';
 import { useWebSocket, requestStateResync, StateUpdate, isCoverEvent, InputEvent, OutputEvent, SensorEvent, CoverEvent, ModbusDeviceEvent, GroupEvent, isOutputEvent, isGroupEvent, isConfigReloadEvent } from './hooks/useWebSocket';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -105,18 +101,10 @@ function ProtectedRoute({
   const { isAuthenticated, isLoading: authLoading, isAuthRequired, isAdmin, role } = useAuth();
   const { isApiAvailable, isLoading: initLoading, needsOnboarding, panelState } = useAppInit();
 
-<<<<<<< ours
 // Protected route component
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading: authLoading, isAuthRequired } = useAuth();
   const { isApiAvailable, isLoading: initLoading, needsOnboarding } = useAppInit();
-=======
-  // Read once per mount: the value cannot change while this render tree lives,
-  // and touching localStorage on every render would be pure waste.
-  const [showShellWhileLoading] = useState(() =>
-    readProvisioningHint(window.localStorage, window.__BONEIO_BASE_PATH__),
-  );
->>>>>>> theirs
 
   // API confirmed unavailable after retries, or a panel the service worker
   // kept from before an update: say so instead of rendering it.
@@ -557,7 +545,6 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-<<<<<<< ours
         <Route path="/addons" element={
           <ProtectedRoute>
             <Layout>
@@ -572,10 +559,6 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-=======
-        {/* The Tools page was four bus scans and an export; the scans are on Diagnostics and the export is a settings section. Kept as a redirect for bookmarks. */}
-        <Route path="/tools" element={<Navigate to="/diagnostics/i2c" replace />} />
->>>>>>> theirs
         <Route path="/help" element={
           <ProtectedRoute>
             <Layout>

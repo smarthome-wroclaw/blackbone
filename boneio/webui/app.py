@@ -20,11 +20,7 @@ from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketState
 
 from boneio.components.input import RemoteInputBase
-<<<<<<< ours
 from boneio.const import COVER, NONE
-=======
-from boneio.const import COVER, NONE, VIRTUAL_SWITCH
->>>>>>> theirs
 from boneio.core.auth.migration import migrate_legacy_auth
 from boneio.core.auth.store import UserStore, UserStoreError
 from boneio.core.config import ConfigHelper
@@ -51,12 +47,6 @@ from boneio.models.events import (
 )
 from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
-<<<<<<< ours
-=======
-from boneio.webui.middleware.csrf import CSRFMiddleware
-from boneio.webui.middleware.proxy import TrustedProxyMiddleware
-from boneio.webui import security_events
->>>>>>> theirs
 from boneio.webui.security_headers import apply_security_headers
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
@@ -69,10 +59,7 @@ from boneio.webui.middleware.auth import (
 
 # Import routes
 from boneio.webui.routes import (
-<<<<<<< ours
     addons_router,
-=======
->>>>>>> theirs
     accounts_router,
     auth_router,
     can_router,
@@ -83,7 +70,6 @@ from boneio.webui.routes import (
     irrigation_router,
     migrations_router,
     modbus_router,
-<<<<<<< ours
     onboarding_router,
     mqtt_reference_router,
     mqtt_topics_router,
@@ -91,19 +77,6 @@ from boneio.webui.routes import (
     outputs_router,
     remote_devices_router,
     schema_router,
-=======
-    nodered_router,
-    onboarding_router,
-    os_update_router,
-    proxy_router,
-    mqtt_reference_router,
-    mqtt_tls_router,
-    outputs_router,
-    remote_devices_router,
-    diagnostics_router,
-    schedule_router,
-    security_router,
->>>>>>> theirs
     sensors_router,
     sun_router,
     system_router,
@@ -113,12 +86,6 @@ from boneio.webui.routes import (
 )
 from boneio.webui.routes import config as config_module
 from boneio.webui.routes import onboarding as onboarding_module
-<<<<<<< ours
-=======
-from boneio.webui.routes import diagnostics as diagnostics_module
-from boneio.webui.routes import mqtt_tls as mqtt_tls_module
-from boneio.webui.routes import security as security_module
->>>>>>> theirs
 from boneio.webui.routes import system as system_module
 
 # Import WebSocket manager
@@ -208,10 +175,7 @@ def get_config_helper():
 
 # Include routers
 app.include_router(auth_router)
-<<<<<<< ours
 app.include_router(addons_router)
-=======
->>>>>>> theirs
 app.include_router(accounts_router)
 app.include_router(outputs_router)
 app.include_router(covers_router)
@@ -227,24 +191,13 @@ app.include_router(security_router)
 app.include_router(diagnostics_router)
 app.include_router(nodered_router)
 app.include_router(onboarding_router)
-<<<<<<< ours
-=======
-app.include_router(os_update_router)
-app.include_router(proxy_router)
->>>>>>> theirs
 app.include_router(can_router)
 app.include_router(remote_devices_router)
 app.include_router(templates_router)
 app.include_router(tools_router)
 app.include_router(migrations_router)
 app.include_router(mqtt_reference_router)
-<<<<<<< ours
 app.include_router(mqtt_topics_router)
-=======
-app.include_router(mqtt_tls_router)
-app.include_router(sun_router)
-app.include_router(schedule_router)
->>>>>>> theirs
 
 if os.environ.get("BONEIO_DEV"):
     app.include_router(dev_fake_device_router)
@@ -280,12 +233,7 @@ app.dependency_overrides[migrations_module._get_manager] = get_manager
 app.dependency_overrides[templates_module.get_manager] = get_manager
 app.dependency_overrides[tools_module.get_manager] = get_manager
 app.dependency_overrides[mqtt_reference_module.get_manager] = get_manager
-<<<<<<< ours
 app.dependency_overrides[mqtt_topics_module.get_manager] = get_manager
-=======
-app.dependency_overrides[sun_module.get_manager] = get_manager
-app.dependency_overrides[schedule_module.get_manager] = get_manager
->>>>>>> theirs
 
 if os.environ.get("BONEIO_DEV"):
     from boneio.webui.routes import dev_fake_device as dev_fake_device_module
@@ -887,26 +835,6 @@ def init_app(
                 "username": migration.username,
                 "used_secret_file": migration.used_secret_file,
             }
-<<<<<<< ours
-=======
-        # Whether the first-run wizard may offer the steps that assume a blank
-        # device — the import, and the one that replaces the whole event
-        # section.
-        #
-        # This used to be read off the web.auth block alone, which was wrong in
-        # the direction that costs the owner their configuration: most 1.5.x
-        # controllers never had web authentication, so an upgraded device with
-        # a full config.yaml looked exactly like a fresh one. Freshness is now
-        # something that has to be shown, not assumed — see
-        # boneio.core.config.provenance.
-        onboarding_module.set_configured_before(
-            was_configured_before(
-                yaml_config_file,
-                had_legacy_auth=bool(migration)
-                or migration.reason == "incomplete_legacy_auth",
-            )
-        )
->>>>>>> theirs
     except UserStoreError as err:
         # Refusing to start would brick the UI over a file the user can fix,
         # but the store must not be silently treated as empty either — that
@@ -916,10 +844,6 @@ def init_app(
 
     set_user_store(user_store)
     onboarding_module.set_user_store(user_store)
-<<<<<<< ours
-=======
-    onboarding_module.set_config_dir(os.path.dirname(os.path.abspath(yaml_config_file)))
->>>>>>> theirs
     onboarding_module.set_legacy_migration(migration_info)
 
     # Explicit opt-out of authentication. Never exposed in the UI: see the note
@@ -949,20 +873,9 @@ def init_app(
     app.state.yaml_config_file = yaml_config_file
     app.state.web_server = web_server
     app.state.config_helper = config_helper
-<<<<<<< ours
     app.state.addon_token_secret = jwt_secret.encode("utf-8")
     app.state.user_store = user_store
     app.state.websocket_manager = WebSocketManager(jwt_secret=jwt_secret, auth_required=auth_required)
-=======
-    app.state.user_store = user_store
-    # The function, not its value: this runs before anybody has an account on
-    # a fresh device, and the answer changes the moment the first-run wizard
-    # creates one. Passing the boolean left the socket refusing to negotiate
-    # the token subprotocol for the rest of the process's life.
-    app.state.websocket_manager = WebSocketManager(
-        jwt_secret=jwt_secret, auth_required=is_auth_required
-    )
->>>>>>> theirs
 
     # Configure route modules with app state
     config_module.set_app_state(app.state)
@@ -979,11 +892,7 @@ def init_app(
         # NOTE: no local `import os` here. The module already imports it, and a
         # function-local import makes `os` local to this whole function, so any
         # earlier use in init_app raises UnboundLocalError.
-<<<<<<< ours
         from boneio.webui.routes.config import _config_cache, _get_config_mtime
-=======
-        from boneio.webui.routes.config_core import _config_cache, _get_config_mtime, api_shape
->>>>>>> theirs
 
         _config_cache["data"] = api_shape(initial_config)
         _config_cache["mtime"] = _get_config_mtime(yaml_config_file)
@@ -997,14 +906,7 @@ def init_app(
 
     # Keep the legacy pair reachable for a device whose web.auth could not be
     # migrated (an unrepresentable username, say), so it can still log in.
-<<<<<<< ours
     if auth_config:
-=======
-    # Only the login pair counts: the schema's defaults (allow_anonymous) make
-    # web.auth non-empty on every device, which made this an error on each
-    # fresh controller.
-    if auth_config.get("username") or auth_config.get("password"):
->>>>>>> theirs
         if auth_config.get("username") and auth_config.get("password"):
             set_auth_config(auth_config)
         else:
@@ -1071,7 +973,6 @@ def init_app(
         allow_headers=["*"],
     )
 
-<<<<<<< ours
     # Security headers middleware (F-13).
     # NOTE: still no X-Frame-Options — boneIO must be embeddable in an HA
     # ingress iframe, and that header cannot name an allowed origin. Framing is
@@ -1079,31 +980,12 @@ def init_app(
     frame_ancestors = (web_security or {}).get("frame_ancestors")
     if isinstance(frame_ancestors, list):
         frame_ancestors = " ".join(str(item) for item in frame_ancestors)
-=======
-    # Security headers middleware.
-    # NOTE: still no X-Frame-Options — boneIO must be embeddable in an HA
-    # ingress iframe, and that header cannot name an allowed origin. Framing is
-    # expressed through CSP frame-ancestors instead. Unset means the secure
-    # default, which the HA add-on satisfies because it proxies; see
-    # security_headers for why.
-    # Passed through as configured — a list or, from an older config, a
-    # string. build_csp reads both; joining here would only lose the shape.
-    frame_ancestors = (web_security or {}).get("frame_ancestors")
-    # Off unless the operator asked for it: the map picker is the only thing
-    # that needs a third-party host in img-src, and most devices never open it.
-    map_tiles = bool((web_security or {}).get("map_tiles"))
-    cloud_url = config_helper.cloud_url
->>>>>>> theirs
 
     @app.middleware("http")
     async def security_headers_middleware(request, call_next):
         """Add security headers to all responses."""
         response = await call_next(request)
-<<<<<<< ours
         apply_security_headers(request, response, frame_ancestors)
-=======
-        apply_security_headers(request, response, frame_ancestors, map_tiles, cloud_url)
->>>>>>> theirs
         return response
 
     # Add GZip compression
@@ -1125,12 +1007,7 @@ FRONTEND_DIR = APP_DIR / "frontend-dist"
 
 if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
     _LOGGER.info(f"Frontend found at {FRONTEND_DIR}, mounting static files")
-<<<<<<< ours
     app.mount("/assets", StaticFiles(directory=f"{FRONTEND_DIR}/assets"), name="assets")
-=======
-    app.mount("/assets", HashedAssets(directory=f"{FRONTEND_DIR}/assets"), name="assets")
-    app.mount("/schema", StaticFiles(directory=f"{APP_DIR}/schema"), name="schema")
->>>>>>> theirs
 
     @app.get("/manifest.webmanifest")
     async def serve_manifest():

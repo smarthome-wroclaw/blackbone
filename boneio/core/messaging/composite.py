@@ -98,15 +98,9 @@ class CompositeMessageBus(MessageBus):
         for bus in self._buses:
             await bus.unsubscribe_and_stop_listen(topic)
 
-<<<<<<< ours
     async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
         """Collect matching topics from buses that support discovery."""
         results = await asyncio.gather(
             *(bus.discover_topics(topic_filter, timeout) for bus in self._buses)
         )
         return sorted({topic for bus_topics in results for topic in bus_topics})
-=======
-    async def wait_until_subscribed(self) -> None:
-        """Wait for every bus: one being up says nothing about another."""
-        await asyncio.gather(*(bus.wait_until_subscribed() for bus in self._buses))
->>>>>>> theirs

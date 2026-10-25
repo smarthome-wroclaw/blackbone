@@ -1,9 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-<<<<<<< ours
 import { FaCode, FaList, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaToolbox, FaProjectDiagram, FaPuzzlePiece, FaServer, FaBoxes } from 'react-icons/fa';
-=======
-import { FaStethoscope, FaLightbulb, FaInbox, FaQuestionCircle, FaThermometerHalf, FaSignOutAlt, FaNetworkWired, FaCog, FaProjectDiagram, FaPuzzlePiece, FaEllipsisH, FaChevronRight, FaBars } from 'react-icons/fa';
->>>>>>> theirs
 import ThemeChanger from './ThemeChanger';
 import LanguageSelector from './LanguageSelector';
 import { useEffect, useState } from 'react';
@@ -40,7 +36,6 @@ export default function Navigation() {
 
   return (
     <>
-<<<<<<< ours
     <div className="navbar bg-base-200 border-b border-base-content/10 px-4 sticky top-0 z-30">
       <div className="flex-none xl:hidden">
         <label htmlFor="my-drawer" className="btn btn-square btn-ghost">
@@ -64,16 +59,6 @@ export default function Navigation() {
           <NavigationLogo />
         </a>
         <div className="hidden xl:flex xl:ml-4 flex-col text-xs">
-=======
-      <div className="top-0 z-30 sticky gap-3 bg-base-200 px-4 border-base-content/10 border-b navbar xl:min-h-12 xl:py-0">
-        <div className="flex flex-1 items-center gap-3 min-w-0">
-          <a className="xl:mx-2 text-xl normal-case shrink-0">
-            <Logo />
-          </a>
-          {/* Below xl the name is all that fits, and it is the one detail that
-            cannot move to the "More" sheet: with several controllers on the
-            network it is how you know which one you are about to switch. */}
->>>>>>> theirs
           {deviceName && (
             <div className="xl:hidden flex flex-col min-w-0 text-xs leading-tight">
               <span className="font-medium wrap-break-word line-clamp-2">{deviceName}</span>
@@ -210,7 +195,6 @@ function useMenuItems() {
   const location = useLocation();
   const { hasBoneioSection, hasTemplates } = useConfig();
   const { isNodeRedAvailable } = useNodeRedAvailability();
-<<<<<<< ours
   const { data: initData } = useAppInit();
   const { isAdmin } = useAuth();
 
@@ -232,28 +216,6 @@ function useMenuItems() {
       { path: '/config', icon: FaCode, label: t('navigation.config'), right: true },
       { path: '/system', icon: FaServer, label: t('navigation.system_update'), right: true },
     ] : []),
-=======
-  const { isAdmin } = useAuth();
-
-  const menuItems: MenuItem[] = [
-    { path: '/', default: true, icon: FaLightbulb, label: t('navigation.outputs'), primary: true },
-    { path: '/inputs', icon: FaInbox, label: t('navigation.inputs'), primary: true },
-    // The bottom bar has four slots. Templates takes the third when there are
-    // any — a thermostat or a gate is something you reach for from a phone,
-    // board sensors less so — and Sensors moves under "More".
-    { path: '/sensors', icon: FaThermometerHalf, label: t('navigation.sensors'), primary: !hasTemplates, mobileOrder: 3 },
-    { path: '/modbus', icon: FaNetworkWired, label: t('navigation.modbus'), primary: true, mobileOrder: 4 },
-    { path: '/templates', icon: FaPuzzlePiece, label: t('navigation.templates'), primary: hasTemplates, mobileOrder: 3 },
-    // Everything below configures the device, so a viewer is not offered it.
-    // The backend refuses these routes for a viewer regardless; hiding them
-    // just avoids dead ends. See boneio/webui/middleware/policy.py.
-    // Diagnostics is admin-only for a reason the name hides: its bus scans
-    // are not passive. The Modbus helper pauses the polling loop to take the
-    // bus, so someone who opened the page to look can leave Modbus stopped.
-    ...(isAdmin ? [{ path: '/diagnostics', icon: FaStethoscope, label: t('navigation.diagnostics'), right: true }] : []),
-    // Settings (experimental) - only show if boneio section exists in config
-    ...(isAdmin && hasBoneioSection ? [{ path: '/settings', icon: FaCog, label: t('navigation.settings'), right: true }] : []),
->>>>>>> theirs
     // Node-RED - only show if available via nginx proxy
     ...(isAdmin && isNodeRedAvailable ? [{ path: '/nodered', icon: FaProjectDiagram, label: 'Node-RED', right: true }] : []),
   ];
@@ -445,7 +407,6 @@ function DeviceDetails({ className = '' }: { className?: string }) {
   const cloudDomain = initData?.cloud?.domain && initData?.cloud?.cloud_config_active
     ? initData.cloud.domain : '';
 
-<<<<<<< ours
   return (
     <div className="drawer-side z-40">
       <label htmlFor="my-drawer" aria-label="close sidebar" className="drawer-overlay"></label>
@@ -459,36 +420,6 @@ function DeviceDetails({ className = '' }: { className?: string }) {
         <div className="flex-1 overflow-y-auto">
           <Menu sideMenu={true} />
         </div>
-=======
-  const rows: [string, React.ReactNode][] = [];
-  if (username) rows.push([t('navigation.logged_in_as_label'), (
-    <span>
-      <span className="font-mono">{username}</span>
-      {role && <span className="block text-xs opacity-70">{t(`accounts.role_${role}`)}</span>}
-    </span>
-  )]);
-  if (version) rows.push([t('navigation.version'), <span className="font-mono">{version}</span>]);
-  if (serialNo) rows.push([t('navigation.serial'), (
-    <span className="font-mono">
-      {serialNo}
-      {serialOverride && (
-        <span className="block font-sans text-xs font-semibold text-warning">
-          {t('navigation.serial_override', { serial: serialOverride })}
-        </span>
-      )}
-    </span>
-  )]);
-  if (cloudDomain) rows.push([t('navigation.cloud'), (
-    <a
-      href={`https://${cloudDomain}:8443`}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="link link-primary no-underline hover:underline break-all"
-    >
-      {cloudDomain}
-    </a>
-  )]);
->>>>>>> theirs
 
   return (
     <div className={clsx('flex flex-col gap-3 text-sm', className)}>

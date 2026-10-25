@@ -8,13 +8,8 @@ import { FaWandMagicSparkles } from 'react-icons/fa6';
 import ArrayTableWidget from '../ArrayTableWidget';
 import PresenceSimulationWizard from '../PresenceSimulationWizard';
 import BoneIOForm from '../BoneIOForm';
-<<<<<<< ours
 import MqttProtocolForm from '../MqttProtocolForm';
 import LoxProtocolForm from '../LoxProtocolForm';
-=======
-import MqttSectionForm from '../MqttSectionForm';
-import LoxUdpSectionForm from '../LoxUdpSectionForm';
->>>>>>> theirs
 import WebServerForm from '../WebServerForm';
 import ModbusForm from '../ModbusForm';
 import CANForm from '../CANForm';
@@ -174,25 +169,15 @@ function CustomFormContent({
       );
     case 'mqtt':
       return (
-<<<<<<< ours
         <MqttProtocolForm
           data={formData.mqtt}
-=======
-        <MqttSectionForm
-          data={formData['mqtt'] as ConfigRecord}
->>>>>>> theirs
           onChange={(data) => onSectionChange('mqtt', data)}
         />
       );
     case 'lox_udp':
       return (
-<<<<<<< ours
         <LoxProtocolForm
           data={formData.lox_udp}
-=======
-        <LoxUdpSectionForm
-          data={formData['lox_udp'] as ConfigRecord}
->>>>>>> theirs
           onChange={(data) => onSectionChange('lox_udp', data)}
           onValidationChange={onLoxValidationChange}
         />

@@ -11,20 +11,12 @@ import {
   FaPowerOff,
 } from 'react-icons/fa';
 import SelfTest from './SelfTest';
-<<<<<<< ours
 import FixAppPermissions from './FixAppPermissions';
 import HardwareErrors, { type HardwareError } from './HardwareErrors';
 import MigrationsSection from './MigrationsSection';
 import AlternativeUpdateSource, {
   type AlternativeUpdateRequest,
 } from './SystemStateComponents/AlternativeUpdateSource';
-=======
-import HardwareErrors from './HardwareErrors';
-import { UpdateSafetyNotice } from './SystemStateComponents/UpdateSafetyNotice';
-import { OsUpdateCard } from './SystemStateComponents/OsUpdateCard';
-import { CaddyUpdateCard } from './SystemStateComponents/CaddyUpdateCard';
-import { ProxySwitchCard } from './SystemStateComponents/ProxySwitchCard';
->>>>>>> theirs
 
 /** Which block of the old System page to render. */
 export type SystemSection = 'update' | 'tools' | 'hardware_errors';
@@ -150,11 +142,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
   const [isRestarting, setIsRestarting] = useState(false);
 
   // Hardware errors state
-<<<<<<< ours
   const [hardwareErrors, setHardwareErrors] = useState<HardwareError[]>([]);
-=======
-  const [hardwareErrors, setHardwareErrors] = useState<React.ComponentProps<typeof HardwareErrors>['errors']>([]);
->>>>>>> theirs
 
   // Fetch hardware errors
   const fetchHardwareErrors = useCallback(async () => {
@@ -232,46 +220,12 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
     }
   }, []);
 
-<<<<<<< ours
   const startUpdateRequest = async (request: {
     version?: string;
     source_type?: AlternativeUpdateRequest['source_type'];
     source?: string;
     source_version?: string;
   }) => {
-=======
-  /**
-   * Reload once the new version answers, not a fixed time after "success".
-   *
-   * The old process reports success and then takes a while to stop; the new
-   * one runs its migrations before it serves anything. A reload in between
-   * either lands on the old panel again or on no server at all. While the
-   * controller is down the panel's guard shows the update screen instead.
-   */
-  const reloadWhenUpdated = useCallback((mark: UpdateMark) => {
-    if (newVersionPoll.current) clearInterval(newVersionPoll.current);
-    newVersionPoll.current = setInterval(async () => {
-      if (Date.now() - mark.startedAt > NEW_VERSION_DEADLINE_MS) {
-        if (newVersionPoll.current) clearInterval(newVersionPoll.current);
-        setIsUpdating(false);
-        setError(t('software_update.update_failed'));
-        return;
-      }
-      try {
-        const { data } = await axios.get('/api/version');
-        if (updateArrived(mark, data?.version)) {
-          if (newVersionPoll.current) clearInterval(newVersionPoll.current);
-          window.location.reload();
-        }
-      } catch {
-        // Restarting or running migrations: ask again.
-      }
-    }, NEW_VERSION_POLL_MS);
-  }, [t]);
-
-  // Start update with specific version
-  const startUpdate = async (version?: string) => {
->>>>>>> theirs
     setIsUpdating(true);
     setError(null);
 
@@ -310,12 +264,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
           setError(status.error || t('software_update.update_failed'));
         }
       }, 1000);
-<<<<<<< ours
     } catch {
-=======
-    } catch (err) {
-      clearUpdateMark(window.localStorage, basePath);
->>>>>>> theirs
       setError(t('software_update.failed_to_start_update'));
       setIsUpdating(false);
     }
@@ -521,7 +470,6 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
                 <span className="badge badge-ghost badge-sm">{t('software_update.up_to_date')}</span>
               )}
             </div>
-<<<<<<< ours
 
             {/* Prerelease Available Card (for stable users) */}
             {updateInfo?.prerelease_update_available && !updateInfo?.update_available && (
@@ -756,32 +704,6 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
                   <FaHistory />
                   {t('software_update.available_versions') || 'Available Versions'}
                 </h3>
-=======
-          </div>
-        </SettingsCard>
-
-        {/* Prerelease available to someone on stable */}
-        {updateInfo?.prerelease_update_available && !updateInfo?.update_available && (
-          <SettingsCard
-            variant="accent"
-            icon={<FaExclamationTriangle />}
-            title={t('software_update.prerelease_available')}
-            description={t('software_update.prerelease_available_description')}
-            footer={
-              <FormActions>
-                <a
-                  href={
-                    updateInfo.available_versions?.find(
-                      v => v.version === updateInfo.latest_prerelease
-                    )?.release_url
-                  }
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn btn-ghost btn-sm"
-                >
-                  {t('software_update.view_release_notes')}
-                </a>
->>>>>>> theirs
                 <button
                   className="btn btn-warning btn-sm gap-2"
                   onClick={() => startUpdate(updateInfo.latest_prerelease)}

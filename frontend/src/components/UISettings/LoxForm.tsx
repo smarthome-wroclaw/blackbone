@@ -22,13 +22,8 @@ export interface LoxFormData {
 }
 
 interface LoxFormProps {
-<<<<<<< ours
   data?: LoxConfigData;
   onChange: (data: LoxConfigData) => void;
-=======
-  data: LoxFormData;
-  onChange: (data: LoxFormData) => void;
->>>>>>> theirs
   onValidationChange?: (isValid: boolean) => void;
 }
 
@@ -91,13 +86,8 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
     onValidationChange?.(isValid);
   }, [isValid, onValidationChange]);
 
-<<<<<<< ours
   const handleChange = useCallback(<K extends keyof LoxConfigData>(field: K, value: LoxConfigData[K]) => {
     onChange({ ...(data ?? {}), [field]: value });
-=======
-  const handleChange = useCallback((field: string, value: unknown) => {
-    onChange({ ...data, [field]: value });
->>>>>>> theirs
   }, [data, onChange]);
 
   const handleDownloadTemplate = () => {

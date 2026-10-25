@@ -23,18 +23,10 @@ from boneio.core.config.yaml_util import (
     load_config_from_file,
     update_yaml_field,
 )
-<<<<<<< ours
-=======
-from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
->>>>>>> theirs
 from boneio.core.utils import overlay as overlay_util
 from boneio.exceptions import ConfigurationException
 from boneio.models.logs import LogEntry, LogsResponse
 from boneio.version import __version__
-<<<<<<< ours
-=======
-from boneio.webui.routes.onboarding import get_configured_before, pending_board_revision
->>>>>>> theirs
 from boneio.webui.middleware.auth import (
     get_user_store,
     is_anonymous_allowed,
@@ -396,36 +388,16 @@ async def get_init(
         # a password — and point at a config.yaml key that need not even exist,
         # since BONEIO_DEV opts in too.
         "allow_anonymous": is_anonymous_allowed() and not auth_required,
-<<<<<<< ours
         "pwa_name": config_helper.pwa_name,
         "pwa_default": f"bIO {serial_suffix}",
-=======
-        # Both default to the serial's suffix, so both are withheld with it.
-        "pwa_name": config_helper.pwa_name if full_view else None,
-        "pwa_default": f"bIO {serial_suffix}" if full_view else None,
->>>>>>> theirs
         "pwa_max_length": 12,
         "cloud": cloud_data,
         "has_boneio": has_boneio,
         "board_version": board_version,
         "has_irrigation": has_irrigation,
-<<<<<<< ours
         "features": {
             "addons": os.environ.get("BONEIO_ADDONS", "").lower() in {"1", "true", "yes", "on"},
         },
-=======
-        "has_templates": has_templates,
-        "has_location": has_location,
-        # The wizard reads this to drop the import and device-binding steps on
-        # a controller that already has a configuration. It lives here rather
-        # than only on /api/onboarding/status because the wizard never asks
-        # that endpoint — it renders from this payload, and for two releases
-        # the field was computed, returned somewhere nobody read, and
-        # defaulted to false at the only place that used it.
-        "configured_before": get_configured_before(),
-        # The card did not say which controller this is; the wizard asks.
-        "board_type_required": pending_board_revision() is not None,
->>>>>>> theirs
     }
 
 @router.get("/name")
@@ -1495,7 +1467,6 @@ async def change_overlay(body: OverlayChangeRequest):
             "message": "Overlay already set to requested value",
         }
 
-<<<<<<< ours
     # Fix #3: backup uEnv.txt before modification (cp -n = no-clobber)
     backup_path = uenv + ".boneio.bak"
     backup_cmd = ["sudo", "-S", "cp", "-n", uenv, backup_path]
@@ -1564,11 +1535,6 @@ async def change_overlay(body: OverlayChangeRequest):
         )
     except Exception as exc:
         _LOGGER.error("Failed to change overlay in %s: %s", uenv, exc)
-=======
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, system_ops.overlay_set, overlay)
-    if not result.ok:
->>>>>>> theirs
         return JSONResponse(
             status_code=500,
             content={

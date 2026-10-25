@@ -79,10 +79,6 @@ axiosInstance.interceptors.response.use(
       //
       // An event rather than an import: useAuth imports axios, so calling into
       // it from here would be circular.
-<<<<<<< ours
-=======
-      rememberSignoutReason(error.response.data?.code);
->>>>>>> theirs
       localStorage.removeItem('token');
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     }

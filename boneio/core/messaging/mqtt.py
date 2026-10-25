@@ -78,14 +78,8 @@ class MQTTClient(MessageBus):
         self._connection_established = False
         self._subscribed = asyncio.Event()
         self.publish_queue: UniqueQueue = UniqueQueue()
-<<<<<<< ours
         self._mqtt_energy_listeners: dict[str, Callable[[str, str], Awaitable[None]]] = {}
         self._topic_discovery_sessions: dict[str, list[set[str]]] = {}
-=======
-        self._mqtt_energy_listeners: dict[str, Callable[..., Awaitable[None]]] = {}
-        # Listeners that are told whether a message is a retained replay.
-        self._retain_aware_listeners: set[str] = set()
->>>>>>> theirs
         self._discovery_topics = (
             [
                 f"{self._config_helper.ha_discovery_prefix}/{ha_type}/{self._config_helper.serial_number}/#"
@@ -509,7 +503,6 @@ class MQTTClient(MessageBus):
                 publish_task = asyncio.create_task(self._handle_publish())
                 tasks.add(publish_task)
 
-<<<<<<< ours
             topics = (
                 self._topics
                 + list(self._mqtt_energy_listeners.keys())
@@ -520,43 +513,6 @@ class MQTTClient(MessageBus):
 
             # Wait for everything to complete (or fail due to, e.g., network errors).
             await asyncio.gather(*tasks)
-=======
-                # Messages that doesn't match a filter will get logged and handled here.
-                messages_task = asyncio.create_task(
-                    self.handle_messages(self.asyncio_client.messages, manager.receive_message)
-                )
-                if not self._connection_established:
-                    self._connection_established = True
-                    reconnect_task = asyncio.create_task(
-                        manager.reconnect_callback()
-                    )
-                    tasks.add(reconnect_task)
-                tasks.add(messages_task)
-
-                topics = self._topics + list(self._mqtt_energy_listeners.keys()) + self._discovery_topics
-                await self.subscribe(topics=topics)
-                self._subscribed.set()
-                # Connected: the next outage starts the backoff from scratch
-                # instead of waiting as long as the worst one before it.
-                self.reconnect_interval = 1
-
-                # Wait for everything to complete (or fail due to, e.g., network errors).
-                await asyncio.gather(*tasks)
-        finally:
-            # asyncio.gather() does NOT cancel sibling tasks when one of them raises
-            # (e.g. messages_task raising MqttError on disconnect), so without this,
-            # publish_task/reconnect_task kept running as orphans after every
-            # reconnect. An orphaned publish_task would then race the next
-            # cycle's publish_task for the same publish_queue, calling publish()
-            # against a client that isn't connected yet ("client is not currently
-            # connected") even once the real connection was healthy again.
-            self.publish_queue.set_connected(False)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
->>>>>>> theirs
 
     @property
     @override
@@ -613,7 +569,6 @@ class MQTTClient(MessageBus):
             for discovery_topic in self._discovery_topics:
                 if message.topic.matches(discovery_topic):
                     callback_start = False
-<<<<<<< ours
                     topic = concrete_topic
                     if (
                         message.payload
@@ -627,34 +582,12 @@ class MQTTClient(MessageBus):
                         self.send_message(
                             topic=topic, payload=None, retain=True
                         )
-=======
-                    topic = str(message.topic)
-                    if not message.payload:
-                        # Already removed, by us or by someone else.
-                        self._held_discovery_topics.discard(topic)
-                    elif not self._config_helper.is_topic_in_autodiscovery(topic):
-                        if self._discovery_cleanup_held:
-                            self._held_discovery_topics.add(topic)
-                        else:
-                            self._remove_discovery_entity(topic)
->>>>>>> theirs
                     break
             for topic, listener_callback in self._mqtt_energy_listeners.items():
                 if message.topic.matches(topic):
                     callback_start = False
                     try:
-<<<<<<< ours
                         await listener_callback(concrete_topic, payload)
-=======
-                        if topic in self._retain_aware_listeners:
-                            # v3.1.1: the broker sets retain only when replaying
-                            # its stored copy on subscribe, never on live ones.
-                            await listener_callback(
-                                str(message.topic), payload, retained=bool(message.retain)
-                            )
-                        else:
-                            await listener_callback(str(message.topic), payload)
->>>>>>> theirs
                     except Exception as exc:
                         _LOGGER.error(
                             "Error in MQTT listener callback for topic %s: %s",
@@ -667,14 +600,4 @@ class MQTTClient(MessageBus):
                     message.topic,
                     payload,
                 )
-<<<<<<< ours
                 await callback(concrete_topic, payload)
-=======
-                try:
-                    await callback(str(message.topic), payload)
-                except Exception as exc:
-                    _LOGGER.error(
-                        "Error handling MQTT message on %s: %s",
-                        message.topic, exc, exc_info=True,
-                    )
->>>>>>> theirs

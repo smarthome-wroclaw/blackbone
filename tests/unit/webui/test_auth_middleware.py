@@ -111,11 +111,7 @@ def test_first_admin_endpoint_is_open_but_self_guarding(client, store):
 
     response = client.post(
         "/api/onboarding/admin",
-<<<<<<< ours
         json={"username": "napastnik", "password": "haslo-napastnika"},
-=======
-        json={"username": "napastnik", "password": "haslo-intruza"},
->>>>>>> theirs
     )
 
     assert response.status_code == 409
@@ -136,11 +132,7 @@ def test_expired_or_foreign_token_is_rejected(client, store):
     store.add_user("pawel", "dobre-haslo", Role.ADMIN)
     token = create_token({"sub": "pawel", "role": "admin"})
 
-<<<<<<< ours
     set_jwt_secret("a-completely-different-secret")
-=======
-    set_jwt_secret("a-completely-different-secret-----------")
->>>>>>> theirs
     try:
         response = client.get(
             "/api/protected", headers={"Authorization": f"Bearer {token}"}
@@ -162,11 +154,7 @@ def test_token_ttl_matches_the_configured_lifetime():
 
     from boneio.webui.middleware.auth import TOKEN_TTL_DAYS, create_token, verify_token
 
-<<<<<<< ours
     set_jwt_secret("test-secret-for-ttl")
-=======
-    set_jwt_secret("test-secret-for-ttl---------------------")
->>>>>>> theirs
     payload = verify_token(create_token({"sub": "pawel", "role": "admin"}))
     assert payload is not None
 
@@ -199,27 +187,9 @@ def rbac_client(store):
     async def list_outputs():
         return {"outputs": []}
 
-<<<<<<< ours
     app.add_middleware(AuthMiddleware)
     store.add_user("pawel", "dobre-haslo", Role.ADMIN)
     store.add_user("gosc", "haslo-goscia", Role.VIEWER)
-=======
-    @app.get("/api/logs")
-    async def logs():
-        return {"logs": []}
-
-    @app.get("/api/i2c/scan")
-    async def i2c_scan():
-        return {"devices": []}
-
-    @app.post("/api/modbus/pause")
-    async def modbus_pause():
-        return {"paused": True}
-
-    app.add_middleware(AuthMiddleware)
-    store.add_user("pawel", "dobre-haslo", Role.ADMIN)
-    store.add_user("gosc", "poufne-haslo", Role.VIEWER)
->>>>>>> theirs
     return TestClient(app)
 
 
@@ -252,30 +222,6 @@ def test_viewer_may_not_read_raw_files(rbac_client):
     ).status_code == 403
 
 
-<<<<<<< ours
-=======
-def test_viewer_may_not_open_diagnostics(rbac_client):
-    """Diagnostics is a GET surface that reaches into the hardware.
-
-    The Modbus helper on that page pauses the polling loop to take the bus, so
-    a viewer who wandered in to look could leave Modbus stopped. The log is
-    withheld with it: it carries the serial number that /api/version keeps from
-    a non-admin.
-    """
-    viewer = _auth("viewer", "gosc")
-    assert rbac_client.get("/api/logs", headers=viewer).status_code == 403
-    assert rbac_client.get("/api/i2c/scan", headers=viewer).status_code == 403
-    assert rbac_client.post("/api/modbus/pause", headers=viewer).status_code == 403
-
-
-def test_admin_may_open_diagnostics(rbac_client):
-    admin = _auth("admin", "pawel")
-    assert rbac_client.get("/api/logs", headers=admin).status_code == 200
-    assert rbac_client.get("/api/i2c/scan", headers=admin).status_code == 200
-    assert rbac_client.post("/api/modbus/pause", headers=admin).status_code == 200
-
-
->>>>>>> theirs
 def test_admin_may_do_both(rbac_client):
     assert rbac_client.post(
         "/api/outputs/relay_01/toggle", headers=_auth("admin", "pawel")

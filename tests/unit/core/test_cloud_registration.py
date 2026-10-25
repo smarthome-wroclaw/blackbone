@@ -24,11 +24,8 @@ async def test_cert_needs_refresh_with_extra_spaces(cloud_reg, tmp_path):
     cert_file = tmp_path / "fullchain.pem"
     cert_file.write_text("fake cert content")
 
-<<<<<<< ours
     # Keep this date safely beyond the 14-day refresh window regardless of
     # when the suite runs.
-=======
->>>>>>> theirs
     mock_openssl_out = "notAfter=Oct  9 15:02:27 2099 GMT\n"
 
     with patch("boneio.core.cloud.registration.CERT_FILE", cert_file):
@@ -37,11 +34,7 @@ async def test_cert_needs_refresh_with_extra_spaces(cloud_reg, tmp_path):
                 mock_run.return_value = MagicMock(returncode=0, stdout=mock_openssl_out)
 
                 needs_refresh = await cloud_reg._cert_needs_refresh()
-<<<<<<< ours
                 # Should successfully parse date (far in the future) -> False
-=======
-                # Should successfully parse date (Oct 9 2099 is far in future) -> False
->>>>>>> theirs
                 assert needs_refresh is False
 
 

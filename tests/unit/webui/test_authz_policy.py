@@ -1,15 +1,4 @@
-<<<<<<< ours
 """Tests for the role policy — which role may make which request."""
-=======
-"""Tests for the role policy — which role may make which request.
-
-Also where F-12 is held closed. /api/logs, /api/system/overlay and
-/api/hostname answered anyone who asked, handing out the service journal, the
-boot overlay path and the hostname without a token. The policy here is what
-decides that an API path needs a role at all, so a route added without one
-fails these tests rather than shipping open.
-"""
->>>>>>> theirs
 
 from __future__ import annotations
 
@@ -65,10 +54,7 @@ def test_only_api_paths_are_gated():
         "/api/sensors",
         "/api/dashboard",
         "/api/config",
-<<<<<<< ours
         "/api/logs",
-=======
->>>>>>> theirs
         "/api/covers",
     ],
 )
@@ -85,10 +71,7 @@ def test_viewer_may_read(path):
         "/api/accounts",
         "/api/config/download",
         "/api/config/backups",
-<<<<<<< ours
         "/api/caddy/status",
-=======
->>>>>>> theirs
         "/api/nodered/backup",
     ],
 )
@@ -98,31 +81,6 @@ def test_viewer_may_not_read_credential_carriers(path):
     assert role_allows(Role.VIEWER, "GET", path) is False
 
 
-<<<<<<< ours
-=======
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/api/diagnostics/bundle",
-        "/api/diagnostics/capture",
-        "/api/logs",
-        "/api/i2c/scan",
-        "/api/can/status",
-        "/api/can/nodes",
-    ],
-)
-def test_viewer_may_not_read_diagnostics(path):
-    """Diagnostics is admin-only even though every route in it is a GET.
-
-    The bus scans reach into the hardware — the Modbus helper pauses the
-    polling loop to take the bus — and the device log carries the serial
-    number that /api/version withholds from a non-admin.
-    """
-    assert required_role("GET", path) is Role.ADMIN
-    assert role_allows(Role.VIEWER, "GET", path) is False
-
-
->>>>>>> theirs
 # ------------------------------------------------------------- viewer: writes
 
 
@@ -146,10 +104,6 @@ def test_viewer_may_not_read_diagnostics(path):
         "/api/remote-devices/esp1/output/relay/action",
         "/api/remote-devices/esp1/cover/blind/action",
         "/api/modbus/get",
-<<<<<<< ours
-=======
-        "/api/sensors/ina/refresh",
->>>>>>> theirs
     ],
 )
 def test_viewer_may_operate_the_device(path):
@@ -180,14 +134,6 @@ def test_viewer_may_operate_the_device(path):
         "/api/remote-devices/discover-wled",
         "/api/remote-devices/discover-esphome",
         "/api/nodered/update/perform",
-<<<<<<< ours
-=======
-        "/api/os-update/check",
-        "/api/os-update/upgrade",
-        "/api/os-update/autoupdate",
-        "/api/os-update/caddy/apply",
-        "/api/proxy/switch",
->>>>>>> theirs
         "/api/caddy/config",
         "/api/can/send",
         "/api/migrations/apply",
@@ -226,61 +172,3 @@ def test_delete_is_never_a_viewer_action():
 )
 def test_admin_may_do_everything(method, path):
     assert role_allows(Role.ADMIN, method, path) is True
-<<<<<<< ours
-=======
-
-
-# ------------------------------------- what the settings screen actually writes
-#
-# The Settings entry has always been hidden from a viewer, but the route stayed
-# reachable — by a bookmark and by the "edit in settings" shortcut behind a long
-# press on an output. The UI gate is now closed too, but the UI is a hint: these
-# are the requests that screen makes, and they are what has to stay admin-only
-# whatever the front end offers.
-
-
-@pytest.mark.parametrize("method,path", [
-    ("POST", "/api/config"),
-    ("PUT", "/api/config"),
-    ("POST", "/api/config/save"),
-    ("POST", "/api/config/section"),
-    ("POST", "/api/config/restore"),
-    ("DELETE", "/api/config/backups/backup.tar.gz"),
-    ("POST", "/api/files/save"),
-    ("POST", "/api/system/restart"),
-    ("POST", "/api/system/overlay"),
-    ("POST", "/api/timezone"),
-    ("POST", "/api/ntp"),
-    ("POST", "/api/name"),
-    ("POST", "/api/accounts"),
-    ("DELETE", "/api/accounts/somebody"),
-    ("POST", "/api/migrations/apply"),
-    ("POST", "/api/update/start"),
-    ("POST", "/api/can/interface-up"),
-    ("POST", "/api/nodered/restore"),
-])
-def test_everything_the_settings_screen_writes_needs_an_admin(method, path):
-    assert required_role(method, path) is Role.ADMIN
-
-
-def test_a_viewer_may_still_operate_the_device(monkeypatch):
-    """The role would be pointless otherwise — see the policy docstring."""
-    for method, path in [
-        ("POST", "/api/outputs/relay1/toggle"),
-        ("POST", "/api/covers/blind1/action"),
-        ("POST", "/api/irrigation/garden/command"),
-        ("PUT", "/api/account/password"),
-    ]:
-        assert required_role(method, path) is Role.VIEWER, f"{method} {path}"
-
-
-def test_reading_the_configuration_stays_open_to_a_viewer():
-    """Deliberate: the dashboard needs it, and secrets are masked on the way out.
-
-    If this ever has to change, the masking in config_core is the thing to check
-    first — it is what makes the read safe, not the role.
-    """
-    assert required_role("GET", "/api/config") is Role.VIEWER
-    # The archive routes are a different matter: the tar bundles secrets.yaml.
-    assert required_role("GET", "/api/config/download") is Role.ADMIN
->>>>>>> theirs

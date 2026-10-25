@@ -1,42 +1,15 @@
-<<<<<<< ours
 """Response security headers (F-13).
 
 Before 1.6 the app sent only ``X-Content-Type-Options`` and ``Referrer-Policy``.
 This adds the rest, with two deliberate departures from the obvious answer.
-=======
-"""Response security headers.
-
-Two of them depart from the obvious answer on purpose.
->>>>>>> theirs
 
 **No X-Frame-Options.** The panel has to be embeddable in a Home Assistant
 ingress iframe, and X-Frame-Options cannot express "this one other origin".
 Its modern replacement, CSP ``frame-ancestors``, can — so framing policy is a
 config option (``web.security.frame_ancestors``) rather than a header nailed
-<<<<<<< ours
 shut here. It is unset by default, which keeps today's behaviour: turning it on
 without knowing how a given installation embeds the panel would break that
 installation's dashboard.
-=======
-shut here.
-
-It is a list of plain tokens — ``self``, or an address — which this module
-quotes the way CSP requires; see :mod:`boneio.core.security.framing` for why
-the config does not hold the directive verbatim. It defaults to ``self``,
-which is both the secure answer and the one the boneIO Black Home Assistant
-add-on needs. The add-on's nginx *proxies* each
-device (``proxy_pass https://<device>:8443``) and the dashboard frames a path
-on Home Assistant's own origin, so the framed document and the page framing it
-share an origin — ``'self'`` permits exactly that while refusing a page on any
-other site.
-
-The setup this does break is a dashboard pointing an iframe card or
-``panel_iframe`` straight at ``https://<device>:8443``: there the framed
-document is on the device's origin and Home Assistant's is a different one.
-Such an install adds its Home Assistant origin alongside ``self``, which the
-Security section offers as a field. ``*`` turns the restriction off entirely
-for anyone who needs that.
->>>>>>> theirs
 
 **A short HSTS max-age.** A browser ignores HSTS arriving over a connection it
 could not verify, so sending it on a self-signed setup is harmless. What is not
@@ -51,34 +24,14 @@ from __future__ import annotations
 from starlette.requests import Request
 from starlette.responses import Response
 
-<<<<<<< ours
-=======
-# The framing policy is a list of plain tokens in config.yaml; core turns it
-# into the directive, so the security check and this header cannot drift apart
-# about what a given configuration actually does.
-from boneio.core.security import framing
-
->>>>>>> theirs
 #: Kept deliberately permissive where the app genuinely needs it, so that the
 #: policy can actually ship rather than being switched off the first time the
 #: YAML editor breaks. 'unsafe-inline' for scripts is required because a
 #: reverse proxy injects window.__BONEIO_BASE_PATH__ as an inline script, and
 #: blob: workers are how the Monaco editor runs.
-<<<<<<< ours
 _CSP_DIRECTIVES = (
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-=======
-#:
-#: No 'unsafe-eval': nothing in the build — Monaco and its YAML worker included
-#: — evaluates strings as code or compiles WebAssembly, so allowing it only
-#: helped an injected script. Nor a hash or nonce for the inline scripts: with
-#: either present a browser ignores 'unsafe-inline', and the base path the Home
-#: Assistant add-on injects would stop running.
-_CSP_DIRECTIVES = (
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
->>>>>>> theirs
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
@@ -111,106 +64,35 @@ _PERMISSIONS_POLICY = ", ".join(
 HSTS_MAX_AGE = 86400
 
 
-<<<<<<< ours
 def build_csp(frame_ancestors: str | None = None) -> str:
     """Assemble the Content-Security-Policy header value.
 
     Args:
         frame_ancestors: Value for the frame-ancestors directive, or None to
             omit it and leave framing unrestricted.
-=======
-#: Tile servers the map picker may load images from, when it is switched on.
-#:
-#: Naming hosts in `img-src` is a real loosening, not a formality: an image URL
-#: is an outbound channel, so an attacker who already has script execution in
-#: the panel could encode a few hundred bytes per request into a tile path and
-#: read it out of someone else's access log. That is why this is off by default
-#: and has to be turned on per device — the map is a convenience, and nobody
-#: should pay for it who is not using it.
-MAP_TILE_SOURCES = (
-    "https://*.tile.openstreetmap.org",
-    "https://tile.openstreetmap.org",
-)
-
-
-def build_csp(
-    frame_ancestors: object = None, map_tiles: bool = False, cloud_url: str | None = None
-) -> str:
-    """Assemble the Content-Security-Policy header value.
-
-    Args:
-        frame_ancestors: ``web.security.frame_ancestors`` as config.yaml holds
-            it — a list of plain tokens, or the single string earlier versions
-            wrote. None means the device has not been configured and the secure
-            default applies; ``["*"]`` lifts the restriction deliberately.
-        map_tiles: ``web.security.map_tiles``. When true, OpenStreetMap tile
-            servers are added to ``img-src`` so the location picker can show a
-            map. Off by default; see :data:`MAP_TILE_SOURCES`.
-        cloud_url: This controller's own cloud name, added to ``connect-src``.
-            Turning registration on moves the panel there, and the onboarding
-            wizard checks from the browser that the name answers before
-            sending anyone to it. Only this one name, not ``*.black.boneio.app``:
-            other controllers' names are no business of this page.
->>>>>>> theirs
 
     Returns:
         The header value.
     """
     directives = list(_CSP_DIRECTIVES)
-<<<<<<< ours
     if frame_ancestors:
         directives.append(f"frame-ancestors {frame_ancestors}")
-=======
-    if map_tiles:
-        directives = [
-            f"{directive} {' '.join(MAP_TILE_SOURCES)}"
-            if directive.startswith("img-src ")
-            else directive
-            for directive in directives
-        ]
-    if cloud_url:
-        directives = [
-            f"{directive} {cloud_url}" if directive.startswith("connect-src ") else directive
-            for directive in directives
-        ]
-    tokens = framing.effective(frame_ancestors)
-    directives.append(f"frame-ancestors {framing.to_csp(tokens)}")
->>>>>>> theirs
     return "; ".join(directives)
 
 
 def apply_security_headers(
-<<<<<<< ours
     request: Request, response: Response, frame_ancestors: str | None = None
-=======
-    request: Request,
-    response: Response,
-    frame_ancestors: object = None,
-    map_tiles: bool = False,
-    cloud_url: str | None = None,
->>>>>>> theirs
 ) -> None:
     """Set the security headers on an outgoing response.
 
     Args:
         request: The request being answered, used to tell HTTPS from HTTP.
         response: Response to annotate, modified in place.
-<<<<<<< ours
         frame_ancestors: Optional CSP frame-ancestors value.
     """
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Content-Security-Policy"] = build_csp(frame_ancestors)
-=======
-        frame_ancestors: Configured frame_ancestors value, or None for the
-            default. See :func:`build_csp`.
-        map_tiles: Whether the map picker is enabled. See :func:`build_csp`.
-        cloud_url: This controller's cloud name. See :func:`build_csp`.
-    """
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Content-Security-Policy"] = build_csp(frame_ancestors, map_tiles, cloud_url)
->>>>>>> theirs
     response.headers["Permissions-Policy"] = _PERMISSIONS_POLICY
 
     # Only meaningful over TLS. A proxy terminating TLS tells us via

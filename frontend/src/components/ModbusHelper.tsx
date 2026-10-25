@@ -7,12 +7,7 @@ import {
 } from 'react-icons/fa';
 import ModbusDeviceCreator from './ModbusDeviceCreator';
 import axios from '@/api/axios';
-<<<<<<< ours
 import { useModbusCatalog } from '@/hooks/useModbusCatalog';
-=======
-import type { AxiosError } from 'axios';
-import { MODBUS_DEVICE_CATALOG } from '../generated/modbusDeviceCatalog';
->>>>>>> theirs
 import {
   Select,
   SelectContent,
@@ -1104,7 +1099,6 @@ export default function ModbusHelper() {
 
       {/* SIMULATOR Tab */}
       {activeTab === 'simulator' && showSimulator && (
-<<<<<<< ours
         <div className="space-y-4">
           {/* Create form card */}
           <div className="card bg-base-200 shadow-sm">
@@ -1135,29 +1129,6 @@ export default function ModbusHelper() {
                     </SelectContent>
                   </Select>
                 </div>
-=======
-        <>
-          <SettingsCard
-            icon={<FaFlask />}
-            title={t('modbus_helper.simulator_title')}
-            description={t('modbus_helper.simulator_hint')}
-          >
-            <div className="grid grid-cols-1 md:grid-cols-[1fr_6rem_auto] gap-4 items-end">
-              <FormField label={t('modbus_wizard.step2_title')}>
-                <Select value={selectedSimModel} onValueChange={setSelectedSimModel}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.values(MODBUS_DEVICE_CATALOG).map(d => (
-                      <SelectItem key={d.modelKey} value={d.modelKey}>
-                        {d.displayName} ({d.manufacturer})
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </FormField>
->>>>>>> theirs
 
               <FormField label={t('modbus_wizard.address')}>
                 <NumericInput

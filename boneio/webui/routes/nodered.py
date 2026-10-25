@@ -769,11 +769,7 @@ def _fetch_docker_hub_tags() -> list[dict]:
     return []
 
 
-<<<<<<< ours
 async def _fetch_docker_hub_tags_async() -> list[dict[str, str]]:
-=======
-async def _fetch_docker_hub_tags_async() -> list[dict]:
->>>>>>> theirs
     """Fetch Docker Hub tags without stalling the event loop.
 
     Same defect as the GitHub releases fetch: a blocking ``requests.get()``
@@ -796,74 +792,10 @@ async def _fetch_docker_hub_tags_async() -> list[dict]:
     return await asyncio.to_thread(_fetch_docker_hub_tags)
 
 
-<<<<<<< ours
-=======
-#: Docker's name for this machine's platform, as (architecture, variant).
-#: A variant of None matches any variant.
-_DOCKER_PLATFORMS: dict[str, tuple[str, str | None]] = {
-    "armv7l": ("arm", "v7"),
-    "aarch64": ("arm64", None),
-    "arm64": ("arm64", None),
-    "x86_64": ("amd64", None),
-    "amd64": ("amd64", None),
-}
-
-#: A versioned Node-RED tag: ``4.1.2``, ``4.1.2-22``, ``4.1.2-22-minimal``.
-#: The number after the version is the Node.js major, not a build.
-_VERSION_TAG_RE = re.compile(
-    r"^(?P<version>\d+\.\d+\.\d+)(?:-(?P<node>\d+))?(?P<minimal>-minimal)?$"
-)
-
-
-def _runs_here(tag: dict) -> bool:
-    """Whether Docker Hub has an image of *tag* for this machine.
-
-    Node-RED 5 stopped publishing arm/v7 images, which is what a BeagleBone
-    is. Offering such a tag sends the update into a pull that cannot succeed.
-    """
-    wanted = _DOCKER_PLATFORMS.get(platform.machine().lower())
-    if wanted is None:
-        return True
-    architecture, variant = wanted
-    return any(
-        image_arch == architecture and (variant is None or image_variant == variant)
-        for image_arch, image_variant in tag.get("platforms") or []
-    )
-
-
-def _size_here(images: list[dict]) -> int | None:
-    """Compressed size in bytes of the image Docker would pull on this machine."""
-    wanted = _DOCKER_PLATFORMS.get(platform.machine().lower())
-    if wanted is None:
-        return None
-    architecture, variant = wanted
-    for image in images:
-        if image.get("architecture") == architecture and (
-            variant is None or image.get("variant") == variant
-        ):
-            return image.get("size")
-    return None
-
-
-#: Docker keeps its images on ``/``. Unpacked they take roughly three times the
-#: compressed size, and the old image stays until the new one is in place.
-_PULL_MIN_FREE_MB = 500
-_PULL_MARGIN_MB = 100
-
-
-def _space_needed_mb(compressed_bytes: int | None) -> int:
-    """Free space on ``/`` a pull of an image this size must find first."""
-    if not compressed_bytes:
-        return _PULL_MIN_FREE_MB
-    return max(_PULL_MIN_FREE_MB, 4 * compressed_bytes // (1024 * 1024) + _PULL_MARGIN_MB)
-
-
->>>>>>> theirs
 @router.get("/update/check", response_model=UpdateCheckResponse)
 async def check_update() -> UpdateCheckResponse:
     """Check if Node-RED update is available.
 
-<<<<<<< ours
     # Determine if we are using minimal or standard variant
     is_minimal = "-minimal" in current_version
     
@@ -877,21 +809,6 @@ async def check_update() -> UpdateCheckResponse:
             latest_version=current_version,
             update_available=False,
         )
-=======
-    Only a tag of the same flavour qualifies: the same Node.js major and the
-    same minimal-or-not, so an update never swaps the runtime under the flows,
-    and only one with an image for this machine.
-    """
-    current_version = await asyncio.to_thread(_get_installed_version)
-    no_update = UpdateCheckResponse(
-        current_version=current_version,
-        latest_version=current_version,
-        update_available=False,
-    )
-    current = _VERSION_TAG_RE.match(current_version)
-    if current is None:
-        return no_update
->>>>>>> theirs
 
     tags = await _fetch_docker_hub_tags_async()
 

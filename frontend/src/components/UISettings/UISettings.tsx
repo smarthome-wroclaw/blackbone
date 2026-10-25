@@ -5,11 +5,8 @@ import { enrichRemoteDevicesWithWled } from '@/hooks/useActionEditorData';
 import { fetchSchema } from '@/api/schemaCache';
 import { buildLocalInputsSchema, withFilteredInputs } from './helpers/inputSchema';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-<<<<<<< ours
 import * as yaml from 'js-yaml';
 import { YAML_DUMP_SCHEMA } from '@/utils/yamlSchema';
-=======
->>>>>>> theirs
 import {
   convertFormDataToOriginalTypes,
   convertTimeperiodToMilliseconds,
@@ -24,18 +21,7 @@ import { STANDALONE_SECTIONS } from '@/components/UISettings/constants/standalon
 import { useTranslation } from '@/hooks/useTranslation';
 import { useConfig } from '@/contexts/ConfigContext';
 import { SectionContent, SettingsSidebar, SectionHeader } from './components';
-<<<<<<< ours
 import AccountsView from '../AccountsView';
-=======
-import {
-  SettingsActionBar,
-  SectionSaveContext,
-  SectionColumnContext,
-  type SectionSaveRegistration,
-  type SettingsPageWidth,
-} from './ui';
-import { cn } from '@/lib/utils';
->>>>>>> theirs
 import { useOverlayCheck } from './hooks/useOverlayCheck';
 import OverlayChangeDialog from './components/OverlayChangeDialog';
 import type { ConfigSection, SettingsFormData } from './types/section';
@@ -497,7 +483,6 @@ export default function UISettings() {
 
       // Enrich remote_devices with WLED discovery cache (effects, palettes, segments)
       // This data lives in .wled_cache.json, not in config.yaml
-<<<<<<< ours
       if (Array.isArray(configData.remote_devices)) {
         try {
           const { data: wledCache } = await axios.get<Record<string, Record<string, unknown[]>>>('/api/remote-devices/wled_info');
@@ -517,9 +502,6 @@ export default function UISettings() {
           console.debug('WLED cache not available, effect selectors will be hidden');
         }
       }
-=======
-      await enrichRemoteDevicesWithWled(configData.remote_devices);
->>>>>>> theirs
 
       // remote_inputs is now a top-level config section (no aggregation needed)
 
@@ -738,7 +720,6 @@ export default function UISettings() {
   }, []);
 
   /**
-<<<<<<< ours
    * Convert data to YAML format (with defaults stripped)
    */
   const convertToYaml = useCallback(
@@ -866,8 +847,6 @@ export default function UISettings() {
   );
 
   /**
-=======
->>>>>>> theirs
    * Handle form data change for a section
    */
   const handleSectionChange = (sectionName: string, newFormData: unknown) => {
@@ -1550,12 +1529,9 @@ export default function UISettings() {
         isSidebarOpen={isSidebarOpen}
         onSidebarToggle={setIsSidebarOpen}
         onNavigate={navigateToSection}
-<<<<<<< ours
         onRestore={() => restoreSection(activeSection)}
         onSave={() => saveSection(activeSection)}
         saveDisabled={activeSection === 'lox_udp' && !loxFormValid}
-=======
->>>>>>> theirs
       />
 
       {/* Main content area */}
@@ -1563,7 +1539,6 @@ export default function UISettings() {
           is from in here, so the header and the action bar can sit on it. */}
       <SectionColumnContext.Provider value={reportSectionColumn}>
       <div ref={contentRef} className="flex-1 flex flex-col overflow-hidden lg:min-h-0 pb-14 lg:pb-0">
-<<<<<<< ours
         {/* Tool sections (not schema-driven) */}
         {activeSection === 'accounts' ? (
           // Not schema-driven: accounts live in users.json, so this section has
@@ -1574,29 +1549,6 @@ export default function UISettings() {
             </div>
           </Suspense>
         ) : activeSection === 'binding_matrix' ? (
-=======
-        {/* Render header for all sections except yaml_editor (which is a full-height code editor) */}
-        {activeSection !== 'yaml_editor' && (
-          <SectionHeader
-            sectionName={activeSection}
-            sectionTitle={activeSectionTitle}
-            sectionDescription={activeSectionDescription}
-            width={sectionWidth}
-          />
-        )}
-
-        {/* Content area */}
-        {configLoadFailed ? (
-          /* Before the sections: they are built from the configuration, so
-             without it there is no section to show this in. */
-          <div className="flex flex-col items-center gap-4 px-6 py-16 text-center">
-            <p className="text-base-content/70 max-w-md">{t('settings.config_load_failed')}</p>
-            <button className="btn btn-primary btn-sm" onClick={() => void loadConfiguration()}>
-              {t('settings.config_load_retry')}
-            </button>
-          </div>
-        ) : activeSection === 'yaml_editor' ? (
->>>>>>> theirs
           <Suspense fallback={<div className="flex justify-center py-12"><span className="loading loading-ring loading-lg text-primary" /></div>}>
             <div className="flex-1 overflow-hidden h-full">
               {StandaloneComponent && <StandaloneComponent onRestartRequired={() => setRestartRequired(true)} />}
@@ -1653,7 +1605,6 @@ export default function UISettings() {
             </div>
           </Suspense>
         ) : activeSection_data && (
-<<<<<<< ours
           <>
             {/* Header */}
             <SectionHeader
@@ -1715,30 +1666,6 @@ export default function UISettings() {
                     onSaveSection={saveSection}
                     onLoxValidationChange={setLoxFormValid}
                   />
-=======
-          /* A column, so the action bar can be pushed to the bottom edge when
-             the section is short. Without it the bar landed wherever the
-             content happened to end — a full-width rule with a lone button
-             floating in the middle of an empty page. */
-          <div className="stg-canvas flex-1 overflow-y-auto flex flex-col px-4 pt-4 sm:px-6 sm:pt-6 lg:px-8 lg:pt-8">
-            {/* Grows to fill a short section, so the bar below stays at the
-                bottom edge; the padding keeps the last card off it. */}
-            <div className="flex-1 pb-5">
-              {formReady ? <SectionContent
-                activeSection={activeSection}
-                activeSectionData={activeSection_data}
-                formData={formData}
-                originalData={originalData}
-                schemaLoaded={schemaLoaded}
-                editItemName={editItemName || undefined}
-                onEditItemOpened={clearEditParam}
-                onSectionChange={handleSectionChange}
-                onSaveSection={saveSection}
-                onLoxValidationChange={setLoxFormValid}
-              /> : (
-                <div className="flex justify-center py-16">
-                  <span className="loading loading-spinner loading-lg text-primary" />
->>>>>>> theirs
                 </div>
               )}
             </div>

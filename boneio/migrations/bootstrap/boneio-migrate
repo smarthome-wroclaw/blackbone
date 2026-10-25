@@ -65,10 +65,6 @@ ALLOWED_ACTIONS = {
     "pip_install_wheel",
     "disable_apparmor_profiles",
     "prune_orphaned_journal_dirs",
-<<<<<<< ours
-=======
-    "set_file_permissions",
->>>>>>> theirs
 }
 
 # Debian package names accepted by the apt_install action

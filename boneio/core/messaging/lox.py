@@ -20,10 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from boneio.const import COVER, OFF, ON, cover_actions, output_actions
 from boneio.const import NONE as OUTPUT_NONE
-<<<<<<< ours
-=======
-from boneio.const import OFF, ON, ONLINE, cover_actions, output_actions
->>>>>>> theirs
 from boneio.core.messaging.basic import MessageBus
 
 if TYPE_CHECKING:
@@ -413,7 +409,6 @@ class LoxUDPClient(MessageBus):
         if self._transport:
             self._transport.sendto(b"boneio=offline", (self.host, self.send_port))
 
-<<<<<<< ours
     async def _resync_loop(self) -> None:
         """Periodically publish known states to heal dropped UDP packets."""
         try:
@@ -458,16 +453,6 @@ class LoxUDPClient(MessageBus):
 
     async def subscribe_and_listen(self, topic: str, callback: Callable[[str, str], Coroutine[Any, Any, None]]) -> None:
         """Register a listener for a topic pattern."""
-=======
-    async def subscribe_and_listen(
-        self,
-        topic: str,
-        callback: Callable[..., Coroutine[Any, Any, None]],
-        *,
-        retain_aware: bool = False,
-    ) -> None:
-        """Register a listener for a topic pattern. Lox has no retained messages."""
->>>>>>> theirs
         self._listeners[topic] = callback
 
     async def unsubscribe_and_stop_listen(self, topic: str) -> None:

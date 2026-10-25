@@ -19,19 +19,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
-<<<<<<< ours
 from boneio.core.config.yaml_util import load_config_from_file, load_yaml_file, normalize_board_name
 from boneio.core.update_source import parse_pypi_package_versions, resolve_custom_update_target
-=======
-from boneio.core.atomic_file import write_atomically
-from boneio.core.config.yaml_util import (
-    load_config_from_file,
-    load_yaml_file,
-    normalize_board_name,
-    normalize_version,
-)
-from boneio.factory_config import OLDEST_REVISION, template_dir, type_folder
->>>>>>> theirs
 from boneio.version import __version__
 from boneio.webui.routes.system import get_config_helper
 from boneio.webui.services.logs import is_running_as_service
@@ -133,11 +122,7 @@ def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | Non
 
 
 async def _fetch_github_releases_async(
-<<<<<<< ours
     repo: str = GITHUB_RELEASES_REPO,
-=======
-    repo: str = "boneIO-eu/app_black",
->>>>>>> theirs
 ) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API without stalling the event loop.
 
@@ -162,20 +147,7 @@ async def _fetch_github_releases_async(
         _LOGGER.debug("Using cached GitHub releases (%d entries)", len(cached))
         return cached, None
 
-<<<<<<< ours
     return await asyncio.to_thread(_fetch_github_releases, repo)
-=======
-    # One fetch at a time. The update page asks for the update check and the
-    # version list at once, and with the cache expired each went to GitHub on
-    # its own - two downloads of the same hundred releases, about 4 s apiece
-    # on a BeagleBone, that together outlasted the panel's timeout. The second
-    # caller waits for the first and is answered from the cache it fills.
-    async with _github_fetch_lock():
-        cached = _get_cached_releases()
-        if cached is not None:
-            return cached, None
-        return await asyncio.to_thread(_fetch_github_releases, repo)
->>>>>>> theirs
 
 
 def get_manager():

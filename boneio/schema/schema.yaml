@@ -355,54 +355,16 @@ web:
       meta:
         label: Web security headers
       schema:
-<<<<<<< ours
         frame_ancestors:
           type: string
           required: False
           nullable: True
-=======
-        map_tiles:
-          type: boolean
-          required: False
-          default: False
-          meta:
-            label: Allow the location picker to load a map
-            description: |
-              Off by default. When on, the Location page can show an
-              OpenStreetMap map to pick the coordinates from, and the panel's
-              Content-Security-Policy gains the OpenStreetMap tile servers in
-              its `img-src` directive.
-
-              That is a real loosening, not a formality. An image URL is an
-              outbound channel: someone who already had script execution in the
-              panel could encode data into a tile path and read it out of
-              someone else's access log. The map is a convenience, so it is
-              opt-in and nobody pays for it who is not using it.
-
-              The tiles are fetched by your browser, not by the controller, so
-              this works on a device with no route to the internet — as long as
-              the computer you open the panel from has one. Without a map the
-              coordinates can still be typed in, or filled from the timezone.
-
-              Tiles come from openstreetmap.org, which sees the area you are
-              looking at. Map data © OpenStreetMap contributors.
-
-        frame_ancestors:
-          type:
-            - list
-            - string
-          required: False
-          nullable: True
-          schema:
-            type: string
->>>>>>> theirs
           meta:
             label: Which sites may embed this panel in a frame
             description: |
               Sets the Content-Security-Policy frame-ancestors directive, which
               is what protects the panel from clickjacking.
 
-<<<<<<< ours
               Left unset (the default) any site may frame the panel, which is
               how boneIO has always behaved. It stays the default because the
               panel is meant to be embeddable in a Home Assistant ingress
@@ -412,34 +374,6 @@ web:
                 'self'                      only this device
                 'self' https://ha.local:8123   also that Home Assistant
                 'none'                      never framed anywhere
-=======
-              Unset means `self` since 1.6: only this device may frame the
-              panel. That is also what the boneIO Black add-on for Home
-              Assistant needs — its nginx proxies each controller, so the
-              framed page is served on Home Assistant's own origin and is
-              same-origin with the dashboard framing it.
-
-              A list of plain tokens. Write `self`, not `'self'` — the quotes
-              CSP wants are added when the header is built, so nothing here
-              has to survive YAML stripping them:
-
-                frame_ancestors:
-                  - self
-
-              Add an address when a dashboard frames this device directly, with
-              an iframe card or panel_iframe rather than through the add-on:
-
-                frame_ancestors:
-                  - self
-                  - https://homeassistant.local:8123
-
-              A single `*` lifts the restriction entirely. It cannot be
-              combined — alongside it, every other entry means nothing.
-
-              A plain string still works, so configs written before the list
-              existed keep loading. The Security section in the panel edits
-              this without the syntax.
->>>>>>> theirs
 
               X-Frame-Options is deliberately not sent: it cannot name an
               allowed origin, so it could not express the ingress case.

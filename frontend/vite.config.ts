@@ -94,7 +94,6 @@ export default defineConfig(({ mode }) => {
       }),
     ],
     resolve: {
-<<<<<<< ours
       alias: [
         // monaco-editor 0.56 added an exports map ("./*": "./esm/vs/*.js") that
         // already injects the "esm/vs/" prefix. Deep imports that spell it out
@@ -103,40 +102,6 @@ export default defineConfig(({ mode }) => {
         // 'monaco-editor/esm/vs/editor/editor.worker.js' and can't be edited.
         { find: /^monaco-editor\/esm\/vs\//, replacement: "monaco-editor/" },
         { find: "@", replacement: path.resolve(__dirname, "./src") },
-=======
-      // The array form, not the object form, because the dompurify entry below
-      // has to be a regular expression.
-      alias: [
-        { find: "@", replacement: path.resolve(import.meta.dirname, "./src") },
-        // monaco-yaml's worker imports Prettier unconditionally for its
-        // optional "format document" provider, which only registers when
-        // configureMonacoYaml() is given format.enable. boneIO never enables
-        // it, so stub Prettier out and keep ~420 kB out of the YAML worker.
-        { find: "prettier/standalone", replacement: path.resolve(import.meta.dirname, "./src/stubs/prettier-standalone.ts") },
-        { find: "prettier/plugins/yaml", replacement: path.resolve(import.meta.dirname, "./src/stubs/prettier-plugin.ts") },
-        { find: "prettier/plugins/estree", replacement: path.resolve(import.meta.dirname, "./src/stubs/prettier-plugin.ts") },
-        // monaco does not import the dompurify it declares in package.json: it
-        // imports a copy vendored into its own ESM tree, and on 0.55.1 that
-        // copy is 3.2.7, which every open DOMPurify advisory covers. Lifting
-        // the npm package (see pnpm-workspace.yaml) fixes the dependency graph
-        // and silences the alerts but does not touch the sanitiser that ships,
-        // so send the vendored path at the real package too. Both expose
-        // exactly `export { purify as default }`, so it is a drop-in.
-        //
-        // It has to be a regex, and it has to match the *whole* specifier:
-        // monaco imports the file relatively, as `./dompurify/dompurify.js`, so
-        // an alias keyed on the package path never matches and fails silently,
-        // while a regex matching only part of it leaves the unmatched half
-        // behind and the build stops on `Could not load .dompurify`. That one
-        // string is the only way the vendored copy is reached in the whole
-        // tree, monaco-yaml included.
-        //
-        // scripts/check-bundled-sanitizer.cjs runs at the end of every build
-        // and reads the emitted chunks, because an alias that stops matching
-        // does not fail anything on its own. Drop both this entry and that
-        // check once monaco vendors 3.4.13 or later.
-        { find: /^\.\/dompurify\/dompurify\.js$/, replacement: "dompurify" },
->>>>>>> theirs
       ],
     },
     build: {
