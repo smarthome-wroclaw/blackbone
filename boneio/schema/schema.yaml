@@ -110,34 +110,6 @@ lox_udp:
       default: 4445
       meta:
         label: Port to listen for incoming UDP messages
-    resync_interval:
-      required: False
-      type: integer
-      default: 30
-      min: 0
-      meta:
-        label: Lox UDP state refresh interval
-        description: "Seconds between full state refresh packets sent to Lox. Set to 0 to disable periodic refresh."
-    boneio_host:
-      required: False
-      type: string
-      regex: '^(((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)$'
-      meta:
-        label: BoneIO host
-        description: "IPv4 address or hostname of this BoneIO device, used when generating Lox Config templates."
-    mqtt_bridge:
-      required: False
-      type: list
-      check_with: mqtt_bridge_device_id_uniqueness
-      schema:
-        type: dict
-        schema:
-          topic:
-            required: True
-            type: string
-          device_id:
-            required: True
-            type: string
 
 mqtt:
   type: dict
@@ -355,25 +327,72 @@ web:
       meta:
         label: Web security headers
       schema:
+        map_tiles:
+          type: boolean
+          required: False
+          default: False
+          meta:
+            label: Allow the location picker to load a map
+            description: |
+              Off by default. When on, the Location page can show an
+              OpenStreetMap map to pick the coordinates from, and the panel's
+              Content-Security-Policy gains the OpenStreetMap tile servers in
+              its `img-src` directive.
+
+              That is a real loosening, not a formality. An image URL is an
+              outbound channel: someone who already had script execution in the
+              panel could encode data into a tile path and read it out of
+              someone else's access log. The map is a convenience, so it is
+              opt-in and nobody pays for it who is not using it.
+
+              The tiles are fetched by your browser, not by the controller, so
+              this works on a device with no route to the internet — as long as
+              the computer you open the panel from has one. Without a map the
+              coordinates can still be typed in, or filled from the timezone.
+
+              Tiles come from openstreetmap.org, which sees the area you are
+              looking at. Map data © OpenStreetMap contributors.
+
         frame_ancestors:
-          type: string
+          type:
+            - list
+            - string
           required: False
           nullable: True
+          schema:
+            type: string
           meta:
             label: Which sites may embed this panel in a frame
             description: |
               Sets the Content-Security-Policy frame-ancestors directive, which
               is what protects the panel from clickjacking.
 
-              Left unset (the default) any site may frame the panel, which is
-              how boneIO has always behaved. It stays the default because the
-              panel is meant to be embeddable in a Home Assistant ingress
-              iframe, and locking it down blindly would break those dashboards.
+              Unset means `self` since 1.6: only this device may frame the
+              panel. That is also what the boneIO Black add-on for Home
+              Assistant needs — its nginx proxies each controller, so the
+              framed page is served on Home Assistant's own origin and is
+              same-origin with the dashboard framing it.
 
-              Set it once you know how your installation embeds the panel:
-                'self'                      only this device
-                'self' https://ha.local:8123   also that Home Assistant
-                'none'                      never framed anywhere
+              A list of plain tokens. Write `self`, not `'self'` — the quotes
+              CSP wants are added when the header is built, so nothing here
+              has to survive YAML stripping them:
+
+                frame_ancestors:
+                  - self
+
+              Add an address when a dashboard frames this device directly, with
+              an iframe card or panel_iframe rather than through the add-on:
+
+                frame_ancestors:
+                  - self
+                  - https://homeassistant.local:8123
+
+              A single `*` lifts the restriction entirely. It cannot be
+              combined — alongside it, every other entry means nothing.
+
+              A plain string still works, so configs written before the list
+              existed keep loading. The Security section in the panel edits
+              this without the syntax.
 
               X-Frame-Options is deliberately not sent: it cannot name an
               allowed origin, so it could not express the ingress case.
@@ -1622,28 +1641,6 @@ cover:
         required: True
         meta:
           label: ID of close relay of output.
-      stop_relay:
-        type: string
-        required: False
-        meta:
-          label: Optional relay pulsed when stopping cover movement.
-      stop_relay_default_state:
-        type: boolean
-        required: False
-        default: False
-        meta:
-          label: Whether the stop relay is on in its resting state.
-      stop_relay_duration:
-        type:
-          - string
-          - timeperiod
-        coerce:
-          - str
-          - positive_time_period
-        required: False
-        default: 500ms
-        meta:
-          label: Duration of stop relay pulse. Example 500ms.
       platform:
         type: string
         required: True
@@ -2873,3 +2870,4 @@ boneio:
           Use this when restoring config from a different device (e.g., RMA replacement).
           Format: blk followed by 6 hex characters (e.g., blk8c7df0).
           WARNING: Two devices with the same serial on the same MQTT broker will conflict!
+

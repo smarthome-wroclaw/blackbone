@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -23,12 +25,12 @@ from boneio.webui.routes.accounts import router as accounts_router
 def store(tmp_path):
     store = UserStore(tmp_path / USERS_FILENAME)
     store.load()
-    set_jwt_secret("test-secret-for-account-tests")
+    set_jwt_secret("test-secret-for-account-tests-----------")
     set_auth_config({})
     set_allow_anonymous(False)
     set_user_store(store)
     store.add_user("pawel", "haslo-admina", Role.ADMIN)
-    store.add_user("gosc", "haslo-goscia", Role.VIEWER)
+    store.add_user("gosc", "poufne-haslo", Role.VIEWER)
     yield store
     set_user_store(None)
 
@@ -42,7 +44,10 @@ def client(store):
 
 
 def _as(user: str, role: str) -> dict:
-    return {"Authorization": f"Bearer {create_token({'sub': user, 'role': role})}"}
+    # As right after a login: the management routes want the password typed
+    # within the last few minutes, which test_reauth.py covers.
+    token = create_token({"sub": user, "role": role, "auth_time": int(time.time())})
+    return {"Authorization": f"Bearer {token}"}
 
 
 ADMIN = ("pawel", "admin")
@@ -225,7 +230,7 @@ def test_viewer_may_change_their_own_password(client, store):
     response = client.put(
         "/api/account/password",
         headers=_as(*VIEWER),
-        json={"current_password": "haslo-goscia", "new_password": "nowe-haslo-123"},
+        json={"current_password": "poufne-haslo", "new_password": "nowe-haslo-123"},
     )
     assert response.status_code == 200
     assert store.verify_credentials("gosc", "nowe-haslo-123") is not None
@@ -238,15 +243,18 @@ def test_own_password_change_needs_the_current_one(client, store):
         headers=_as(*VIEWER),
         json={"current_password": "zgadywane", "new_password": "nowe-haslo-123"},
     )
-    assert response.status_code == 401
-    assert store.verify_credentials("gosc", "haslo-goscia") is not None
+    # 403, not 401: the session is still good, and the panel signs out on 401.
+    assert response.status_code == 403
+    assert response.json()["code"] == "current_password_wrong"
+    assert isinstance(response.json()["attempts_left"], int)
+    assert store.verify_credentials("gosc", "poufne-haslo") is not None
 
 
 def test_own_password_change_enforces_the_policy(client):
     assert client.put(
         "/api/account/password",
         headers=_as(*VIEWER),
-        json={"current_password": "haslo-goscia", "new_password": "krotkie"},
+        json={"current_password": "poufne-haslo", "new_password": "krotkie"},
     ).status_code == 422
 
 
@@ -255,7 +263,7 @@ def test_self_service_route_cannot_touch_other_accounts(client, store):
     client.put(
         "/api/account/password",
         headers=_as(*VIEWER),
-        json={"current_password": "haslo-goscia", "new_password": "nowe-haslo-123"},
+        json={"current_password": "poufne-haslo", "new_password": "nowe-haslo-123"},
     )
     assert store.verify_credentials("pawel", "haslo-admina") is not None
 
@@ -296,7 +304,7 @@ def test_whoami_reports_anonymous_on_an_unprovisioned_device(tmp_path):
     empty = UserStore(tmp_path / "empty" / USERS_FILENAME)
     empty.path.parent.mkdir(parents=True, exist_ok=True)
     empty.load()
-    set_jwt_secret("test-secret-for-account-tests")
+    set_jwt_secret("test-secret-for-account-tests-----------")
     set_auth_config({})
     set_user_store(empty)
     set_allow_anonymous(True)

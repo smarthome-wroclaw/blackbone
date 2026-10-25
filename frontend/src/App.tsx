@@ -15,7 +15,6 @@ const lazyImports = {
   UISettings: () => import('./components/UISettings/UISettings'),
   NodeRedView: () => import('./components/NodeRedView'),
   TemplatesView: () => import('./components/TemplatesView'),
-  AddonsView: () => import('./components/AddonsView'),
 } as const;
 
 const DiagnosticsView = lazy(lazyImports.DiagnosticsView);
@@ -27,7 +26,6 @@ const HelpView = lazy(lazyImports.HelpView);
 const UISettings = lazy(lazyImports.UISettings);
 const NodeRedView = lazy(lazyImports.NodeRedView);
 const TemplatesView = lazy(lazyImports.TemplatesView);
-const AddonsView = lazy(lazyImports.AddonsView);
 
 /**
  * Prefetch all lazy route chunks in the background after initial render.
@@ -46,7 +44,6 @@ function prefetchRouteChunks() {
     lazyImports.UISettings,
     lazyImports.DiagnosticsView,
     lazyImports.TemplatesView,
-    lazyImports.AddonsView,
     lazyImports.HelpView,
     lazyImports.NodeRedView,
   ];
@@ -60,6 +57,7 @@ function prefetchRouteChunks() {
 
 import LoginView from './components/LoginView';
 import OnboardingWizard from './components/OnboardingWizard';
+import SecurityUpdatePrompt from './components/SecurityUpdatePrompt';
 import Layout from './components/Layout';
 import { useWebSocket, requestStateResync, StateUpdate, isCoverEvent, InputEvent, OutputEvent, SensorEvent, CoverEvent, ModbusDeviceEvent, GroupEvent, isOutputEvent, isGroupEvent, isConfigReloadEvent } from './hooks/useWebSocket';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -101,10 +99,11 @@ function ProtectedRoute({
   const { isAuthenticated, isLoading: authLoading, isAuthRequired, isAdmin, role } = useAuth();
   const { isApiAvailable, isLoading: initLoading, needsOnboarding, panelState } = useAppInit();
 
-// Protected route component
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading: authLoading, isAuthRequired } = useAuth();
-  const { isApiAvailable, isLoading: initLoading, needsOnboarding } = useAppInit();
+  // Read once per mount: the value cannot change while this render tree lives,
+  // and touching localStorage on every render would be pure waste.
+  const [showShellWhileLoading] = useState(() =>
+    readProvisioningHint(window.localStorage, window.__BONEIO_BASE_PATH__),
+  );
 
   // API confirmed unavailable after retries, or a panel the service worker
   // kept from before an update: say so instead of rendering it.
@@ -545,20 +544,8 @@ function AppContent() {
             </Layout>
           </ProtectedRoute>
         } />
-        <Route path="/addons" element={
-          <ProtectedRoute>
-            <Layout>
-              <AddonsView />
-            </Layout>
-          </ProtectedRoute>
-        } />
-        <Route path="/tools" element={
-          <ProtectedRoute>
-            <Layout>
-              <Tools />
-            </Layout>
-          </ProtectedRoute>
-        } />
+        {/* The Tools page was four bus scans and an export; the scans are on Diagnostics and the export is a settings section. Kept as a redirect for bookmarks. */}
+        <Route path="/tools" element={<Navigate to="/diagnostics/i2c" replace />} />
         <Route path="/help" element={
           <ProtectedRoute>
             <Layout>

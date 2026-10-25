@@ -808,6 +808,10 @@ async def update_section_content(section: str, data: dict | list = Body(...)):
                 },
             )
 
+    if section == "web":
+        # It reads the compose .env: off the event loop.
+        await asyncio.to_thread(_check_web_port_free, await _stored_web_section(), data)
+
     # Strip empty string values from data to prevent cerberus coercion failures
     # (e.g. bounce_time: '' instead of being omitted).
     def _strip_empty_strings(obj: dict | list) -> dict | list:
@@ -827,6 +831,15 @@ async def update_section_content(section: str, data: dict | list = Body(...)):
         return obj
 
     data = _strip_empty_strings(data)
+
+    # Captured before the write: the cloud toggle is acted on rather than
+    # merely stored, and afterwards there is nothing left to compare against.
+    previous_section = (_config_cache["data"] or {}).get(section)
+
+    # Before the write, and outside the try below: that one turns every
+    # exception into a 500, and this refusal has a reason worth reading.
+    if section == "web":
+        await _guard_expose_change(previous_section, data)
 
     try:
         t_route_start = time.perf_counter()

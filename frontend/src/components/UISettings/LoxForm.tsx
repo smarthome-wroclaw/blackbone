@@ -2,15 +2,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import HelpLabel from './components/HelpLabel';
 import { NumericInput } from '@/components/ui/NumericInput';
-import MqttDeviceGroups, { type LoxMqttBridgeMapping } from './MqttDeviceGroups';
-
-export interface LoxConfigData {
-  enabled?: boolean;
-  host?: string;
-  send_port?: number;
-  listen_port?: number;
-  mqtt_bridge?: LoxMqttBridgeMapping[];
-}
 
 /** The `lox` section as edited here (other keys pass through untouched). */
 export interface LoxFormData {
@@ -22,8 +13,8 @@ export interface LoxFormData {
 }
 
 interface LoxFormProps {
-  data?: LoxConfigData;
-  onChange: (data: LoxConfigData) => void;
+  data: LoxFormData;
+  onChange: (data: LoxFormData) => void;
   onValidationChange?: (isValid: boolean) => void;
 }
 
@@ -41,7 +32,7 @@ function isValidIPv4(ip: string): boolean {
 
 /**
  * Validate a hostname string (RFC 1123).
- * Accepts formats like: miniserver.local, lox.home, my-server
+ * Accepts formats like: miniserver.local, loxone.home, my-server
  */
 function isValidHostname(host: string): boolean {
   if (host.length > 253) return false;
@@ -58,36 +49,25 @@ function isValidHost(host: string): boolean {
 
 /**
  * Custom form for Lox UDP section configuration.
- * Fields: host, send/listen ports, MQTT bridge mappings, and Lox template actions.
+ * Fields: host (required, validated as IPv4 or hostname), send_port, listen_port + download template button.
  */
 const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange }) => {
   const { t } = useTranslation();
   const [hostTouched, setHostTouched] = useState(false);
 
   const host = data?.host || '';
-  const mappings = data?.mqtt_bridge ?? [];
   const hostEmpty = !host.trim();
   const hostInvalid = !hostEmpty && !isValidHost(host.trim());
   const hostError = hostTouched && (hostEmpty || hostInvalid);
-  const deviceIdCounts = mappings.reduce<Record<string, number>>((counts, mapping) => {
-    const deviceId = mapping.device_id.trim();
-    if (deviceId) counts[deviceId] = (counts[deviceId] ?? 0) + 1;
-    return counts;
-  }, {});
-  const mappingsValid = mappings.every(mapping => (
-    mapping.topic.trim() !== ''
-    && mapping.device_id.trim() !== ''
-    && deviceIdCounts[mapping.device_id.trim()] === 1
-  ));
-  const isValid = !hostEmpty && !hostInvalid && mappingsValid;
+  const isValid = !hostEmpty && !hostInvalid;
 
   // Notify parent about validation state
   useEffect(() => {
     onValidationChange?.(isValid);
   }, [isValid, onValidationChange]);
 
-  const handleChange = useCallback(<K extends keyof LoxConfigData>(field: K, value: LoxConfigData[K]) => {
-    onChange({ ...(data ?? {}), [field]: value });
+  const handleChange = useCallback((field: string, value: unknown) => {
+    onChange({ ...data, [field]: value });
   }, [data, onChange]);
 
   const handleDownloadTemplate = () => {
@@ -159,15 +139,6 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
         <HelpLabel>{t('lox_config.listen_port_help')}</HelpLabel>
       </div>
 
-      {/* MQTT to Lox Bridge */}
-      <div className="divider">{t('lox_config.mqtt_bridge_section')}</div>
-
-      <MqttDeviceGroups
-        mappings={mappings}
-        deviceIdCounts={deviceIdCounts}
-        onChange={nextMappings => handleChange('mqtt_bridge', nextMappings)}
-      />
-
       {/* Lox Config Template Actions */}
       <div className="divider">{t('lox_config.template_section')}</div>
 
@@ -189,9 +160,7 @@ const LoxForm: React.FC<LoxFormProps> = ({ data, onChange, onValidationChange })
         </button>
       </div>
 
-      <HelpLabel className="overflow-x-auto [&>span]:max-w-none [&>span]:whitespace-nowrap">
-        {t('lox_config.template_help')}
-      </HelpLabel>
+      <HelpLabel>{t('lox_config.template_help')}</HelpLabel>
     </div>
   );
 };

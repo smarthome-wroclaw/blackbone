@@ -13,14 +13,19 @@ import socket
 import subprocess
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
-from urllib.parse import quote
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
-from boneio.core.config.yaml_util import load_config_from_file, load_yaml_file, normalize_board_name
-from boneio.core.update_source import parse_pypi_package_versions, resolve_custom_update_target
+from boneio.core.atomic_file import write_atomically
+from boneio.core.config.yaml_util import (
+    load_config_from_file,
+    load_yaml_file,
+    normalize_board_name,
+    normalize_version,
+)
+from boneio.factory_config import OLDEST_REVISION, template_dir, type_folder
 from boneio.version import __version__
 from boneio.webui.routes.system import get_config_helper
 from boneio.webui.services.logs import is_running_as_service
@@ -33,9 +38,6 @@ from boneio.core import system_ops
 _LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["update"])
-
-# GitHub repository whose releases drive the update checker.
-GITHUB_RELEASES_REPO = "smarthome-wroclaw/blackbone"
 
 # ── GitHub releases cache ────────────────────────────────────────────────
 # Unauthenticated GitHub API allows 60 req/h per IP.
@@ -80,7 +82,7 @@ def _get_cached_releases() -> list | None:
     return None
 
 
-def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | None, str | None]:
+def _fetch_github_releases(repo: str = "boneIO-eu/app_black") -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API with caching.
 
     BLOCKING. Do not call from a coroutine — use
@@ -122,7 +124,7 @@ def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | Non
 
 
 async def _fetch_github_releases_async(
-    repo: str = GITHUB_RELEASES_REPO,
+    repo: str = "boneIO-eu/app_black",
 ) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API without stalling the event loop.
 
@@ -147,7 +149,16 @@ async def _fetch_github_releases_async(
         _LOGGER.debug("Using cached GitHub releases (%d entries)", len(cached))
         return cached, None
 
-    return await asyncio.to_thread(_fetch_github_releases, repo)
+    # One fetch at a time. The update page asks for the update check and the
+    # version list at once, and with the cache expired each went to GitHub on
+    # its own - two downloads of the same hundred releases, about 4 s apiece
+    # on a BeagleBone, that together outlasted the panel's timeout. The second
+    # caller waits for the first and is answered from the cache it fills.
+    async with _github_fetch_lock():
+        cached = _get_cached_releases()
+        if cached is not None:
+            return cached, None
+        return await asyncio.to_thread(_fetch_github_releases, repo)
 
 
 def get_manager():
@@ -283,6 +294,8 @@ async def check_update():
                 "release_url": release['html_url'],
                 "published_at": release['published_at'],
             }
+            if tag.startswith("v0."):
+                continue
             available_versions.append(ver_info)
             
             try:
@@ -388,44 +401,6 @@ async def get_update_status():
 class UpdateRequest(BaseModel):
     """Request model for update endpoint."""
     version: str | None = None
-    source_type: Literal["package", "repository"] | None = None
-    source: str | None = None
-    source_version: str | None = None
-
-
-@router.get("/update/pypi-versions")
-async def get_pypi_versions(package: str):
-    """Return available versions for a validated PyPI package name."""
-    try:
-        target = resolve_custom_update_target("package", package)
-    except ValueError as exc:
-        return {"status": "error", "message": str(exc)}
-
-    try:
-        import requests
-
-        response = await asyncio.to_thread(
-            requests.get,
-            f"https://pypi.org/pypi/{quote(target.pip_argument, safe='')}/json",
-            timeout=10,
-        )
-    except Exception as exc:
-        _LOGGER.warning("Could not query PyPI package %s: %s", target.label, exc)
-        return {"status": "error", "message": "Could not connect to PyPI"}
-
-    if response.status_code == 404:
-        return {"status": "error", "message": "Package was not found on PyPI"}
-    if response.status_code != 200:
-        return {"status": "error", "message": f"PyPI returned HTTP {response.status_code}"}
-
-    try:
-        payload = response.json()
-    except ValueError:
-        return {"status": "error", "message": "PyPI returned an invalid response"}
-    package_info = parse_pypi_package_versions(payload)
-    if not package_info["versions"]:
-        return {"status": "error", "message": "Package has no installable releases"}
-    return {"status": "success", **package_info}
 
 
 @router.post("/update")
@@ -457,35 +432,12 @@ async def update_boneio(background_tasks: BackgroundTasks, request: UpdateReques
         return {"status": "error", "message": "Update already in progress"}
     
     target_version = request.version
-    install_target = None
-    target_label = None
-    if (
-        request.source_type is not None
-        or request.source is not None
-        or request.source_version is not None
-    ):
-        if request.source_type is None or request.source is None:
-            return {"status": "error", "message": "Source type and source are both required"}
-        if request.version is not None:
-            return {"status": "error", "message": "Version cannot be combined with a custom source"}
-        try:
-            custom_target = resolve_custom_update_target(
-                request.source_type,
-                request.source,
-                version=request.source_version,
-            )
-        except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
-        if request.source_type == "package" and request.source_version is None:
-            return {"status": "error", "message": "Select a package version"}
-        install_target = custom_target.pip_argument
-        target_label = custom_target.label
     current_version = __version__
     
     _reset_update_status()
     _update_status["status"] = "running"
     _update_status["old_version"] = current_version
-    _update_status["target_version"] = target_label or target_version
+    _update_status["target_version"] = target_version
 
     def _on_progress(progress: int, step: str, log_msg: str | None = None) -> None:
         """Callback from UpdateManager to track progress for WebUI."""
@@ -506,8 +458,6 @@ async def update_boneio(background_tasks: BackgroundTasks, request: UpdateReques
             await manager.update_manager.perform_update(
                 target_version=target_version,
                 on_progress=_on_progress,
-                install_target=install_target,
-                target_label=target_label,
             )
         except Exception as e:
             _update_status["status"] = "error"
@@ -576,7 +526,7 @@ async def rollback_update(request: RollbackRequest, background_tasks: Background
             ver_lower = target_version.lower()
             if any(x in ver_lower for x in ['dev', 'alpha', 'beta', 'rc']):
                 pip_cmd.append("--pre")
-            pip_cmd.append(f"blackbone=={target_version}")
+            pip_cmd.append(f"boneio=={target_version}")
             
             result = subprocess.run(
                 pip_cmd,
@@ -619,7 +569,7 @@ async def list_available_versions():
     """
     List available BoneIO versions from GitHub releases.
     
-    These versions can be used for rollback via pip install blackbone=={version}.
+    These versions can be used for rollback via pip install boneio=={version}.
     
     Returns:
         List of available versions.

@@ -30,7 +30,15 @@ interface WebServerFormProps {
 
 /**
  * Custom form for Web Server section configuration.
- * Fields: port, proxy port, cloud registration, PWA name.
+ * Fields: port, exposure, location map, cloud registration, PWA name.
+ *
+ * The reverse proxy port is deliberately not among them. It only ever set the
+ * port in the link Home Assistant shows, the built-in proxy is on 8443 either
+ * way, and a device reachable only through that proxy now derives the port by
+ * itself — so the field asked a question almost nobody had, in a shape (a
+ * number) that could not answer it for the few who did. It stays in the schema
+ * and is still honoured: the validator purges unknown keys, so dropping it
+ * there would delete it from an existing config.yaml on the next save.
  *
  * Credentials are deliberately absent. From 1.6 accounts live in users.json
  * with hashed passwords and roles, managed by the Accounts section rendered
@@ -104,25 +112,6 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
     }
   };
 
-  const handleFixPermissions = async (password: string) => {
-    setIsFixingPermissions(true);
-    setFixResult(null);
-    setSudoError(null);
-    try {
-      const { data: res } = await axios.post('/api/cloud/fix-permissions', { password });
-      setFixResult(res);
-      if (res.status === 'success') {
-        setComposeWritable(true);
-        setShowSudoDialog(false);
-      } else {
-        setSudoError(res.message || 'Fix failed');
-      }
-    } catch (err: any) {
-      setSudoError(err.response?.data?.detail || err.message || 'Request failed');
-    } finally {
-      setIsFixingPermissions(false);
-    }
-  };
 
   return (
     <div className="stg-cols">
@@ -141,18 +130,54 @@ const WebServerForm: React.FC<WebServerFormProps> = ({ data, onChange }) => {
         message={t('webserver.builtin_proxy')}
       />
 
+      {/* Whether the panel's own port answers on the network at all. The
+          Security section offers the same switch with a check that the proxy
+          is really serving first; here it is simply the setting, so somebody
+          looking for it finds it where the other web settings are. */}
+      <div className="form-control flex flex-col gap-2">
+        <label className="label cursor-pointer justify-start gap-3">
+          <input
+            type="checkbox"
+            className="toggle toggle-primary shrink-0"
+            checked={data?.expose === 'proxy'}
+            onChange={(e) =>
+              handleChange('expose', e.target.checked ? 'proxy' : 'all')
+            }
+          />
+          <span className="label-text font-medium">{t('webserver.expose_proxy')}</span>
+        </label>
+        <HelpLabel className="pt-0">{t('webserver.expose_proxy_help')}</HelpLabel>
+      </div>
+
+      <div className="form-control flex flex-col gap-2">
+        <label className="label cursor-pointer justify-start gap-3">
+          <input
+            type="checkbox"
+            className="toggle toggle-primary shrink-0"
+            checked={!!data?.security?.map_tiles}
+            onChange={(e) =>
+              handleChange('security', { ...data?.security, map_tiles: e.target.checked })
+            }
+          />
+          <span className="label-text font-medium">{t('webserver.map_tiles')}</span>
+        </label>
+        <HelpLabel className="pt-0">{t('webserver.map_tiles_help')}</HelpLabel>
+      </div>
 
       {/* Where the username/password fields used to be, so nobody hunts for
           the web password that moved to hashed accounts in 1.6. */}
       <div className="divider">{t('webserver.auth')}</div>
-      <div className="alert alert-info text-sm">
-        <span>
-          {t('webserver.accounts_moved')}{' '}
-          <Link to="/settings/accounts" className="link font-semibold">
-            {t('sections.accounts')}
-          </Link>
-        </span>
-      </div>
+      <NoticeCallout
+        variant="info"
+        message={
+          <>
+            {t('webserver.accounts_moved')}{' '}
+            <Link to="/settings/accounts" className="link font-semibold">
+              {t('sections.accounts')}
+            </Link>
+          </>
+        }
+      />
 
       {/* Cloud Registration (PWA) */}
       <div className="divider"></div>

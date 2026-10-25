@@ -7,7 +7,8 @@ import {
 } from 'react-icons/fa';
 import ModbusDeviceCreator from './ModbusDeviceCreator';
 import axios from '@/api/axios';
-import { useModbusCatalog } from '@/hooks/useModbusCatalog';
+import type { AxiosError } from 'axios';
+import { MODBUS_DEVICE_CATALOG } from '../generated/modbusDeviceCatalog';
 import {
   Select,
   SelectContent,
@@ -75,7 +76,6 @@ interface FakeDevice {
  */
 export default function ModbusHelper() {
   const { t } = useTranslation();
-  const { catalog } = useModbusCatalog();
   const [activeTab, setActiveTab] = useState<'get' | 'set' | 'search' | 'configure' | 'creator' | 'simulator'>('get');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ModbusResult | null>(null);
@@ -1099,36 +1099,27 @@ export default function ModbusHelper() {
 
       {/* SIMULATOR Tab */}
       {activeTab === 'simulator' && showSimulator && (
-        <div className="space-y-4">
-          {/* Create form card */}
-          <div className="card bg-base-200 shadow-sm">
-            <div className="card-body p-4 sm:p-6">
-              <h2 className="card-title text-base sm:text-lg flex items-center gap-2">
-                <FaFlask className="text-primary shrink-0" /> {t('modbus_helper.simulator_title')}
-              </h2>
-              <p className="text-xs sm:text-sm text-base-content/70 mt-1">
-                {t('modbus_helper.simulator_hint')}
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-[1fr_6rem_auto] gap-4 mt-4">
-                {/* Select Model */}
-                <div className="form-control">
-                  <label className="label">
-                    <span className="label-text text-xs font-semibold">{t('modbus_wizard.step2_title')}</span>
-                  </label>
-                  <Select value={selectedSimModel} onValueChange={setSelectedSimModel}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.values(catalog).map(d => (
-                        <SelectItem key={d.modelKey} value={d.modelKey}>
-                          {d.displayName} ({d.manufacturer})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+        <>
+          <SettingsCard
+            icon={<FaFlask />}
+            title={t('modbus_helper.simulator_title')}
+            description={t('modbus_helper.simulator_hint')}
+          >
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_6rem_auto] gap-4 items-end">
+              <FormField label={t('modbus_wizard.step2_title')}>
+                <Select value={selectedSimModel} onValueChange={setSelectedSimModel}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.values(MODBUS_DEVICE_CATALOG).map(d => (
+                      <SelectItem key={d.modelKey} value={d.modelKey}>
+                        {d.displayName} ({d.manufacturer})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FormField>
 
               <FormField label={t('modbus_wizard.address')}>
                 <NumericInput

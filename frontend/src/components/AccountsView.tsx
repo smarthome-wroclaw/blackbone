@@ -3,9 +3,23 @@ import type { AxiosError } from 'axios';
 import axios from '@/api/axios';
 import { useAuth, type Role } from '../hooks/useAuth';
 import { useTranslation } from '../hooks/useTranslation';
-
-/** Mirrors the backend minimum in boneio/core/auth/store.py. */
-const MIN_PASSWORD_LENGTH = 8;
+import {
+  MIN_PASSWORD_LENGTH,
+  PASSWORD_PROBLEM_KEYS,
+  checkPassword,
+} from '@/utils/passwordPolicy';
+import { FaUsers, FaUserPlus } from 'react-icons/fa';
+import AccountPasswordDialog from './AccountPasswordDialog';
+import AccountDeleteDialog from './AccountDeleteDialog';
+import SshPasswordCard from './SshPasswordCard';
+import {
+  SettingsPage,
+  SettingsCard,
+  FormField,
+  FormActions,
+  NoticeCallout,
+} from './UISettings/ui';
+import { LoadingState } from '@/components/ui/LoadingState';
 
 interface Account {
   username: string;
@@ -48,6 +62,17 @@ export default function AccountsView() {
   const [newRole, setNewRole] = useState<Role>('viewer');
   const [isCreating, setIsCreating] = useState(false);
 
+  // Which account a dialog is open for; null when none is.
+  const [passwordFor, setPasswordFor] = useState<string | null>(null);
+  const [deleteFor, setDeleteFor] = useState<string | null>(null);
+
+  // The backend applies the same rules, so this only means the admin hears
+  // about a doomed password before submitting rather than after.
+  const newPasswordIssue = newPassword ? checkPassword(newPassword, newUsername) : null;
+  const newPasswordProblem = newPasswordIssue
+    ? t(PASSWORD_PROBLEM_KEYS[newPasswordIssue], { min: MIN_PASSWORD_LENGTH })
+    : null;
+
   const load = useCallback(async () => {
     try {
       const { data } = await axios.get('/api/accounts');
@@ -89,16 +114,17 @@ export default function AccountsView() {
     }
   };
 
-  const handleDelete = async (account: Account) => {
-    if (!window.confirm(t('accounts.confirm_delete', { username: account.username }))) return;
+  const handleDelete = async (username: string) => {
     setError(null);
     setNotice(null);
     try {
-      await axios.delete(`/api/accounts/${encodeURIComponent(account.username)}`);
-      setNotice(t('accounts.deleted', { username: account.username }));
+      await axios.delete(`/api/accounts/${encodeURIComponent(username)}`);
+      setNotice(t('accounts.deleted', { username }));
       await load();
     } catch (err: unknown) {
       setError(errorMessage(err, t('accounts.delete_failed')));
+    } finally {
+      setDeleteFor(null);
     }
   };
 
@@ -114,158 +140,165 @@ export default function AccountsView() {
     }
   };
 
-  const handleReset = async (account: Account) => {
-    const password = window.prompt(
-      t('accounts.prompt_new_password', { username: account.username }),
-    );
-    if (!password) return;
+  const handlePasswordChanged = (username: string) => {
+    setPasswordFor(null);
     setError(null);
-    setNotice(null);
-    try {
-      await axios.put(`/api/accounts/${encodeURIComponent(account.username)}/password`, {
-        password,
-      });
-      setNotice(t('accounts.password_reset', { username: account.username }));
-    } catch (err: unknown) {
-      setError(errorMessage(err, t('accounts.password_failed')));
-    }
+    setNotice(t('accounts.password_reset', { username }));
   };
 
-  // A viewer cannot reach this through the navigation, but can still type the
-  // URL, so the section says why it is empty rather than rendering nothing.
+  const isSelf = (username: string) => username.toLowerCase() === (me ?? '').toLowerCase();
+
   if (!isAdmin) {
     return (
-      <div className="container mx-auto p-4">
-        <div className="card bg-base-200 shadow-xl">
-        <div className="card-body">
-          <h2 className="text-2xl font-bold">{t('accounts.title')}</h2>
-            <div className="alert alert-warning mt-2">
-              <span>{t('accounts.admin_only')}</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      <SettingsPage width="wide">
+        <NoticeCallout variant="warning" message={t('accounts.admin_only')} />
+      </SettingsPage>
     );
   }
 
   return (
-    <div className="container mx-auto p-4">
-      <div className="card bg-base-200 shadow-xl">
-      <div className="card-body space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">{t('accounts.title')}</h2>
-        <p className="text-sm opacity-70 mt-1">{t('accounts.intro')}</p>
-      </div>
+    <SettingsPage width="wide">
+      {error && <NoticeCallout variant="error" message={error} />}
+      {notice && <NoticeCallout variant="success" message={notice} />}
 
-      {error && <div className="alert alert-error text-sm"><span>{error}</span></div>}
-      {notice && <div className="alert alert-success text-sm"><span>{notice}</span></div>}
+      {/* Accounts list */}
+      <SettingsCard icon={<FaUsers />} title={t('accounts.title')}>
+        {isLoading ? (
+          <LoadingState className="py-6" />
+        ) : (
+          // A list, not a table: three columns of controls do not fit a phone,
+          // and a table that scrolls sideways hides the delete button off-screen.
+          <ul className="stg-inset divide-y divide-base-content/10">
+            {accounts.map((account) => {
+              const isMe = isSelf(account.username);
+              return (
+                <li
+                  key={account.username}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5"
+                >
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className="font-medium font-mono truncate">{account.username}</span>
+                    {isMe && (
+                      <span className="badge badge-ghost badge-xs shrink-0">
+                        {t('accounts.you')}
+                      </span>
+                    )}
+                  </div>
+                  <select
+                    className="select select-xs select-bordered w-auto"
+                    aria-label={t('accounts.role')}
+                    value={account.role}
+                    disabled={isMe}
+                    onChange={(e) => handleRoleChange(account, e.target.value as Role)}
+                  >
+                    <option value="admin">{t('accounts.role_admin')}</option>
+                    <option value="viewer">{t('accounts.role_viewer')}</option>
+                  </select>
+                  <div className="flex justify-end gap-1 w-full sm:w-auto">
+                    <button
+                      className="btn btn-ghost btn-xs"
+                      onClick={() => {
+                        setNotice(null);
+                        setPasswordFor(account.username);
+                      }}
+                    >
+                      {t('accounts.reset_password')}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-xs text-error"
+                      disabled={isMe}
+                      onClick={() => setDeleteFor(account.username)}
+                    >
+                      {t('accounts.delete')}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </SettingsCard>
 
-      {isLoading ? (
-        <span className="loading loading-spinner loading-lg text-primary" />
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="table table-zebra bg-base-100 rounded-box">
-            <thead>
-              <tr>
-                <th>{t('accounts.username')}</th>
-                <th>{t('accounts.role')}</th>
-                <th className="text-right">{t('accounts.actions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map((account) => {
-                const isMe = account.username.toLowerCase() === (me ?? '').toLowerCase();
-                return (
-                  <tr key={account.username}>
-                    <td>
-                      {account.username}
-                      {isMe && (
-                        <span className="ml-2 badge badge-ghost badge-sm">
-                          {t('accounts.you')}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      <select
-                        className="select select-sm select-bordered"
-                        value={account.role}
-                        // Demoting yourself is refused by the backend; not
-                        // offering it here saves a confusing round-trip.
-                        disabled={isMe}
-                        onChange={(e) => handleRoleChange(account, e.target.value as Role)}
-                      >
-                        <option value="admin">{t('accounts.role_admin')}</option>
-                        <option value="viewer">{t('accounts.role_viewer')}</option>
-                      </select>
-                    </td>
-                    <td className="text-right whitespace-nowrap">
-                      <button
-                        className="btn btn-outline btn-xs"
-                        onClick={() => handleReset(account)}
-                      >
-                        {t('accounts.reset_password')}
-                      </button>
-                      <button
-                        className="btn btn-outline btn-error btn-xs ml-2"
-                        disabled={isMe}
-                        onClick={() => handleDelete(account)}
-                      >
-                        {t('accounts.delete')}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <form className="space-y-3 border-t border-base-300 pt-4" onSubmit={handleCreate}>
-        <h3 className="font-semibold">{t('accounts.add_title')}</h3>
-        <p className="text-sm opacity-70">{t('accounts.add_intro')}</p>
-
-        <div className="flex flex-col sm:flex-row gap-2">
-          <input
-            type="text"
-            className="input input-bordered flex-1"
-            placeholder={t('accounts.username')}
-            autoComplete="off"
-            required
-            value={newUsername}
-            onChange={(e) => setNewUsername(e.target.value)}
-          />
-          <input
-            type="password"
-            className="input input-bordered flex-1"
-            placeholder={t('accounts.password')}
-            autoComplete="new-password"
-            required
-            minLength={MIN_PASSWORD_LENGTH}
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-          />
-          <select
-            className="select select-bordered"
-            value={newRole}
-            onChange={(e) => setNewRole(e.target.value as Role)}
-          >
-            <option value="viewer">{t('accounts.role_viewer')}</option>
-            <option value="admin">{t('accounts.role_admin')}</option>
-          </select>
-        </div>
-
-        <button
-          type="submit"
-          className="btn btn-primary"
-          disabled={isCreating || !newUsername || !newPassword}
+      {/* Add account */}
+      <form onSubmit={handleCreate}>
+        <SettingsCard
+          icon={<FaUserPlus />}
+          title={t('accounts.add_title')}
+          description={t('accounts.add_intro')}
+          footer={
+            <FormActions>
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm gap-2"
+                disabled={isCreating || !newUsername || !newPassword || !!newPasswordProblem}
+              >
+                {isCreating && <span className="loading loading-spinner loading-xs" />}
+                {t('accounts.add_button')}
+              </button>
+            </FormActions>
+          }
         >
-          {isCreating && <span className="loading loading-spinner loading-sm" />}
-          {t('accounts.add_button')}
-        </button>
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3">
+            <FormField label={t('accounts.username')}>
+              <input
+                type="text"
+                className="input input-bordered w-full font-mono"
+                placeholder={t('accounts.username')}
+                autoComplete="off"
+                required
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+              />
+            </FormField>
+
+            <FormField
+              label={t('accounts.password')}
+              error={newPasswordProblem || undefined}
+            >
+              <input
+                type="password"
+                className={`input input-bordered w-full font-mono ${newPasswordProblem ? 'input-error' : ''}`}
+                placeholder={t('accounts.password')}
+                autoComplete="new-password"
+                required
+                minLength={MIN_PASSWORD_LENGTH}
+                aria-invalid={newPasswordProblem ? true : undefined}
+                aria-describedby={newPasswordProblem ? 'accounts-password-error' : undefined}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </FormField>
+
+            <FormField label={t('accounts.role')} className="sm:w-40">
+              <select
+                className="select select-bordered w-full"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value as Role)}
+              >
+                <option value="viewer">{t('accounts.role_viewer')}</option>
+                <option value="admin">{t('accounts.role_admin')}</option>
+              </select>
+            </FormField>
+          </div>
+        </SettingsCard>
       </form>
-      </div>
-      </div>
-    </div>
+
+      {/* Not a panel account: the Linux login behind SSH and sudo. */}
+      <SshPasswordCard />
+
+      {/* Keyed by account: a fresh form, nothing typed for the last one. */}
+      <AccountPasswordDialog
+        key={passwordFor ?? ''}
+        username={passwordFor}
+        isSelf={passwordFor !== null && isSelf(passwordFor)}
+        onClose={() => setPasswordFor(null)}
+        onChanged={handlePasswordChanged}
+      />
+      <AccountDeleteDialog
+        username={deleteFor}
+        onClose={() => setDeleteFor(null)}
+        onConfirm={handleDelete}
+      />
+    </SettingsPage>
   );
 }

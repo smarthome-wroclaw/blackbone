@@ -1,7 +1,7 @@
 """Lox UDP Client for BoneIO.
 
-Implements the Lox UDP protocol for bidirectional communication
-between BoneIO and a Lox Miniserver:
+Implements the Loxone UDP protocol for bidirectional communication
+between BoneIO and a Loxone Miniserver:
 
 - Receiving commands from Miniserver (e.g. "OUT_04=ON")
 - Sending state feedback to Miniserver (e.g. "OUT_04=ON", "cover1=50")
@@ -11,15 +11,14 @@ between BoneIO and a Lox Miniserver:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import socket
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
-from boneio.const import COVER, OFF, ON, cover_actions, output_actions
 from boneio.const import NONE as OUTPUT_NONE
+from boneio.const import OFF, ON, ONLINE, cover_actions, output_actions
 from boneio.core.messaging.basic import MessageBus
 
 if TYPE_CHECKING:
@@ -29,7 +28,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Entity types whose state changes should be forwarded to Lox
+# Entity types whose state changes should be forwarded to Loxone
 _LOX_ENTITY_TYPES = frozenset(("output", "cover", "sensor", "event", "binary_sensor", "input"))
 
 # Modbus coordinators publish one dict per register group, so these topics
@@ -141,7 +140,7 @@ class LoxUDPClient(MessageBus):
 
     This message bus translates between BoneIO's internal MQTT-style
     topic/payload model and the simple "key=value" UDP protocol
-    expected by Lox Miniserver.
+    expected by Loxone Miniserver.
 
     Outgoing (BoneIO → Miniserver):
         topic "boneio/{serial}/output/relay1" + payload {"state": "ON"}
@@ -162,28 +161,23 @@ class LoxUDPClient(MessageBus):
         host: str,
         send_port: int,
         listen_port: int,
-        resync_interval: int = 30,
     ) -> None:
         """Set up client.
 
         Args:
             config_helper: BoneIO configuration helper.
-            host: Lox Miniserver IP address.
+            host: Loxone Miniserver IP address.
             send_port: Port on Miniserver to send state feedback to.
             listen_port: Port BoneIO listens on for commands from Miniserver.
-            resync_interval: Seconds between full state refresh packets. Set
-                to 0 to disable periodic refresh.
         """
         self._manager: Manager | None = None
         self._config_helper = config_helper
         self.host = host
         self.send_port = send_port
         self.listen_port = listen_port
-        self.resync_interval = max(0, int(resync_interval or 0))
         self._transport: asyncio.DatagramTransport | None = None
         self._listeners: dict[str, Callable[[str, str], Coroutine[Any, Any, None]]] = {}
         self._state = False
-        self._resync_task: asyncio.Task | None = None
 
     def send_message(
         self,
@@ -192,7 +186,7 @@ class LoxUDPClient(MessageBus):
         retain: bool = False,
         qos: int = 0,
     ) -> None:
-        """Send a state update to Lox Miniserver via UDP.
+        """Send a state update to Loxone Miniserver via UDP.
 
         Converts BoneIO's MQTT-style topic/payload into a simple UDP
         datagram in the format "device_id=state_value".
@@ -251,11 +245,11 @@ class LoxUDPClient(MessageBus):
             return
 
         # Extract state value from payload
-        state_value = self._extract_state_value(payload, suffix=suffix)
+        state_value = self._extract_state_value(payload)
         if not state_value:
             return
 
-        self.send_udp(device_id, state_value)
+        self._send_udp(device_id, state_value)
 
     def _send_modbus(
         self,
@@ -290,20 +284,16 @@ class LoxUDPClient(MessageBus):
     @staticmethod
     def _extract_state_value(
         payload: str | int | bytes | dict[str, Any] | HomeAssistantDiscoveryMessage,
-        suffix: str = "",
     ) -> str:
         """Extract a simple state string from various payload formats.
 
         Args:
             payload: The message payload in any supported format.
-            suffix: Topic suffix, used to normalize cover position payloads.
 
         Returns:
             State value as string, or empty string if extraction fails.
         """
         if isinstance(payload, dict):
-            if suffix == "pos" and "position" in payload:
-                return str(payload["position"])
             # Try standard keys: {"state": "ON"}, {"value": "50"}
             state_value = payload.get("state", payload.get("value", ""))
             if state_value:
@@ -314,17 +304,10 @@ class LoxUDPClient(MessageBus):
             return ""
         if isinstance(payload, bytes):
             return payload.decode("utf-8")
-        if suffix == "pos" and isinstance(payload, str):
-            try:
-                parsed = json.loads(payload)
-                if isinstance(parsed, dict) and "position" in parsed:
-                    return str(parsed["position"])
-            except json.JSONDecodeError:
-                pass
         return str(payload)
 
-    def send_udp(self, device_id: str, state_value: str) -> None:
-        """Send a UDP datagram to Lox Miniserver.
+    def _send_udp(self, device_id: str, state_value: str) -> None:
+        """Send a UDP datagram to Loxone Miniserver.
 
         Args:
             device_id: Entity identifier (e.g. "relay1", "cover1").
@@ -383,8 +366,6 @@ class LoxUDPClient(MessageBus):
 
             # Announce online status so Lox Miniserver knows we are alive
             self._transport.sendto(b"boneio=online", (self.host, self.send_port))
-            if self.resync_interval:
-                self._resync_task = asyncio.create_task(self._resync_loop())
 
             while True:
                 await asyncio.sleep(3600)
@@ -395,8 +376,6 @@ class LoxUDPClient(MessageBus):
             _LOGGER.error("Failed to start Lox UDP client: %s", e, exc_info=True)
             self._state = False
         finally:
-            if self._resync_task:
-                self._resync_task.cancel()
             if self._transport:
                 self._transport.close()
 
@@ -409,50 +388,14 @@ class LoxUDPClient(MessageBus):
         if self._transport:
             self._transport.sendto(b"boneio=offline", (self.host, self.send_port))
 
-    async def _resync_loop(self) -> None:
-        """Periodically publish known states to heal dropped UDP packets."""
-        try:
-            await self._send_current_states()
-            while True:
-                await asyncio.sleep(self.resync_interval)
-                await self._send_current_states()
-        except asyncio.CancelledError:
-            return
-
-    async def _send_current_states(self) -> None:
-        """Send current output, group, and cover states directly to Lox."""
-        if not self._manager or not self._transport:
-            return
-
-        try:
-            for output in self._manager.outputs.get_all_outputs().values():
-                if getattr(output, "output_type", None) in (OUTPUT_NONE, COVER):
-                    continue
-                self.send_udp(output.id, ON if output.is_active else OFF)
-
-            for group in self._manager.outputs.get_all_output_groups().values():
-                self.send_udp(group.id, ON if group.is_active else OFF)
-
-            for cover in self._manager.covers.get_all_covers().values():
-                position = self._cover_position(cover)
-                if position is not None:
-                    self.send_udp(cover.id, position)
-        except Exception:
-            _LOGGER.exception("Lox UDP: error sending periodic state refresh")
-
-    @staticmethod
-    def _cover_position(cover: Any) -> str | None:
-        """Return a cover position string suitable for a Lox analog input."""
-        json_position = getattr(cover, "json_position", None)
-        if isinstance(json_position, dict) and "position" in json_position:
-            return str(json_position["position"])
-        position = getattr(cover, "position", None)
-        if position is not None:
-            return str(position)
-        return None
-
-    async def subscribe_and_listen(self, topic: str, callback: Callable[[str, str], Coroutine[Any, Any, None]]) -> None:
-        """Register a listener for a topic pattern."""
+    async def subscribe_and_listen(
+        self,
+        topic: str,
+        callback: Callable[..., Coroutine[Any, Any, None]],
+        *,
+        retain_aware: bool = False,
+    ) -> None:
+        """Register a listener for a topic pattern. Lox has no retained messages."""
         self._listeners[topic] = callback
 
     async def unsubscribe_and_stop_listen(self, topic: str) -> None:
@@ -467,7 +410,7 @@ class LoxUDPClient(MessageBus):
         executes the command (ON/OFF/TOGGLE) directly on the entity.
 
         Falls back to case-insensitive lookup if exact match fails, since
-        Lox may alter the casing of device identifiers.
+        Loxone may alter the casing of device identifiers.
 
         Args:
             device: Device identifier from UDP message (e.g. "OUT_10").

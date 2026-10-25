@@ -78,8 +78,9 @@ class MQTTClient(MessageBus):
         self._connection_established = False
         self._subscribed = asyncio.Event()
         self.publish_queue: UniqueQueue = UniqueQueue()
-        self._mqtt_energy_listeners: dict[str, Callable[[str, str], Awaitable[None]]] = {}
-        self._topic_discovery_sessions: dict[str, list[set[str]]] = {}
+        self._mqtt_energy_listeners: dict[str, Callable[..., Awaitable[None]]] = {}
+        # Listeners that are told whether a message is a retained replay.
+        self._retain_aware_listeners: set[str] = set()
         self._discovery_topics = (
             [
                 f"{self._config_helper.ha_discovery_prefix}/{ha_type}/{self._config_helper.serial_number}/#"
@@ -236,43 +237,6 @@ class MQTTClient(MessageBus):
         await self.unsubscribe([topic])
         del self._mqtt_energy_listeners[topic]
         self._retain_aware_listeners.discard(topic)
-
-    async def discover_topics(self, topic_filter: str, timeout: float) -> list[str]:
-        """Temporarily collect concrete topics matching an MQTT filter."""
-        discovered: set[str] = set()
-        sessions = self._topic_discovery_sessions.setdefault(topic_filter, [])
-        first_session = not sessions
-        sessions.append(discovered)
-
-        try:
-            persistent_subscription = (
-                topic_filter in self._topics
-                or topic_filter in self._mqtt_energy_listeners
-                or topic_filter in self._discovery_topics
-            )
-            if self._connection_established and first_session and not persistent_subscription:
-                await self.subscribe(topics=[topic_filter])
-            await asyncio.sleep(timeout)
-        finally:
-            sessions.remove(discovered)
-            if not sessions:
-                self._topic_discovery_sessions.pop(topic_filter, None)
-                has_persistent_subscription = (
-                    topic_filter in self._topics
-                    or topic_filter in self._mqtt_energy_listeners
-                    or topic_filter in self._discovery_topics
-                )
-                if self._connection_established and not has_persistent_subscription:
-                    try:
-                        await self.unsubscribe([topic_filter])
-                    except MqttError as exc:
-                        _LOGGER.warning(
-                            "Failed to unsubscribe MQTT topic discovery filter %s: %s",
-                            topic_filter,
-                            exc,
-                        )
-
-        return sorted(discovered)
 
     async def unsubscribe(
         self,
@@ -581,38 +545,31 @@ class MQTTClient(MessageBus):
                 )
                 continue
             callback_start = True
-            concrete_topic = str(message.topic)
-            matches_persistent_topic = any(
-                message.topic.matches(topic_filter) for topic_filter in self._topics
-            )
-            for topic_filter, sessions in list(self._topic_discovery_sessions.items()):
-                if message.topic.matches(topic_filter):
-                    if not matches_persistent_topic:
-                        callback_start = False
-                    for discovered in sessions:
-                        discovered.add(concrete_topic)
             for discovery_topic in self._discovery_topics:
                 if message.topic.matches(discovery_topic):
                     callback_start = False
-                    topic = concrete_topic
-                    if (
-                        message.payload
-                        and not self._config_helper.is_topic_in_autodiscovery(
-                            topic
-                        )
-                    ):
-                        _LOGGER.info(
-                            "Removing unused discovery entity %s", topic
-                        )
-                        self.send_message(
-                            topic=topic, payload=None, retain=True
-                        )
+                    topic = str(message.topic)
+                    if not message.payload:
+                        # Already removed, by us or by someone else.
+                        self._held_discovery_topics.discard(topic)
+                    elif not self._config_helper.is_topic_in_autodiscovery(topic):
+                        if self._discovery_cleanup_held:
+                            self._held_discovery_topics.add(topic)
+                        else:
+                            self._remove_discovery_entity(topic)
                     break
             for topic, listener_callback in self._mqtt_energy_listeners.items():
                 if message.topic.matches(topic):
                     callback_start = False
                     try:
-                        await listener_callback(concrete_topic, payload)
+                        if topic in self._retain_aware_listeners:
+                            # v3.1.1: the broker sets retain only when replaying
+                            # its stored copy on subscribe, never on live ones.
+                            await listener_callback(
+                                str(message.topic), payload, retained=bool(message.retain)
+                            )
+                        else:
+                            await listener_callback(str(message.topic), payload)
                     except Exception as exc:
                         _LOGGER.error(
                             "Error in MQTT listener callback for topic %s: %s",
@@ -625,4 +582,10 @@ class MQTTClient(MessageBus):
                     message.topic,
                     payload,
                 )
-                await callback(concrete_topic, payload)
+                try:
+                    await callback(str(message.topic), payload)
+                except Exception as exc:
+                    _LOGGER.error(
+                        "Error handling MQTT message on %s: %s",
+                        message.topic, exc, exc_info=True,
+                    )

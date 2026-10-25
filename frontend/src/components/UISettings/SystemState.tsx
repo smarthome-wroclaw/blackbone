@@ -11,12 +11,11 @@ import {
   FaPowerOff,
 } from 'react-icons/fa';
 import SelfTest from './SelfTest';
-import FixAppPermissions from './FixAppPermissions';
-import HardwareErrors, { type HardwareError } from './HardwareErrors';
-import MigrationsSection from './MigrationsSection';
-import AlternativeUpdateSource, {
-  type AlternativeUpdateRequest,
-} from './SystemStateComponents/AlternativeUpdateSource';
+import HardwareErrors from './HardwareErrors';
+import { UpdateSafetyNotice } from './SystemStateComponents/UpdateSafetyNotice';
+import { OsUpdateCard } from './SystemStateComponents/OsUpdateCard';
+import { CaddyUpdateCard } from './SystemStateComponents/CaddyUpdateCard';
+import { ProxySwitchCard } from './SystemStateComponents/ProxySwitchCard';
 
 /** Which block of the old System page to render. */
 export type SystemSection = 'update' | 'tools' | 'hardware_errors';
@@ -142,7 +141,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
   const [isRestarting, setIsRestarting] = useState(false);
 
   // Hardware errors state
-  const [hardwareErrors, setHardwareErrors] = useState<HardwareError[]>([]);
+  const [hardwareErrors, setHardwareErrors] = useState<React.ComponentProps<typeof HardwareErrors>['errors']>([]);
 
   // Fetch hardware errors
   const fetchHardwareErrors = useCallback(async () => {
@@ -179,7 +178,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
     } finally {
       setIsChecking(false);
     }
-  }, [t]);
+  }, []);
 
   // Fetch available versions for rollback
   const fetchAvailableVersions = useCallback(async () => {
@@ -202,7 +201,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
     try {
       await axios.post('/api/restart');
       // The server will restart, so we won't get a response
-    } catch {
+    } catch (error) {
       // Expected - server is restarting
       console.log('Server is restarting...');
     }
@@ -214,18 +213,43 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
       const { data } = await axios.get('/api/update/status');
       setUpdateStatus(data);
       return data;
-    } catch {
+    } catch (err) {
       // Server might be restarting
       return null;
     }
   }, []);
 
-  const startUpdateRequest = async (request: {
-    version?: string;
-    source_type?: AlternativeUpdateRequest['source_type'];
-    source?: string;
-    source_version?: string;
-  }) => {
+  /**
+   * Reload once the new version answers, not a fixed time after "success".
+   *
+   * The old process reports success and then takes a while to stop; the new
+   * one runs its migrations before it serves anything. A reload in between
+   * either lands on the old panel again or on no server at all. While the
+   * controller is down the panel's guard shows the update screen instead.
+   */
+  const reloadWhenUpdated = useCallback((mark: UpdateMark) => {
+    if (newVersionPoll.current) clearInterval(newVersionPoll.current);
+    newVersionPoll.current = setInterval(async () => {
+      if (Date.now() - mark.startedAt > NEW_VERSION_DEADLINE_MS) {
+        if (newVersionPoll.current) clearInterval(newVersionPoll.current);
+        setIsUpdating(false);
+        setError(t('software_update.update_failed'));
+        return;
+      }
+      try {
+        const { data } = await axios.get('/api/version');
+        if (updateArrived(mark, data?.version)) {
+          if (newVersionPoll.current) clearInterval(newVersionPoll.current);
+          window.location.reload();
+        }
+      } catch {
+        // Restarting or running migrations: ask again.
+      }
+    }, NEW_VERSION_POLL_MS);
+  }, [t]);
+
+  // Start update with specific version
+  const startUpdate = async (version?: string) => {
     setIsUpdating(true);
     setError(null);
 
@@ -240,7 +264,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
     writeUpdateMark(window.localStorage, basePath, mark);
 
     try {
-      const { data } = await axios.post('/api/update', request);
+      const { data } = await axios.post('/api/update', { version: version || selectedVersion });
 
       if (data.status === 'error') {
         clearUpdateMark(window.localStorage, basePath);
@@ -264,20 +288,11 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
           setError(status.error || t('software_update.update_failed'));
         }
       }, 1000);
-    } catch {
+    } catch (err) {
+      clearUpdateMark(window.localStorage, basePath);
       setError(t('software_update.failed_to_start_update'));
       setIsUpdating(false);
     }
-  };
-
-  // Start update with a release version from the default channel.
-  const startUpdate = async (version?: string) => {
-    await startUpdateRequest({ version: version || selectedVersion || undefined });
-  };
-
-  // Install once from a validated alternative package or Git repository.
-  const startAlternativeUpdate = async (request: AlternativeUpdateRequest) => {
-    await startUpdateRequest(request);
   };
 
   // Rollback to specific version
@@ -320,7 +335,7 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
         setError(data.message);
         setIsUpdating(false);
       }
-    } catch {
+    } catch (err) {
       setError(t('software_update.rollback_failed'));
       setIsUpdating(false);
     }
@@ -373,12 +388,9 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
 
   // Initial load
   useEffect(() => {
-    const initialLoad = window.setTimeout(() => {
-      void checkForUpdates();
-      void fetchAvailableVersions();
-      void fetchHardwareErrors();
-    }, 0);
-    return () => window.clearTimeout(initialLoad);
+    checkForUpdates();
+    fetchAvailableVersions();
+    fetchHardwareErrors();
   }, [checkForUpdates, fetchAvailableVersions, fetchHardwareErrors]);
 
   // Format date
@@ -470,240 +482,30 @@ const SystemState: React.FC<SystemStateProps> = ({ section = 'tools' }) => {
                 <span className="badge badge-ghost badge-sm">{t('software_update.up_to_date')}</span>
               )}
             </div>
+          </div>
+        </SettingsCard>
 
-            {/* Prerelease Available Card (for stable users) */}
-            {updateInfo?.prerelease_update_available && !updateInfo?.update_available && (
-              <div className="card bg-warning/10 border border-warning">
-                <div className="card-body">
-                  <h3 className="card-title text-warning">
-                    <FaExclamationTriangle /> {t('software_update.prerelease_available')}
-                  </h3>
-                  <p className="text-sm opacity-70">
-                    {t('software_update.prerelease_available_description')}
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
-                    <div>
-                      <p className="text-sm opacity-70">{t('software_update.prerelease_version')}</p>
-                      <p className="text-2xl font-mono font-bold">
-                        {updateInfo.latest_prerelease}
-                        <span className="badge badge-warning ml-2">dev</span>
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-sm opacity-70">{t('software_update.your_stable_version')}</p>
-                      <p className="text-lg font-mono">
-                        {updateInfo.current_version}
-                        <span className="badge badge-success ml-2">stable</span>
-                      </p>
-                    </div>
-                  </div>
-                  <div className="alert alert-warning mt-4">
-                    <FaExclamationTriangle />
-                    <span className="text-sm">{t('software_update.prerelease_warning')}</span>
-                  </div>
-                  <div className="card-actions justify-end mt-4">
-                    <a
-                      href={
-                        updateInfo.available_versions?.find(
-                          v => v.version === updateInfo.latest_prerelease
-                        )?.release_url
-                      }
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn btn-outline"
-                    >
-                      {t('software_update.view_release_notes')}
-                    </a>
-                    <button
-                      className="btn btn-warning"
-                      onClick={() => startUpdate(updateInfo.latest_prerelease)}
-                      disabled={isUpdating}
-                    >
-                      {isUpdating ? (
-                        <>
-                          <FaSpinner className="animate-spin" />
-                          {t('software_update.updating')}
-                        </>
-                      ) : (
-                        <>
-                          <FaDownload />
-                          {t('software_update.install_prerelease')}
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Update Available Card */}
-            {updateInfo?.update_available && (
-              <div className="card bg-success/10 border border-success">
-                <div className="card-body">
-                  <h3 className="card-title text-success">
-                    <FaDownload /> {t('software_update.new_version_available')}
-                  </h3>
-
-                  {/* Version selector */}
-                  <div className="form-control w-full max-w-xs">
-                    <label className="label">
-                      <span className="label-text">{t('software_update.select_version')}</span>
-                    </label>
-                    <select
-                      className="select select-bordered"
-                      value={selectedVersion || updateInfo.latest_version || ''}
-                      onChange={e => setSelectedVersion(e.target.value)}
-                    >
-                      {updateInfo.available_versions?.map(ver => (
-                        <option key={ver.version} value={ver.version}>
-                          {ver.version} {ver.is_prerelease ? '(dev)' : ''}
-                          {ver.version === updateInfo.latest_stable ? ' ⭐' : ''}
-                        </option>
-                      ))}
-                    </select>
-                    <label className="label">
-                      <span className="label-text-alt">
-                        {updateInfo.latest_stable && (
-                          <span className="text-success">
-                            ⭐ {t('software_update.recommended')}: {updateInfo.latest_stable}
-                          </span>
-                        )}
-                      </span>
-                    </label>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
-                    <div>
-                      <p className="text-sm opacity-70">{t('software_update.selected_version')}</p>
-                      <p className="text-2xl font-mono font-bold">
-                        {selectedVersion || updateInfo.latest_version}
-                        {(selectedVersion || updateInfo.latest_version)
-                          ?.toLowerCase()
-                          .includes('dev') && <span className="badge badge-warning ml-2">dev</span>}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-sm opacity-70">{t('software_update.released')}</p>
-                      <p className="text-lg">
-                        {updateInfo.available_versions?.find(
-                          v => v.version === (selectedVersion || updateInfo.latest_version)
-                        )?.published_at
-                          ? formatDate(
-                              updateInfo.available_versions.find(
-                                v => v.version === (selectedVersion || updateInfo.latest_version)
-                              )!.published_at
-                            )
-                          : t('software_update.unknown')}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="card-actions justify-end mt-4">
-                    <a
-                      href={
-                        updateInfo.available_versions?.find(
-                          v => v.version === (selectedVersion || updateInfo.latest_version)
-                        )?.release_url || updateInfo.release_url
-                      }
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn btn-outline"
-                    >
-                      {t('software_update.view_release_notes')}
-                    </a>
-                    <button
-                      className="btn btn-success"
-                      onClick={() => startUpdate(selectedVersion || updateInfo.latest_version)}
-                      disabled={isUpdating}
-                    >
-                      {isUpdating ? (
-                        <>
-                          <FaSpinner className="animate-spin" />
-                          {t('software_update.updating')}
-                        </>
-                      ) : (
-                        <>
-                          <FaDownload />
-                          {t('software_update.update_to')}{' '}
-                          {selectedVersion || updateInfo.latest_version}
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Update Progress */}
-            {isUpdating && updateStatus && (
-              <div className="card bg-base-200">
-                <div className="card-body">
-                  <h3 className="card-title">
-                    <FaSpinner className="animate-spin" />
-                    {t('software_update.update_in_progress')}
-                  </h3>
-
-                  {/* Progress Bar */}
-                  <div className="w-full">
-                    <div className="flex justify-between mb-1">
-                      <span className="text-sm font-medium">{updateStatus.step}</span>
-                      <span className="text-sm font-medium">{updateStatus.progress}%</span>
-                    </div>
-                    <progress
-                      className="progress progress-primary w-full"
-                      value={updateStatus.progress}
-                      max="100"
-                    />
-                  </div>
-
-                  {/* Log */}
-                  {updateStatus.log.length > 0 && (
-                    <div className="mt-4">
-                      <p className="text-sm font-medium mb-2">{t('software_update.log')}</p>
-                      <div className="bg-base-300 rounded-lg p-3 max-h-40 overflow-y-auto font-mono text-xs">
-                        {updateStatus.log.map((msg, i) => (
-                          <div key={i} className="py-0.5">
-                            {msg}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {updateStatus.status === 'success' && (
-                    <div className="alert alert-success mt-4">
-                      <FaCheck />
-                      <span>
-                        Update complete! Updated from {updateStatus.old_version} to{' '}
-                        {updateStatus.new_version}. Restarting...
-                      </span>
-                    </div>
-                  )}
-
-                  {updateStatus.status === 'error' && (
-                    <div className="alert alert-error mt-4">
-                      <FaExclamationTriangle />
-                      <span>{updateStatus.error}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="divider"></div>
-            <AlternativeUpdateSource
-              isUpdating={isUpdating}
-              onInstall={startAlternativeUpdate}
-            />
-
-            {/* Available Versions Section */}
-            <div className="divider"></div>
-            <div>
-              <div className="flex lg:items-center justify-between flex-col lg:flex-row gap-2">
-                <h3 className="card-title">
-                  <FaHistory />
-                  {t('software_update.available_versions') || 'Available Versions'}
-                </h3>
+        {/* Prerelease available to someone on stable */}
+        {updateInfo?.prerelease_update_available && !updateInfo?.update_available && (
+          <SettingsCard
+            variant="accent"
+            icon={<FaExclamationTriangle />}
+            title={t('software_update.prerelease_available')}
+            description={t('software_update.prerelease_available_description')}
+            footer={
+              <FormActions>
+                <a
+                  href={
+                    updateInfo.available_versions?.find(
+                      v => v.version === updateInfo.latest_prerelease
+                    )?.release_url
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-ghost btn-sm"
+                >
+                  {t('software_update.view_release_notes')}
+                </a>
                 <button
                   className="btn btn-warning btn-sm gap-2"
                   onClick={() => startUpdate(updateInfo.latest_prerelease)}

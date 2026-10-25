@@ -197,16 +197,38 @@ function SidebarContent({
 }) {
   const { t } = useTranslation();
 
-  // Split reload sections into local (no group), remote, and tools
-  const localReloadSections = reloadSections.filter(s => !s.group);
-  const remoteReloadSections = reloadSections.filter(s => s.group === 'remote');
-  const toolsSections = reloadSections.filter(s => s.group === 'tools');
-  // The web panel group is a domain group, so it draws from both lists: the
-  // server settings need a restart, the accounts do not. That difference is
-  // carried by a per-entry badge instead of by which box they sit in.
-  // Server settings first, then who may reach them — it reads as one story.
-  const webSections = [...restartSections, ...reloadSections].filter(s => s.group === 'web');
-  const ungroupedRestartSections = restartSections.filter(s => !s.group);
+  const [filter, setFilter] = useState('');
+  // Which group is open. Desktop starts on the active section's group; mobile
+  // starts on none, which is what shows the tiles.
+  const groupOfActive = configSections.find(s => s.name === activeSection)?.group ?? null;
+  const [openGroup, setOpenGroup] = useState<string | null>(
+    variant === 'desktop' ? groupOfActive : null,
+  );
+
+  // Following a link from elsewhere — a security finding's Fix button, say —
+  // must open the group it landed in, or the sidebar would disagree with the
+  // page beside it. React's own pattern for adjusting state when a prop
+  // changes: compare during render, no effect, no ref.
+  const [syncedTo, setSyncedTo] = useState(activeSection);
+  if (syncedTo !== activeSection) {
+    setSyncedTo(activeSection);
+    if (variant === 'desktop' && groupOfActive && groupOfActive !== openGroup) {
+      setOpenGroup(groupOfActive);
+    }
+  }
+
+  const { posture } = useSecurityPosture();
+  const outstanding = posture?.summary.actionable ?? 0;
+
+  const grouped = SECTION_GROUPS.map(group => ({
+    ...group,
+    entries: configSections.filter(section => section.group === group.name),
+  })).filter(group => group.entries.length > 0);
+
+  const query = filter.trim().toLowerCase();
+  const matches = query
+    ? configSections.filter(section => section.title.toLowerCase().includes(query))
+    : [];
 
   const isLoading = sections.length === 0;
 
@@ -295,28 +317,19 @@ function SidebarContent({
     );
   }
 
-      {/* Web panel: how the panel is reached, and who may reach it */}
-      {webSections.length > 0 && (
-        <div className="mb-4 border border-primary/20 rounded-xl bg-primary/5 p-3">
-          <div className="flex items-center gap-2 mb-2 px-1">
-            <span className="text-sm font-semibold text-primary">
-              🌐 {t('settings.web_sections')}
-            </span>
-          </div>
-          <SectionList
-            sections={sections}
-            filterSections={webSections}
-            configSections={configSections}
-            activeSection={activeSection}
-            saveStatus={saveStatus}
-            unsavedChanges={unsavedChanges}
-            onNavigate={onNavigate}
-          />
-        </div>
-      )}
-
-      {/* Restart-required sections */}
-      <div className="border border-warning/20 rounded-xl bg-warning/5 p-3">
+  // Mobile, inside a group: back plus that group's sections.
+  if (variant === 'mobile') {
+    const group = grouped.find(g => g.name === openGroup);
+    if (!group) return searchBox;
+    return (
+      <>
+        {searchBox}
+        <button
+          className="btn btn-sm btn-ghost gap-2 mb-2"
+          onClick={() => setOpenGroup(null)}
+        >
+          ← {t('settings.all_groups')}
+        </button>
         <div className="flex items-center gap-2 mb-2 px-1">
           <span className="text-sm font-semibold opacity-80">
             {group.icon} {t(group.translationKey)}
@@ -324,7 +337,7 @@ function SidebarContent({
         </div>
         <SectionList
           sections={sections}
-          filterSections={ungroupedRestartSections}
+          filterSections={group.entries}
           configSections={configSections}
           activeSection={activeSection}
           saveStatus={saveStatus}
@@ -404,7 +417,6 @@ export default function SettingsSidebar({
   const { t } = useTranslation();
   const activeSectionConfig = configSections.find(s => s.name === activeSection);
   const hasActiveUnsaved = unsavedChanges[activeSection] || false;
-  const isSaving = saveStatus[activeSection] === 'saving';
 
   /** Navigate to section and close mobile bottom sheet. */
   const handleMobileNavigate = (sectionName: string) => {

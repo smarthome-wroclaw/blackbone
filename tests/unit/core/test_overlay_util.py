@@ -68,40 +68,6 @@ class TestMissingOverlayDirs:
         assert overlay_util.missing_overlay_dirs("9.9.9-absent") == []
 
 
-class TestFindOverlaySource:
-    def test_finds_source_in_overlays_subdir(self, dtbs: Path) -> None:
-        _make_kernel(dtbs, "6.0.0-old", in_uboot=False, in_overlays=True)
-        assert overlay_util.find_overlay_source() == dtbs / "6.0.0-old" / "overlays"
-
-    def test_finds_source_in_uboot_path(self, dtbs: Path) -> None:
-        _make_kernel(dtbs, "6.0.0-old", in_uboot=True, in_overlays=False)
-        assert overlay_util.find_overlay_source() == dtbs / "6.0.0-old"
-
-    def test_prefers_newest_kernel(self, dtbs: Path) -> None:
-        _make_kernel(dtbs, "6.0.0-old", in_uboot=True, in_overlays=True)
-        _make_kernel(dtbs, "6.9.0-new", in_uboot=True, in_overlays=True)
-        assert overlay_util.find_overlay_source() == dtbs / "6.9.0-new"
-
-    def test_excludes_repair_destinations(self, dtbs: Path) -> None:
-        """A destination being repaired must not be chosen as its own source."""
-        _make_kernel(dtbs, "6.9.0-new", in_uboot=False, in_overlays=True)
-        _make_kernel(dtbs, "6.0.0-old", in_uboot=True, in_overlays=True)
-        src = overlay_util.find_overlay_source(
-            exclude=(dtbs / "6.9.0-new", dtbs / "6.9.0-new" / "overlays")
-        )
-        assert src == dtbs / "6.0.0-old"
-
-    def test_returns_none_when_no_overlays_anywhere(self, dtbs: Path) -> None:
-        _make_kernel(dtbs, "6.0.0-old", in_uboot=False, in_overlays=False)
-        assert overlay_util.find_overlay_source() is None
-
-    def test_returns_none_when_dtbs_root_absent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(overlay_util, "DTBS_ROOT", tmp_path / "nope")
-        assert overlay_util.find_overlay_source() is None
-
-
 class TestAppliedState:
     def test_no_chosen_overlays_node_means_not_applied(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -155,3 +121,42 @@ class TestOverlayDirsForKernel:
         uboot_dir, tooling_dir = overlay_util.overlay_dirs_for_kernel("6.1.0-test")
         assert uboot_dir == dtbs / "6.1.0-test"
         assert tooling_dir == dtbs / "6.1.0-test" / "overlays"
+
+
+class TestStaleOverlayCopies:
+    @pytest.fixture
+    def shipped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        directory = tmp_path / "shipped"
+        directory.mkdir()
+        (directory / OVERLAY_NAME).write_bytes(b"fixed")
+        monkeypatch.setattr(overlay_util, "SHIPPED_OVERLAYS_DIR", directory)
+        return directory
+
+    def test_nothing_shipped_is_nothing_stale(
+        self, dtbs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(overlay_util, "SHIPPED_OVERLAYS_DIR", tmp_path / "absent")
+        _make_kernel(dtbs, "6.1.0-test", in_uboot=True, in_overlays=True)
+        assert overlay_util.stale_overlay_copies() == []
+
+    def test_copies_that_differ_are_stale_in_every_kernel(
+        self, dtbs: Path, shipped: Path
+    ) -> None:
+        _make_kernel(dtbs, "6.1.0-old", in_uboot=True, in_overlays=True)
+        _make_kernel(dtbs, "6.2.0-new", in_uboot=True, in_overlays=False)
+        assert overlay_util.stale_overlay_copies() == [
+            dtbs / "6.1.0-old" / OVERLAY_NAME,
+            dtbs / "6.1.0-old" / "overlays" / OVERLAY_NAME,
+            dtbs / "6.2.0-new" / OVERLAY_NAME,
+        ]
+
+    def test_matching_copies_are_not_stale(self, dtbs: Path, shipped: Path) -> None:
+        _make_kernel(dtbs, "6.1.0-test", in_uboot=True, in_overlays=True)
+        for copy in (dtbs / "6.1.0-test").rglob(OVERLAY_NAME):
+            copy.write_bytes(b"fixed")
+        assert overlay_util.stale_overlay_copies() == []
+
+    def test_other_overlays_are_not_compared(self, dtbs: Path, shipped: Path) -> None:
+        _make_kernel(dtbs, "6.1.0-test", in_uboot=False, in_overlays=False)
+        (dtbs / "6.1.0-test" / "BONEIO-BLACK-PINS.dtbo").write_bytes(b"other")
+        assert overlay_util.stale_overlay_copies() == []

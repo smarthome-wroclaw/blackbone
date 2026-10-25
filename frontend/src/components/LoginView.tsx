@@ -27,6 +27,10 @@ export default function LoginView() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const { t } = useTranslation();
+  // /api/init answers before login. The name is in it (the serial is not),
+  // and with several controllers on the network it says which one this is.
+  const { data: initData } = useAppInit();
+  const deviceName = initData?.name || '';
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -36,8 +40,9 @@ export default function LoginView() {
     try {
       await login(username, password);
       navigate('/');
-    } catch (err) {
+    } catch {
       setError(t('login.invalid'));
+      setSubmitting(false);
     }
   };
 
@@ -58,38 +63,57 @@ export default function LoginView() {
           <div className="w-28">
             <Logo />
           </div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold">
-            <p>{t('login.title')}</p><p>boneIO Black</p>
-          </h2>
+          {/* Brand name, not copy — deliberately not translated. */}
+          <span className="mt-1 text-xs font-semibold tracking-[0.35em] uppercase opacity-60">
+            Black
+          </span>
+          <h1 className="mt-6 text-2xl font-bold">{t('login.heading')}</h1>
+          {deviceName && (
+            <p className="mt-1 text-base text-base-content/70 break-words">{deviceName}</p>
+          )}
         </div>
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          <div className="rounded-md shadow-xs -space-y-px">
-            <div className='my-4'>
-              <label htmlFor="username" className="sr-only">
-                {t('login.username')}
-              </label>
-              <input
-                id="username"
-                name="username"
-                type="text"
-                required
-                className="input  w-full"
-                placeholder={t('login.username')}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
+
+        <form className="mt-8 flex flex-col gap-5" onSubmit={handleSubmit}>
+          {signoutReason && !error && (
+            <div role="status" className="alert alert-warning alert-soft text-sm">
+              {t(`login.signout_${signoutReason}`)}
             </div>
-            <div className="mt-4">
-              <label htmlFor="password" className="sr-only">
-                {t('login.password')}
-              </label>
+          )}
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="username" className="text-sm font-medium">
+              {t('login.username')}
+            </label>
+            <input
+              id="username"
+              name="username"
+              type="text"
+              required
+              autoFocus={hasFinePointer()}
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className="input input-lg w-full text-base"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="password" className="text-sm font-medium">
+              {t('login.password')}
+            </label>
+            {/* daisyUI styles a wrapper holding an input as the input itself,
+                focus ring included, which leaves room for the eye button. */}
+            <div className="input input-lg w-full pr-1">
               <input
                 id="password"
                 name="password"
                 type={showPassword ? 'text' : 'password'}
                 required
-                className="input  w-full"
-                placeholder={t('login.password')}
+                autoComplete="current-password"
+                className="grow text-base"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
@@ -112,11 +136,10 @@ export default function LoginView() {
             </div>
           )}
 
-          <div>
-            <button type="submit" className="btn btn-primary w-full">
-              {t('login.submit')}
-            </button>
-          </div>
+          <button type="submit" className="btn btn-primary btn-lg w-full mt-1" disabled={submitting}>
+            {submitting && <span className="loading loading-spinner loading-sm" />}
+            {submitting ? t('login.signing_in') : t('login.submit')}
+          </button>
         </form>
       </main>
     </div>

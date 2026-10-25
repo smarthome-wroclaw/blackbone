@@ -94,7 +94,7 @@ except Exception:
 
 def _warn_if_setup_required(
     oled_device: Any | None, config_file: str, web_config: dict
-) -> None:
+) -> bool:
     """Say on the OLED that the device is waiting to be set up.
 
     A device with no administrator refuses its API from 1.6 on, and the owner
@@ -123,12 +123,10 @@ def _warn_if_setup_required(
         if bool(web_config.get("auth", {}).get("allow_anonymous")) or os.environ.get(
             "BONEIO_DEV"
         ):
-            return
+            return False
 
-        store = UserStore.for_config_file(config_file)
-        store.load()
-        if store.is_provisioned():
-            return
+        if _is_provisioned(config_file):
+            return False
 
         port = web_config.get("port", 8090)
         _LOGGER.warning(
@@ -140,8 +138,93 @@ def _warn_if_setup_required(
             config_file,
         )
         _draw_startup_status(oled_device, f"SETUP REQUIRED - open :{port}")
+        return True
     except Exception as err:  # noqa: BLE001 - never block boot on a notice
         _LOGGER.debug("Could not report setup state: %s", err)
+        return False
+
+
+def _is_provisioned(config_file: str) -> bool:
+    """Whether the device has an administrator account."""
+    from boneio.core.auth.store import UserStore
+
+    store = UserStore.for_config_file(config_file)
+    store.load()
+    return store.is_provisioned()
+
+
+def _show_setup_notice(manager: Any, config_file: str, port: int) -> None:
+    """Keep "Setup required" on the OLED until an administrator exists.
+
+    The boot-screen line from :func:`_warn_if_setup_required` is gone the
+    moment the configured screens start, and the display sleeps after its
+    screensaver timeout — so someone who walks up to the cabinet a quarter of
+    an hour after boot, or after an update from 1.5 left the device with no
+    account, sees a dark panel and an API that refuses them. The notice stays
+    first and awake, and goes by itself once an account is created.
+
+    Never raises — a missing display must not stop the device from booting.
+
+    Args:
+        manager: The running manager.
+        config_file: Path to the active config file.
+        port: Web panel port, for when the address is not known yet.
+    """
+    try:
+        oled = manager.display.get_oled()
+        if oled is None:
+            return
+
+        def lines() -> list[str]:
+            url = manager.config_helper.configuration_url
+            return ["Onboarding needed.", "Open in a browser:", url or f"http://<device-ip>:{port}"]
+
+        oled.show_notice(
+            "Setup required",
+            lines,
+            still_needed=lambda: not _is_provisioned(config_file),
+        )
+    except Exception as err:  # noqa: BLE001 - never block boot on a notice
+        _LOGGER.debug("Could not show the setup notice on the OLED: %s", err)
+
+# Written by the eMMC flasher on the SD card it boots in factory station mode.
+STATION_MARKER = "/var/lib/boneio/flasher-station"
+# The station's tester writes "passed" or "failed" here over SSH when it is done.
+STATION_RESULT = "/tmp/boneio-station-result"
+
+
+def _station_lines() -> list[str]:
+    try:
+        with open(STATION_RESULT) as f:
+            result = f.read().strip()
+    except OSError:
+        result = ""
+    if result == "passed":
+        return ["Test completed", "successfully"]
+    if result == "failed":
+        return ["Test FAILED", "see the station"]
+    return ["Flasher station", "mode active", "Waiting for tester"]
+
+
+def _show_station_notice(manager: Any) -> bool:
+    """On a factory station boot, keep the station's state on the OLED.
+
+    That system has no administrator and needs none, so the setup notice
+    would only mislead whoever stands at the station.
+
+    Returns:
+        Whether this is a station boot.
+    """
+    if not os.path.exists(STATION_MARKER):
+        return False
+    try:
+        oled = manager.display.get_oled()
+        if oled is not None:
+            oled.show_notice("Station mode", _station_lines, still_needed=lambda: True)
+    except Exception as err:  # noqa: BLE001 - never block boot on a notice
+        _LOGGER.debug("Could not show the station notice on the OLED: %s", err)
+    return True
+
 
 def _draw_startup_status(device: Any | None, message: str) -> None:
     """Draw a startup status message on the OLED display.
@@ -317,15 +400,8 @@ async def async_run(
             host=lox_config.get("host", "127.0.0.1"),
             send_port=lox_config.get("send_port", 4444),
             listen_port=lox_config.get("listen_port", 4445),
-            resync_interval=lox_config.get("resync_interval", 30),
         )
         message_bus.add_bus(lox_bus)
-        mappings = lox_config.get("mqtt_bridge")
-        if mappings:
-            from boneio.core.messaging.lox_mqtt_bridge import LoxMqttBridge
-
-            lox_mqtt_bridge = LoxMqttBridge(message_bus, lox_bus, mappings)
-            await lox_mqtt_bridge.start()
 
     # Lox UDP doesn't provide internal loopback routing like MQTT broker does.
     # Therefore, if MQTT is not enabled, we MUST use LocalMessageBus to route
@@ -378,7 +454,10 @@ async def async_run(
 
     # --- Start web server EARLY (before MQTT/discovery) for fast UI access ---
     _draw_startup_status(early_oled_device, "Starting web server...")
-    _warn_if_setup_required(early_oled_device, config_file, web_config)
+    if not _show_station_notice(manager) and _warn_if_setup_required(
+        early_oled_device, config_file, web_config
+    ):
+        _show_setup_notice(manager, config_file, web_config.get("port", 8090))
     if web_active:
         _LOGGER.info("Starting Web server.")
         # Lazy import WebServer only when needed (saves ~4s on startup)

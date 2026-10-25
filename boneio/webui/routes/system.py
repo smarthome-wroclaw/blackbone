@@ -17,16 +17,24 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from boneio.webui.sudo_rate_limiter import (
+    SUDO_AUTH_FAILED_RESPONSE,
+    SUDO_RATE_LIMITED_RESPONSE,
+    sudo_rate_limiter,
+)
+
 from boneio.core.config import ConfigHelper
 from boneio.core.config.secret_masking import collect_secrets, scrub_text
 from boneio.core.config.yaml_util import (
     load_config_from_file,
     update_yaml_field,
 )
+from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
 from boneio.core.utils import overlay as overlay_util
 from boneio.exceptions import ConfigurationException
 from boneio.models.logs import LogEntry, LogsResponse
 from boneio.version import __version__
+from boneio.webui.routes.onboarding import get_configured_before, pending_board_revision
 from boneio.webui.middleware.auth import (
     get_user_store,
     is_anonymous_allowed,
@@ -36,11 +44,6 @@ from boneio.webui.services.logs import (
     get_standalone_logs,
     get_systemd_logs,
     is_running_as_service,
-)
-from boneio.webui.sudo_rate_limiter import (
-    SUDO_AUTH_FAILED_RESPONSE,
-    SUDO_RATE_LIMITED_RESPONSE,
-    sudo_rate_limiter,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -388,16 +391,25 @@ async def get_init(
         # a password — and point at a config.yaml key that need not even exist,
         # since BONEIO_DEV opts in too.
         "allow_anonymous": is_anonymous_allowed() and not auth_required,
-        "pwa_name": config_helper.pwa_name,
-        "pwa_default": f"bIO {serial_suffix}",
+        # Both default to the serial's suffix, so both are withheld with it.
+        "pwa_name": config_helper.pwa_name if full_view else None,
+        "pwa_default": f"bIO {serial_suffix}" if full_view else None,
         "pwa_max_length": 12,
         "cloud": cloud_data,
         "has_boneio": has_boneio,
         "board_version": board_version,
         "has_irrigation": has_irrigation,
-        "features": {
-            "addons": os.environ.get("BONEIO_ADDONS", "").lower() in {"1", "true", "yes", "on"},
-        },
+        "has_templates": has_templates,
+        "has_location": has_location,
+        # The wizard reads this to drop the import and device-binding steps on
+        # a controller that already has a configuration. It lives here rather
+        # than only on /api/onboarding/status because the wizard never asks
+        # that endpoint — it renders from this payload, and for two releases
+        # the field was computed, returned somewhere nobody read, and
+        # defaulted to false at the only place that used it.
+        "configured_before": get_configured_before(),
+        # The card did not say which controller this is; the wizard asks.
+        "board_type_required": pending_board_revision() is not None,
     }
 
 @router.get("/name")
@@ -1467,74 +1479,9 @@ async def change_overlay(body: OverlayChangeRequest):
             "message": "Overlay already set to requested value",
         }
 
-    # Fix #3: backup uEnv.txt before modification (cp -n = no-clobber)
-    backup_path = uenv + ".boneio.bak"
-    backup_cmd = ["sudo", "-S", "cp", "-n", uenv, backup_path]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *backup_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(
-            proc.communicate(input=(body.password + "\n").encode()),
-            timeout=10,
-        )
-        if proc.returncode == 0:
-            _LOGGER.info("Backup created: %s", backup_path)
-        else:
-            _LOGGER.warning("Backup creation returned %d (may already exist)", proc.returncode)
-    except Exception as exc:
-        _LOGGER.warning("Could not create backup: %s (continuing anyway)", exc)
-
-    # Fix #4: sed skips commented lines using address /^[[:space:]]*#/!
-    # Only modifies uncommented uboot_overlay_addr lines containing BONEIO-BLACK-PINS
-    # Fix #7: handle both path-prefixed and bare overlay names in uEnv.txt
-    sed_pattern = (
-        r"/^[[:space:]]*#/!s|"
-        r"\(uboot_overlay_addr[0-9]*=\)\(.*\/\)\{0,1\}BONEIO-BLACK-PINS[^ ]*|"
-        rf"\1\2{overlay}|"
-    )
-
-    cmd = ["sudo", "-S", "sed", "-i", sed_pattern, uenv]
-    _LOGGER.info("Overlay change: running sed on %s (%s → %s)", uenv, previous, overlay)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(input=(body.password + "\n").encode()),
-            timeout=10,
-        )
-
-        stderr_str = stderr.decode().strip()
-
-        if proc.returncode != 0:
-            if "incorrect password" in stderr_str.lower() or "sorry" in stderr_str.lower():
-                sudo_rate_limiter.record_failure(client_ip)
-                return JSONResponse(
-                    status_code=403,
-                    content=SUDO_AUTH_FAILED_RESPONSE,
-                )
-            _LOGGER.error("sudo sed failed: %s", stderr_str)
-            return JSONResponse(
-                status_code=500,
-                content={"status": "error", "message": f"sudo sed failed: {stderr_str}"},
-            )
-
-    except TimeoutError:
-        _LOGGER.error("sudo sed timed out for overlay change on %s", uenv)
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "sudo command timed out"},
-        )
-    except Exception as exc:
-        _LOGGER.error("Failed to change overlay in %s: %s", uenv, exc)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, system_ops.overlay_set, overlay)
+    if not result.ok:
         return JSONResponse(
             status_code=500,
             content={
