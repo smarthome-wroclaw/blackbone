@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/smarthome-wroclaw/blackbone/compare/v0.2.0...v0.3.0) (2026-10-25)
+
+
+### Features
+
+* add configurable cover stop relay ([#130](https://github.com/smarthome-wroclaw/blackbone/issues/130)) ([14c7857](https://github.com/smarthome-wroclaw/blackbone/commit/14c7857d44a32af6d14a71227ad3d869a997528c))
+
+
+### Bug Fixes
+
+* resolve upstream sync conflicts in PR 98 ([a14d777](https://github.com/smarthome-wroclaw/blackbone/commit/a14d77773dd156ce73244e0565c8a551ae5e755a))
+
 ## [0.2.0](https://github.com/smarthome-wroclaw/blackbone/compare/v0.1.4...v0.2.0) (2026-09-22)
 
 
