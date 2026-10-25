@@ -629,7 +629,7 @@ def test_a_root_ca_directory_symlink_is_not_followed(helper, project, tmp_path, 
     b"root:x:0:0:root:/root:/bin/bash\n",
     CERT + b"-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n",
     CERT + b"A" * (64 * 1024),
-])
+], ids=["not-certificate", "contains-private-key", "oversized"])
 def test_a_root_ca_that_is_not_just_a_certificate_is_refused(
     helper, project, capsysbinary, content
 ):
