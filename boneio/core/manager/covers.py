@@ -158,6 +158,8 @@ class CoverManager:
                             _cover._name = _new_name
                         old_open = getattr(_cover._open_relay, "id", None)
                         old_close = getattr(_cover._close_relay, "id", None)
+                        old_stop = getattr(_cover._stop_relay, "id", None)
+                        old_stop_default_state = getattr(_cover, "_stop_relay_default_state", "off")
                         if old_open != open_relay_id or old_close != close_relay_id:
                             _LOGGER.info(
                                 "Cover %s relays changed: open %s->%s, close %s->%s",
@@ -170,6 +172,13 @@ class CoverManager:
                         _cover._open_relay = open_relay
                         _cover._close_relay = close_relay
                         _cover._stop_relay = stop_relay
+                        stop_default_state = str(_config.get("stop_relay_default_state", "off")).lower()
+                        _cover._stop_relay_default_state = stop_default_state if stop_default_state in ("on", "off") else "off"
+                        if stop_relay and (
+                            old_stop != getattr(stop_relay, "id", None)
+                            or old_stop_default_state != _cover._stop_relay_default_state
+                        ):
+                            _cover._apply_stop_relay_state(_cover._stop_relay_default_state, notify=True)
                         duration = _config.get("stop_relay_duration")
                         _cover._stop_relay_duration = ensure_time_period(duration) if duration is not None else None
                         _cover.update_config_times(_config)

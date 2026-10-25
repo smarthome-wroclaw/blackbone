@@ -1528,6 +1528,13 @@ cover:
         required: False
         meta:
           label: Optional relay pulsed when stopping cover movement.
+      stop_relay_default_state:
+        type: string
+        allowed: ['on', 'off']
+        required: False
+        default: 'off'
+        meta:
+          label: Resting state of the stop relay.
       stop_relay_duration:
         type:
           - string

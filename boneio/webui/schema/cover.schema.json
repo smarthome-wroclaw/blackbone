@@ -178,6 +178,16 @@
             "description": "Optional relay pulsed when stopping cover movement.",
             "title": "Stop relay"
           },
+          "stop_relay_default_state": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off"
+            ],
+            "default": "off",
+            "description": "Resting state of the stop relay. The relay is switched to the opposite state for the stop pulse.",
+            "title": "Stop relay resting state"
+          },
           "stop_relay_duration": {
             "type": [
               "number",
