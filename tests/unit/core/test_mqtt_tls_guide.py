@@ -77,7 +77,7 @@ def test_the_panel_shows_the_same_recipe():
     """The frontend builds the commands itself; the two must not drift."""
     source = (
         Path(__file__).resolve().parents[3]
-        / "frontend" / "src" / "components" / "UISettings" / "mqttTls" / "openSslGuide.ts"
+        / "frontend" / "src" / "components" / "UISettings" / "mqttTls" / "openSslGuideUtils.ts"
     ).read_text(encoding="utf-8")
     guide = "\n".join(_commands())
     for fragment in (

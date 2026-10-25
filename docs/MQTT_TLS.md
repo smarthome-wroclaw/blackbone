@@ -150,6 +150,8 @@ openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
   -days 3650 -subj "/CN=MQTT CA" \
   -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" \
+  -addext "authorityKeyIdentifier=keyid:always" \
   -keyout ca.key -out ca.crt
 ```
 
