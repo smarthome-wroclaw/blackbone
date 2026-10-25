@@ -230,13 +230,15 @@ class BaseCover(BaseCoverABC, BasicMqtt):
                 self.send_state(self.state, self.json_position)
         if stopped and self._stop_relay:
             self._stop_relay.turn_on()
-            with suppress(RuntimeError):
-                asyncio.create_task(self._stop_relay.async_send_state())
-            if self._stop_relay_duration:
-                await asyncio.sleep(self._stop_relay_duration.total_milliseconds / 1000)
+            try:
+                with suppress(RuntimeError):
+                    await self._stop_relay.async_send_state()
+                if self._stop_relay_duration:
+                    await asyncio.sleep(self._stop_relay_duration.total_milliseconds / 1000)
+            finally:
                 self._stop_relay.turn_off()
                 with suppress(RuntimeError):
-                    asyncio.create_task(self._stop_relay.async_send_state())
+                    await self._stop_relay.async_send_state()
 
     async def open(self) -> None:
         if self._position >= 100:
