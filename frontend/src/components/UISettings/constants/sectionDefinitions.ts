@@ -92,6 +92,24 @@ export const RESTART_SECTIONS: SectionDefinition[] = [
 ];
 
 /**
+ * Sections that act on the operating system rather than on config.yaml.
+ * These use the standalone section registry and take effect immediately.
+ */
+export const SYSTEM_SECTIONS: SectionDefinition[] = [
+  { name: 'hostname', icon: '🏷️', translationKey: 'sections.hostname' },
+  { name: 'timezone', icon: '🕓', translationKey: 'sections.timezone' },
+  { name: 'mosquitto', icon: '📨', translationKey: 'sections.mosquitto' },
+  { name: 'nodered_service', icon: '🔀', translationKey: 'sections.nodered_service' },
+  { name: 'update', icon: '⬆️', translationKey: 'sections.update' },
+  { name: 'backup', icon: '💾', translationKey: 'sections.backup' },
+  { name: 'migrations', icon: '🧬', translationKey: 'sections.migrations' },
+  { name: 'power', icon: '🔄', translationKey: 'sections.power' },
+  { name: 'device_tools', icon: '🔬', translationKey: 'sections.device_tools' },
+  { name: 'hardware_errors', icon: '⚠️', translationKey: 'sections.hardware_errors' },
+  { name: 'factory_reset', icon: '♻️', translationKey: 'sections.factory_reset' },
+];
+
+/**
  * All config sections combined.
  */
 export const ALL_SECTIONS: SectionDefinition[] = [
