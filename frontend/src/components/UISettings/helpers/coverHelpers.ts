@@ -12,6 +12,9 @@ export interface CoverFormData {
   platform?: 'time_based' | 'venetian';
   open_relay?: string;
   close_relay?: string;
+  stop_relay?: string;
+  stop_relay_default_state?: boolean;
+  stop_relay_duration?: string;
   open_time?: string;
   close_time?: string;
   tilt_duration?: string;
@@ -152,6 +155,12 @@ export function buildCoverPayload(data: CoverFormData): CoverFormData {
   if (result.platform !== 'venetian') {
     delete result.tilt_duration;
     delete result.tilt_restore_after_close;
+  }
+  if (!result.stop_relay) {
+    delete result.stop_relay_default_state;
+    delete result.stop_relay_duration;
+  } else if (!result.stop_relay_default_state) {
+    result.stop_relay_default_state = false;
   }
 
   // Ensure boolean defaults

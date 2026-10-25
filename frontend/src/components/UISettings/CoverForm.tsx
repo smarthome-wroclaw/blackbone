@@ -211,6 +211,51 @@ const CoverForm: React.FC<CoverFormProps> = ({
                   </label>
                 </div>
 
+                {/* Optional STOP relay: momentarily interrupts an external safety circuit. */}
+                <div className="form-control">
+                  <label className="label"><span className="label-text font-medium">{t('covers.stop_relay')}</span></label>
+                  <OutputSelectDropdown
+                    value={data.stop_relay || ''}
+                    onChange={(value: string) => updateField('stop_relay', value || undefined)}
+                    allOutputs={allOutputs.filter((output: OutputConfigEntry) => !!(output?.id || output?.boneio_output))}
+                    allAreas={allAreas}
+                    placeholder={t('covers.select_relay')}
+                    excludeIds={[data.open_relay, data.close_relay].filter(Boolean) as string[]}
+                  />
+                  <label className="label"><span className="label-text-alt text-info">{t('covers.stop_relay_hint')}</span></label>
+                </div>
+                {data.stop_relay && (
+                  <>
+                    <div className="form-control">
+                      <label className="label">
+                        <span className="label-text font-medium">{t('covers.stop_relay_default_state')}</span>
+                      </label>
+                      <Select
+                        value={data.stop_relay_default_state ? 'on' : 'off'}
+                        onValueChange={(value) => updateField('stop_relay_default_state', value === 'on')}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="on">{t('covers.relay_state_on')}</SelectItem>
+                          <SelectItem value="off">{t('covers.relay_state_off')}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <label className="label">
+                        <span className="label-text-alt text-info">{t('covers.stop_relay_default_state_hint')}</span>
+                      </label>
+                    </div>
+                    <SimpleTimePeriodInput
+                      value={data.stop_relay_duration || '500ms'}
+                      onChange={(value: string) => updateField('stop_relay_duration', value)}
+                      label={t('covers.stop_relay_duration')}
+                      required={false}
+                      minimum={10}
+                    />
+                  </>
+                )}
+
                 {/* Open Time */}
                 <SimpleTimePeriodInput
                   value={data.open_time || ''}

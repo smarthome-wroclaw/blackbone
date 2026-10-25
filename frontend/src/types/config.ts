@@ -266,6 +266,12 @@ export interface CoverEntity {
   open_relay?: string;
   /** Close relay/output pin */
   close_relay?: string;
+  /** Optional relay pulsed when STOP is requested during movement. */
+  stop_relay?: string;
+  /** Resting state restored after the STOP relay pulse. */
+  stop_relay_default_state?: boolean;
+  /** STOP relay pulse duration (defaults to 500ms). */
+  stop_relay_duration?: number | string;
   /** Open time in milliseconds */
   open_time?: number | string;
   /** Close time in milliseconds */

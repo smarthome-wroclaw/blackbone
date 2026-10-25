@@ -15,8 +15,10 @@ from boneio.const import (
     CLOSING,
     COVER,
     IDLE,
+    OFF,
     OPEN,
     OPENING,
+    ON,
 )
 from boneio.core.events import EventBus
 from boneio.core.messaging import BasicMqtt
@@ -168,6 +170,18 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         self._id = id
         self._open_relay = open_relay
         self._close_relay = close_relay
+        self._stop_relay = kwargs.pop("stop_relay", None)
+        self._stop_relay_duration = kwargs.pop("stop_relay_duration", None)
+        configured_stop_state = kwargs.pop("stop_relay_default_state", False)
+        self._stop_relay_default_state = (
+            ON.lower()
+            if configured_stop_state is True or str(configured_stop_state).lower() in (ON.lower(), "true", "1")
+            else OFF.lower()
+        )
+        if self._stop_relay and self._stop_relay_duration is None:
+            self._stop_relay_duration = TimePeriod(milliseconds=500)
+        if self._stop_relay:
+            self._apply_stop_relay_state(self._stop_relay_default_state, notify=True)
         self._state_save = state_save
         self._event_bus = event_bus
         self._open_time = open_time.total_milliseconds
@@ -207,12 +221,31 @@ class BaseCover(BaseCoverABC, BasicMqtt):
         """Stop on exit."""
         await self.stop(on_exit=True)
 
+    def _apply_stop_relay_state(self, state: str, notify: bool = False) -> None:
+        """Set the configured resting or temporary state without triggering momentary actions."""
+        if not self._stop_relay:
+            return
+        timestamp = time.time()
+        if state == ON.lower():
+            self._stop_relay.turn_on(timestamp=timestamp)
+        else:
+            self._stop_relay.turn_off(timestamp=timestamp)
+        if notify:
+            relay = self._stop_relay
+            try:
+                asyncio.get_running_loop().create_task(relay.async_send_state())
+            except RuntimeError:
+                with suppress(RuntimeError):
+                    self._loop.call_soon_threadsafe(lambda: asyncio.create_task(relay.async_send_state()))
+
     async def stop(self, on_exit=False) -> None:
+        stopped = False
         if self._movement_thread and self._movement_thread.is_alive():
             self._stop_event.set()
             self._movement_thread.join(timeout=0.5)
             self._open_relay.turn_off()
             self._close_relay.turn_off()
+            stopped = True
             # Send relay states to WebSocket (not MQTT - that's handled by output_type check)
             with suppress(RuntimeError):
                 asyncio.create_task(self._open_relay.async_send_state())
@@ -222,6 +255,19 @@ class BaseCover(BaseCoverABC, BasicMqtt):
             self._current_operation = IDLE
             if not on_exit:
                 self.send_state(self.state, self.json_position)
+        if stopped and self._stop_relay:
+            default_state = self._stop_relay_default_state
+            pulse_state = OFF.lower() if default_state == ON.lower() else ON.lower()
+            self._apply_stop_relay_state(pulse_state)
+            try:
+                with suppress(RuntimeError):
+                    await self._stop_relay.async_send_state()
+                if self._stop_relay_duration:
+                    await asyncio.sleep(self._stop_relay_duration.total_milliseconds / 1000)
+            finally:
+                self._apply_stop_relay_state(default_state)
+                with suppress(RuntimeError):
+                    await self._stop_relay.async_send_state()
 
     async def open(self) -> None:
         if self._position >= 100:

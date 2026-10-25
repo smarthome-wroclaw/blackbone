@@ -1523,6 +1523,28 @@ cover:
         required: True
         meta:
           label: ID of close relay of output.
+      stop_relay:
+        type: string
+        required: False
+        meta:
+          label: Optional relay pulsed when stopping cover movement.
+      stop_relay_default_state:
+        type: boolean
+        required: False
+        default: False
+        meta:
+          label: Whether the stop relay is on in its resting state.
+      stop_relay_duration:
+        type:
+          - string
+          - timeperiod
+        coerce:
+          - str
+          - positive_time_period
+        required: False
+        default: 500ms
+        meta:
+          label: Duration of stop relay pulse. Example 500ms.
       platform:
         type: string
         required: True
