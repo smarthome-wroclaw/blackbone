@@ -8,6 +8,7 @@ set -Eeuo pipefail
 readonly PACKAGE_NAME="blackbone"
 readonly LEGACY_PACKAGE_NAME="boneio"
 readonly SERVICE_NAME="boneio"
+readonly PACKAGE_SPEC="${BLACKBONE_PACKAGE_PATH:-${PACKAGE_NAME}}"
 readonly VERIFY_CODE='from importlib.metadata import version; from boneio.version import __version__; print(version("blackbone"), f"({__version__})")'
 
 info() {
@@ -222,7 +223,10 @@ readonly -a SUDO
 current_version="$($PYTHON_BIN -c 'from boneio.version import __version__; print(__version__)' 2>/dev/null || printf 'unknown')"
 info "Detected application directory: ${APP_DIR}"
 info "Current version: ${current_version}"
-info "Target PyPI package: ${PACKAGE_NAME}"
+if [[ -n "${BLACKBONE_PACKAGE_PATH:-}" && ! -r "${BLACKBONE_PACKAGE_PATH}" ]]; then
+  fail "BLACKBONE_PACKAGE_PATH is set, but the package file is not readable: ${BLACKBONE_PACKAGE_PATH}"
+fi
+info "Target package: ${PACKAGE_SPEC}"
 
 backup_config=false
 backup_app=false
@@ -248,8 +252,8 @@ if "$PIP_BIN" show "$LEGACY_PACKAGE_NAME" >/dev/null 2>&1; then
   "$PIP_BIN" uninstall --yes "$LEGACY_PACKAGE_NAME"
 fi
 
-info "Downloading and installing the latest ${PACKAGE_NAME} package from PyPI..."
-"$PIP_BIN" install --upgrade --force-reinstall "$PACKAGE_NAME"
+info "Installing ${PACKAGE_SPEC}..."
+"$PIP_BIN" install --upgrade --force-reinstall "$PACKAGE_SPEC"
 
 installed_version="$($PYTHON_BIN -c "$VERIFY_CODE")" \
   || fail "The package was installed, but application verification failed."

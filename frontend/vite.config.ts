@@ -98,6 +98,13 @@ export default defineConfig(({ mode }) => {
       // has to be a regular expression.
       alias: [
         { find: "@", replacement: path.resolve(import.meta.dirname, "./src") },
+        // monaco-worker-manager still uses Monaco's pre-0.56 deep import.
+        // Monaco 0.56's exports map rejects that spelling, so point it at the
+        // same worker file through the installed package path.
+        {
+          find: "monaco-editor/esm/vs/editor/editor.worker.js",
+          replacement: path.resolve(import.meta.dirname, "./node_modules/monaco-editor/esm/vs/editor/editor.worker.js"),
+        },
         // monaco-yaml's worker imports Prettier unconditionally for its
         // optional "format document" provider, which only registers when
         // configureMonacoYaml() is given format.enable. boneIO never enables

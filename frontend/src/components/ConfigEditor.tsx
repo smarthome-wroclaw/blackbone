@@ -8,7 +8,7 @@ import { FaChevronRight, FaChevronDown, FaRegFolder, FaRegFolderOpen, FaRegFile 
 import { GoSidebarExpand } from 'react-icons/go';
 import ConfigCheckModal from './ConfigCheckModal';
 import { configureMonacoYaml, MonacoYaml } from 'monaco-yaml';
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import editorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 import yamlWorker from '../yaml.worker.ts?worker';
 import { installMonacoWorkerCompat } from '../monaco-worker-compat';
 

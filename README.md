@@ -67,6 +67,9 @@ trust anchors as root over SSH. This one-time bootstrap lets the fork sign its o
 its private keys remain off the controller. The rollback directory printed by the installer
 contains the old trust files as well as any selected app/configuration backups.
 
+For a pre-release build, copy a wheel onto the controller and run the same installer with
+`BLACKBONE_PACKAGE_PATH=/path/to/blackbone.whl`; pip still resolves its dependencies normally.
+
 ### Controllers running a pre-0.1 BlackBone build
 
 BlackBone restarted its version numbering at `0.1.0`, below the `1.x` line inherited from boneIO.

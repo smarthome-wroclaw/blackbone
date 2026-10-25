@@ -8,7 +8,7 @@ import {
   clientCommands,
   splitNames,
   verifyCommand,
-} from './openSslGuide';
+} from './openSslGuideUtils';
 
 interface OpenSslGuideProps {
   /**

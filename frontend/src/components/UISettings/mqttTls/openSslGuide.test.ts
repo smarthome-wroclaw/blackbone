@@ -12,7 +12,7 @@ import {
   splitNames,
   subjectAltName,
   verifyCommand,
-} from './openSslGuide';
+} from './openSslGuideUtils';
 
 const haveOpenssl = spawnSync('openssl', ['version']).status === 0;
 const haveBash = spawnSync('bash', ['-c', 'true']).status === 0;

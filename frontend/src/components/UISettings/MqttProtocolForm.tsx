@@ -1,9 +1,9 @@
 import { useTranslation } from '@/hooks/useTranslation';
-import MqttForm from './MqttForm';
+import MqttForm, { type MqttFormData } from './MqttForm';
 
 interface Props {
-  data?: Record<string, unknown> & { enabled?: boolean };
-  onChange: (data: Record<string, unknown> & { enabled?: boolean }) => void;
+  data?: MqttFormData;
+  onChange: (data: MqttFormData) => void;
 }
 
 export default function MqttProtocolForm({ data, onChange }: Props) {
@@ -18,7 +18,7 @@ export default function MqttProtocolForm({ data, onChange }: Props) {
             type="checkbox"
             className="toggle toggle-primary"
             checked={enabled}
-            onChange={event => onChange({ ...data, enabled: event.target.checked })}
+          onChange={event => onChange({ ...(data ?? {}), enabled: event.target.checked })}
           />
           <div className="flex flex-col">
             <span className="label-text font-medium">{t('messaging.enable_mqtt')}</span>
@@ -27,7 +27,7 @@ export default function MqttProtocolForm({ data, onChange }: Props) {
         </label>
       </div>
       {enabled ? (
-        <MqttForm data={data} onChange={onChange} />
+        <MqttForm data={data ?? {}} onChange={onChange} />
       ) : (
         <div className="alert"><span>{t('messaging.mqtt_disabled_info')}</span></div>
       )}

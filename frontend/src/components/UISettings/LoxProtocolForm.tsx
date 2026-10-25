@@ -1,10 +1,10 @@
 import { useCallback } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
-import LoxForm, { type LoxConfigData } from './LoxForm';
+import LoxForm, { type LoxFormData } from './LoxForm';
 
 interface Props {
-  data?: LoxConfigData;
-  onChange: (data: LoxConfigData) => void;
+  data?: LoxFormData;
+  onChange: (data: LoxFormData) => void;
   onValidationChange?: (isValid: boolean) => void;
 }
 
