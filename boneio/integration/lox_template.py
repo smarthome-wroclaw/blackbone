@@ -20,6 +20,7 @@ import logging
 import socket
 import uuid
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 from boneio.const import NONE
@@ -275,6 +276,65 @@ def generate_lox_template(manager: Manager) -> str:
 
     # Combine both as separate XML documents
     return vout_str + "\n\n" + vin_str
+
+
+def _mqtt_device_prefix(topic: str) -> str:
+    """Return the parent path that identifies a concrete MQTT device."""
+    normalized = topic.strip().rstrip("/")
+    if not normalized:
+        return ""
+    parent, separator, _leaf = normalized.rpartition("/")
+    return parent if separator else normalized
+
+
+def _build_mqtt_virtual_inputs(
+    mappings: list[dict[str, Any]],
+    *,
+    boneio_ip: str,
+    send_port: int,
+) -> list[ET.Element]:
+    """Build one Lox VirtualInUdp device per MQTT parent topic."""
+    grouped: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for mapping in mappings:
+        topic = str(mapping.get("topic", "")).strip()
+        device_id = str(mapping.get("device_id", "")).strip()
+        prefix = _mqtt_device_prefix(topic)
+        if topic and device_id and prefix:
+            grouped[prefix].append({"topic": topic, "device_id": device_id})
+
+    devices: list[ET.Element] = []
+    for prefix in sorted(grouped):
+        device = ET.Element("VirtualInUdp")
+        device.set("Title", prefix)
+        device.set("Comment", f"MQTT device {prefix} via boneIO")
+        device.set("Address", "")
+        device.set("Port", str(send_port))
+        device.set("HintText", "")
+        info = ET.SubElement(device, "Info")
+        info.set("templateType", _TEMPLATE_TYPE_INPUT)
+        info.set("minVersion", _MIN_VERSION)
+
+        for mapping in sorted(grouped[prefix], key=lambda item: item["topic"]):
+            topic = mapping["topic"]
+            leaf = topic.removeprefix(f"{prefix}/") or topic
+            virtual_input = ET.SubElement(device, "VirtualInUdpCmd")
+            virtual_input.set("Title", leaf)
+            virtual_input.set("Comment", topic)
+            virtual_input.set("Address", boneio_ip)
+            virtual_input.set("Check", f"\\{mapping['device_id']}=\\v")
+            virtual_input.set("Signed", "true")
+            virtual_input.set("Analog", "true")
+            virtual_input.set("SourceValLow", "0")
+            virtual_input.set("DestValLow", "0")
+            virtual_input.set("SourceValHigh", "100")
+            virtual_input.set("DestValHigh", "100")
+            virtual_input.set("DefVal", "0")
+            virtual_input.set("MinVal", "-2147483648")
+            virtual_input.set("MaxVal", "2147483647")
+            virtual_input.set("Unit", "")
+            virtual_input.set("HintText", "")
+        devices.append(device)
+    return devices
 
 
 def _element_to_xml(element: ET.Element) -> str:
