@@ -4,40 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import glob
-import ipaddress
 import logging
 import os
 import re
 import shutil
-import socket
 import subprocess
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
-from boneio.core.atomic_file import write_atomically
-from boneio.core.config.yaml_util import (
-    load_config_from_file,
-    load_yaml_file,
-    normalize_board_name,
-    normalize_version,
-)
-from boneio.factory_config import OLDEST_REVISION, template_dir, type_folder
+from boneio.core.config.yaml_util import load_config_from_file, load_yaml_file, normalize_board_name
+from boneio.core.update_source import parse_pypi_package_versions, resolve_custom_update_target
 from boneio.version import __version__
-from boneio.webui.routes.system import get_config_helper
 from boneio.webui.services.logs import is_running_as_service
 
 if TYPE_CHECKING:
     from boneio.core.manager import Manager
 
-from boneio.core import system_ops
-
 _LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["update"])
+
+# GitHub repository whose releases drive the update checker.
+GITHUB_RELEASES_REPO = "smarthome-wroclaw/blackbone"
 
 # ── GitHub releases cache ────────────────────────────────────────────────
 # Unauthenticated GitHub API allows 60 req/h per IP.
@@ -48,28 +41,6 @@ _GITHUB_RELEASES_CACHE: dict = {
     "fetched_at": 0.0,
 }
 _GITHUB_RELEASES_TTL = 900  # 15 minutes in seconds
-# GitHub returns 30 releases per page by default, newest *created* first. Dev
-# prereleases outnumber stable ones, so a page that small eventually drops the
-# latest stable release and stable devices are never offered an update. 100 is
-# the API maximum.
-_GITHUB_RELEASES_PER_PAGE = 100
-_fetch_lock: asyncio.Lock | None = None
-_fetch_lock_loop: asyncio.AbstractEventLoop | None = None
-
-
-def _github_fetch_lock() -> asyncio.Lock:
-    """The lock that makes concurrent callers share one GitHub fetch.
-
-    Made for the running loop: a lock is bound to the loop it first waits on,
-    and the application has one, but anything that starts another (tests, the
-    recovery panel) would otherwise inherit a lock it cannot use.
-    """
-    global _fetch_lock, _fetch_lock_loop
-    loop = asyncio.get_running_loop()
-    if _fetch_lock is None or _fetch_lock_loop is not loop:
-        _fetch_lock = asyncio.Lock()
-        _fetch_lock_loop = loop
-    return _fetch_lock
 
 
 def _get_cached_releases() -> list | None:
@@ -82,7 +53,7 @@ def _get_cached_releases() -> list | None:
     return None
 
 
-def _fetch_github_releases(repo: str = "boneIO-eu/app_black") -> tuple[list | None, str | None]:
+def _fetch_github_releases(repo: str = GITHUB_RELEASES_REPO) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API with caching.
 
     BLOCKING. Do not call from a coroutine — use
@@ -104,9 +75,7 @@ def _fetch_github_releases(repo: str = "boneIO-eu/app_black") -> tuple[list | No
 
     api_url = f"https://api.github.com/repos/{repo}/releases"
     try:
-        response = requests.get(
-            api_url, params={"per_page": _GITHUB_RELEASES_PER_PAGE}, timeout=10
-        )
+        response = requests.get(api_url, timeout=10)
     except Exception as exc:
         return None, f"GitHub API request failed: {exc}"
 
@@ -124,7 +93,7 @@ def _fetch_github_releases(repo: str = "boneIO-eu/app_black") -> tuple[list | No
 
 
 async def _fetch_github_releases_async(
-    repo: str = "boneIO-eu/app_black",
+    repo: str = GITHUB_RELEASES_REPO,
 ) -> tuple[list | None, str | None]:
     """Fetch releases from GitHub API without stalling the event loop.
 
@@ -149,16 +118,7 @@ async def _fetch_github_releases_async(
         _LOGGER.debug("Using cached GitHub releases (%d entries)", len(cached))
         return cached, None
 
-    # One fetch at a time. The update page asks for the update check and the
-    # version list at once, and with the cache expired each went to GitHub on
-    # its own - two downloads of the same hundred releases, about 4 s apiece
-    # on a BeagleBone, that together outlasted the panel's timeout. The second
-    # caller waits for the first and is answered from the cache it fills.
-    async with _github_fetch_lock():
-        cached = _get_cached_releases()
-        if cached is not None:
-            return cached, None
-        return await asyncio.to_thread(_fetch_github_releases, repo)
+    return await asyncio.to_thread(_fetch_github_releases, repo)
 
 
 def get_manager():
@@ -207,10 +167,10 @@ def _update_progress(progress: int, step: str, log_msg: str | None = None):
 async def check_update_now(manager: Manager = Depends(get_manager)):
     """
     Force immediate update check and publish to MQTT.
-    
+
     This endpoint triggers the UpdateManager to check for updates immediately
     instead of waiting for the next periodic check.
-    
+
     Returns:
         Status response.
     """
@@ -239,12 +199,12 @@ async def check_update_now(manager: Manager = Depends(get_manager)):
 async def check_update():
     """
     Check if there is a newer version of BoneIO available from GitHub releases.
-    
+
     Returns:
         Update information including available versions.
     """
     current_version = __version__
-    
+
     try:
         from packaging import version
     except ImportError:
@@ -254,50 +214,48 @@ async def check_update():
             "message": "Package 'packaging' is not installed. Run: pip install packaging",
             "current_version": current_version
         }
-    
+
     try:
         releases, error = await _fetch_github_releases_async()
-        
+
         if error:
             return {
                 "status": "error",
                 "message": error,
                 "current_version": current_version
             }
-        
+
         if not releases:
             return {
                 "status": "error",
                 "message": "No releases found on GitHub",
                 "current_version": current_version
             }
-        
+
         available_versions = []
         # GitHub API does NOT guarantee ordering by version — must compare
         latest_stable = None
         latest_stable_parsed = None
         latest_prerelease = None
         latest_prerelease_parsed = None
-        
+
         for release in releases:
             tag = release['tag_name']
             ver_str = tag[1:] if tag.startswith('v') else tag
             is_prerelease = release.get('prerelease', False)
-            
+
             if not is_prerelease:
                 ver_lower = ver_str.lower()
                 is_prerelease = any(x in ver_lower for x in ['dev', 'alpha', 'beta', 'rc'])
-            
+
             ver_info = {
                 "version": ver_str,
                 "is_prerelease": is_prerelease,
                 "release_url": release['html_url'],
                 "published_at": release['published_at'],
             }
-            if tag.startswith("v0."):
-                continue
             available_versions.append(ver_info)
-            
+
             try:
                 parsed = version.parse(ver_str)
                 # Normalize to PEP 440 canonical form (e.g. "1.5.0dev20" → "1.5.0.dev20")
@@ -305,7 +263,7 @@ async def check_update():
                 ver_info["version"] = ver_str
             except Exception:
                 continue
-            
+
             if not is_prerelease:
                 if latest_stable_parsed is None or parsed > latest_stable_parsed:
                     latest_stable = ver_info
@@ -314,15 +272,15 @@ async def check_update():
                 if latest_prerelease_parsed is None or parsed > latest_prerelease_parsed:
                     latest_prerelease = ver_info
                     latest_prerelease_parsed = parsed
-        
+
         current_ver_lower = current_version.lower()
         current_is_prerelease = any(x in current_ver_lower for x in ['dev', 'alpha', 'beta', 'rc'])
-        
+
         is_update_available = False
         prerelease_update_available = False
         try:
             current_parsed = version.parse(current_version)
-            
+
             # Find the best recommended version:
             # - Always consider stable releases as potential updates
             # - For prerelease users: also consider newer prereleases
@@ -338,7 +296,7 @@ async def check_update():
                     candidates.append((pre_parsed, latest_prerelease))
                     if not current_is_prerelease:
                         prerelease_update_available = True
-            
+
             if candidates:
                 # Pick the newest candidate
                 candidates.sort(key=lambda x: x[0], reverse=True)
@@ -354,7 +312,7 @@ async def check_update():
             _LOGGER.warning("Error parsing versions for comparison: %s", str(e))
             is_update_available = False
             recommended = latest_stable or latest_prerelease or available_versions[0]
-        
+
         return {
             "status": "success",
             "current_version": current_version,
@@ -401,43 +359,104 @@ async def get_update_status():
 class UpdateRequest(BaseModel):
     """Request model for update endpoint."""
     version: str | None = None
+    source_type: Literal["package", "repository"] | None = None
+    source: str | None = None
+    source_version: str | None = None
+
+
+@router.get("/update/pypi-versions")
+async def get_pypi_versions(package: str):
+    """Return available versions for a validated PyPI package name."""
+    try:
+        target = resolve_custom_update_target("package", package)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+
+    try:
+        import requests
+
+        response = await asyncio.to_thread(
+            requests.get,
+            f"https://pypi.org/pypi/{quote(target.pip_argument, safe='')}/json",
+            timeout=10,
+        )
+    except Exception as exc:
+        _LOGGER.warning("Could not query PyPI package %s: %s", target.label, exc)
+        return {"status": "error", "message": "Could not connect to PyPI"}
+
+    if response.status_code == 404:
+        return {"status": "error", "message": "Package was not found on PyPI"}
+    if response.status_code != 200:
+        return {"status": "error", "message": f"PyPI returned HTTP {response.status_code}"}
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"status": "error", "message": "PyPI returned an invalid response"}
+    package_info = parse_pypi_package_versions(payload)
+    if not package_info["versions"]:
+        return {"status": "error", "message": "Package has no installable releases"}
+    return {"status": "success", **package_info}
 
 
 @router.post("/update")
 async def update_boneio(background_tasks: BackgroundTasks, request: UpdateRequest = UpdateRequest(), manager: Manager = Depends(get_manager)):
     """
     Update the BoneIO package with backup and restart the service.
-    
+
     Uses UpdateManager.perform_update as the single update algorithm,
     with an on_progress callback to track status for the WebUI.
-    
+
     Args:
         request: Optional version to install.
-        
+
     Returns:
         Status response.
     """
     global _update_status
-    
+
     if not is_running_as_service():
         return {"status": "error", "message": "Update is only available when running as a service"}
-    
+
     if _update_status["status"] == "running":
         return {"status": "error", "message": "Update already in progress"}
-    
+
     if not manager or not hasattr(manager, 'update_manager'):
         return {"status": "error", "message": "UpdateManager not available"}
-    
+
     if manager.update_manager.update_running:
         return {"status": "error", "message": "Update already in progress"}
-    
+
     target_version = request.version
+    install_target = None
+    target_label = None
+    if (
+        request.source_type is not None
+        or request.source is not None
+        or request.source_version is not None
+    ):
+        if request.source_type is None or request.source is None:
+            return {"status": "error", "message": "Source type and source are both required"}
+        if request.version is not None:
+            return {"status": "error", "message": "Version cannot be combined with a custom source"}
+        try:
+            custom_target = resolve_custom_update_target(
+                request.source_type,
+                request.source,
+                version=request.source_version,
+            )
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        if request.source_type == "package" and request.source_version is None:
+            return {"status": "error", "message": "Select a package version"}
+        install_target = custom_target.pip_argument
+        target_label = custom_target.label
     current_version = __version__
-    
+
     _reset_update_status()
     _update_status["status"] = "running"
     _update_status["old_version"] = current_version
-    _update_status["target_version"] = target_version
+    _update_status["target_version"] = target_label or target_version
 
     def _on_progress(progress: int, step: str, log_msg: str | None = None) -> None:
         """Callback from UpdateManager to track progress for WebUI."""
@@ -458,12 +477,14 @@ async def update_boneio(background_tasks: BackgroundTasks, request: UpdateReques
             await manager.update_manager.perform_update(
                 target_version=target_version,
                 on_progress=_on_progress,
+                install_target=install_target,
+                target_label=target_label,
             )
         except Exception as e:
             _update_status["status"] = "error"
             _update_status["error"] = str(e)
             _LOGGER.error("Error during update process: %s", e, exc_info=True)
-    
+
     background_tasks.add_task(_run_update)
     return {"status": "started", "message": "Update process started"}
 
@@ -477,39 +498,39 @@ class RollbackRequest(BaseModel):
 async def rollback_update(request: RollbackRequest, background_tasks: BackgroundTasks):
     """
     Rollback to a specific version using pip install.
-    
+
     Args:
         request: RollbackRequest with target version.
         background_tasks: FastAPI background tasks.
-    
+
     Returns:
         Status response.
     """
     if not is_running_as_service():
         return {"status": "error", "message": "Rollback is only available when running as a service"}
-    
+
     target_version = request.version
     current_version = __version__
-    
+
     if target_version == current_version:
         return {"status": "error", "message": f"Already running version {current_version}"}
-    
+
     possible_venv_paths = [
         os.path.expanduser("~/boneio/venv"),
         os.path.expanduser("~/venv"),
         "/opt/boneio/venv",
     ]
-    
+
     pip_path = None
     for path in possible_venv_paths:
         pip_candidate = os.path.join(path, "bin", "pip")
         if os.path.exists(pip_candidate):
             pip_path = pip_candidate
             break
-    
+
     if not pip_path:
         return {"status": "error", "message": "Virtual environment not found"}
-    
+
     async def rollback_and_restart():
         """Perform rollback in background and restart."""
         global _update_status
@@ -517,39 +538,39 @@ async def rollback_update(request: RollbackRequest, background_tasks: Background
         _update_status["status"] = "running"
         _update_status["old_version"] = current_version
         _update_status["target_version"] = target_version
-        
+
         try:
             _update_progress(10, f"Rolling back to version {target_version}...")
-            
+
             pip_cmd = [pip_path, "install"]
             # Add --pre flag for pre-release versions (dev, alpha, beta, rc)
             ver_lower = target_version.lower()
             if any(x in ver_lower for x in ['dev', 'alpha', 'beta', 'rc']):
                 pip_cmd.append("--pre")
-            pip_cmd.append(f"boneio=={target_version}")
-            
+            pip_cmd.append(f"blackbone=={target_version}")
+
             result = subprocess.run(
                 pip_cmd,
                 capture_output=True,
                 text=True,
                 timeout=300
             )
-            
+
             if result.returncode != 0:
                 _update_status["status"] = "error"
                 _update_status["error"] = f"pip install failed: {result.stderr}"
                 _update_progress(0, "Rollback failed", result.stderr)
                 return
-            
+
             _update_status["status"] = "success"
             _update_status["new_version"] = target_version
             _update_progress(100, "Rollback complete!", f"Rolled back from {current_version} to {target_version}. Restarting...")
-            
+
             _LOGGER.info(f"Rolled back from {current_version} to {target_version}")
-            
+
             await asyncio.sleep(2)
             os._exit(0)
-            
+
         except subprocess.TimeoutExpired:
             _update_status["status"] = "error"
             _update_status["error"] = "Rollback timed out"
@@ -559,7 +580,7 @@ async def rollback_update(request: RollbackRequest, background_tasks: Background
             _update_status["error"] = str(e)
             _update_progress(0, "Error", f"Unexpected error: {e}")
             _LOGGER.error(f"Error during rollback: {e}", exc_info=True)
-    
+
     background_tasks.add_task(rollback_and_restart)
     return {"status": "started", "message": f"Rollback to {target_version} started"}
 
@@ -568,17 +589,17 @@ async def rollback_update(request: RollbackRequest, background_tasks: Background
 async def list_available_versions():
     """
     List available BoneIO versions from GitHub releases.
-    
-    These versions can be used for rollback via pip install boneio=={version}.
-    
+
+    These versions can be used for rollback via pip install blackbone=={version}.
+
     Returns:
         List of available versions.
     """
     current_version = __version__
-    
+
     try:
         releases, error = await _fetch_github_releases_async()
-        
+
         if error:
             return {
                 "status": "error",
@@ -586,22 +607,22 @@ async def list_available_versions():
                 "current_version": current_version,
                 "versions": []
             }
-        
+
         if not releases:
             releases = []
         versions = []
-        
+
         for release in releases:
             tag = release.get("tag_name", "")
             # Remove 'v' prefix if present
             version = tag.lstrip("v") if tag.startswith("v") else tag
             if not version:
                 continue
-            
+
             # Skip versions starting with 0.x (Debian 10, incompatible)
             if version.startswith("0."):
                 continue
-                
+
             versions.append({
                 "version": version,
                 "name": release.get("name", version),
@@ -609,13 +630,13 @@ async def list_available_versions():
                 "prerelease": release.get("prerelease", False),
                 "is_current": version == current_version,
             })
-        
+
         return {
             "status": "success",
             "current_version": current_version,
             "versions": versions
         }
-        
+
     except Exception as e:
         _LOGGER.error(f"Error fetching versions: {e}")
         return {
@@ -720,62 +741,23 @@ HARDWARE_SENSORS = {
     "0.7": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": True, "power_sensor": "ina219", "modbus_uart": "uart4"},
     "0.8": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": True, "power_sensor": "ina219", "modbus_uart": "uart4"},
     "1.0": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": False, "power_sensor": "ina226", "modbus_uart": "uart4"},
-    # 1.1 differs from 1.0 only by the buzzer, which touches neither the
-    # sensors nor the UART.
-    "1.1": {"temp_sensor": "lm75", "temp_address": 0x48, "has_ina219": False, "power_sensor": "ina226", "modbus_uart": "uart4"},
 }
 
 # Available hardware versions
 HARDWARE_VERSIONS = list(HARDWARE_SENSORS.keys())
 
 
-def _current_board_version() -> str | None:
-    """The board revision config.yaml names, if it is one a reset knows."""
-    try:
-        config = load_yaml_file(os.path.expanduser("~/boneio/config.yaml")) or {}
-        version = normalize_version(config.get("boneio", {}).get("version"))
-    except Exception:  # noqa: BLE001 — no readable config, no current version
-        return None
-    return version if version in HARDWARE_VERSIONS else None
-
-
-def _current_device_type() -> str | None:
-    """The controller type config.yaml names, as the reset lists it (``32x10``)."""
-    try:
-        config = load_yaml_file(os.path.expanduser("~/boneio/config.yaml")) or {}
-        named = normalize_board_name(str(config.get("boneio", {}).get("device_type") or ""))
-    except Exception:  # noqa: BLE001 — no readable config, no current type
-        return None
-    if not named:
-        return None
-    # 32x10a, 32x10A and 32x10 are one controller; compare as the loader does.
-    return next((t for t in DEVICE_TYPES if normalize_board_name(t) == named), None)
-
-
-def _factory_templates(device_type: str, version: str):
-    """Where a reset copies from, and whether config.yaml still needs fitting.
-
-    Revisions with templates of their own are copied as they are; older ones
-    get the oldest templates, fitted by _adjust_config_for_hardware_version.
-    """
-    own = template_dir(device_type, version)
-    if own is not None:
-        return own, False
-    return template_dir(device_type, OLDEST_REVISION), True
-
-
 @router.get("/factory_reset/hardware_versions")
 async def get_hardware_versions():
     """
     Get available hardware versions for factory reset.
-    
+
     Returns:
         List of available hardware versions with sensor info.
     """
     return {
         "versions": HARDWARE_VERSIONS,
         "sensors": HARDWARE_SENSORS,
-        "current": _current_board_version(),
     }
 
 
@@ -783,18 +765,17 @@ async def get_hardware_versions():
 async def get_device_types():
     """
     Get available device types for factory reset.
-    
+
     Returns:
-        The device types, and the one this controller is configured as, which
-        the reset dialog offers first.
+        List of available device types.
     """
-    return {"device_types": DEVICE_TYPES, "current": _current_device_type()}
+    return {"device_types": DEVICE_TYPES}
 
 
 class FactoryResetRequest(BaseModel):
     """Request model for factory reset endpoint."""
     device_type: str
-    version: str | None = None  # Hardware version; None: the one config.yaml names
+    version: str = "0.8"  # Hardware version, default to latest
 
 
 class PartialResetRequest(BaseModel):
@@ -807,56 +788,58 @@ class PartialResetRequest(BaseModel):
 async def partial_factory_reset(request: PartialResetRequest):
     """
     Partially reset configuration by replacing only selected files.
-    
+
     This allows replacing output/event/binary_sensor/cover configs
     while keeping mqtt, config, adc and other files intact.
-    
+
     Args:
         request: Device type and list of file categories to replace
-        
+
     Returns:
         Status response with backup info and copied files.
     """
     device_type = request.device_type.lower()
     files_to_replace = request.files_to_replace
-    
+
     # Normalize device type
-    normalized_type = type_folder(normalize_board_name(device_type))
-    
+    normalized_type = normalize_board_name(device_type)
+
     if normalized_type not in DEVICE_TYPES:
         return {
             "status": "error",
             "message": f"Invalid device type: {device_type}. Available: {', '.join(DEVICE_TYPES)}"
         }
-    
+
     if not files_to_replace:
         return {
             "status": "error",
             "message": "No files selected for replacement"
         }
-    
-    templates, _ = _factory_templates(normalized_type, _current_board_version() or OLDEST_REVISION)
-    if templates is None:
+
+    # Find example config directory (relative to this file: boneio/webui/routes/update.py)
+    boneio_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    example_config_dir = os.path.join(boneio_path, "example_config", normalized_type)
+
+    if not os.path.isdir(example_config_dir):
         return {
             "status": "error",
-            "message": f"Factory config not found for device type: {device_type}"
+            "message": f"Example config not found for device type: {device_type}"
         }
-    example_config_dir = str(templates)
-    
+
     # User config directory
     config_dir = os.path.expanduser("~/boneio")
-    
+
     if not os.path.isdir(config_dir):
         os.makedirs(config_dir, exist_ok=True)
-    
+
     try:
         # Step 1: Create backup of files that will be replaced
         backup_dir = os.path.expanduser("~/boneio_config_backups")
         os.makedirs(backup_dir, exist_ok=True)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"partial_backup_{timestamp}")
-        
+
         # Map categories to file patterns
         category_patterns = {
             "output": ["output"],
@@ -864,7 +847,7 @@ async def partial_factory_reset(request: PartialResetRequest):
             "binary_sensor": ["binary_sensor"],
             "cover": ["cover"],
         }
-        
+
         # Find example files matching selected categories
         example_files_to_copy = []
         for filename in os.listdir(example_config_dir):
@@ -877,13 +860,13 @@ async def partial_factory_reset(request: PartialResetRequest):
                     if pattern in base_name:
                         example_files_to_copy.append(filename)
                         break
-        
+
         if not example_files_to_copy:
             return {
                 "status": "error",
                 "message": f"No matching example files found for categories: {files_to_replace}"
             }
-        
+
         # Find user files that match the patterns (to backup and remove)
         user_files_to_backup = []
         for filename in os.listdir(config_dir):
@@ -896,7 +879,7 @@ async def partial_factory_reset(request: PartialResetRequest):
                     if pattern in base_name:
                         user_files_to_backup.append(filename)
                         break
-        
+
         # Backup user files
         backed_up_files = []
         if user_files_to_backup:
@@ -906,12 +889,12 @@ async def partial_factory_reset(request: PartialResetRequest):
                 shutil.copy2(src, backup_path)
                 backed_up_files.append(filename)
                 _LOGGER.info(f"Backed up {filename}")
-        
+
         # Remove old user files
         for filename in user_files_to_backup:
             os.remove(os.path.join(config_dir, filename))
             _LOGGER.info(f"Removed old file: {filename}")
-        
+
         # Copy example files
         copied_files = []
         for filename in example_files_to_copy:
@@ -920,9 +903,9 @@ async def partial_factory_reset(request: PartialResetRequest):
             shutil.copy2(src, dest)
             copied_files.append(filename)
             _LOGGER.info(f"Copied {filename} to {config_dir}")
-        
+
         _LOGGER.info(f"Partial reset completed for device type: {device_type}, categories: {files_to_replace}")
-        
+
         return {
             "status": "success",
             "message": f"Configuration partially reset for {device_type}",
@@ -931,7 +914,7 @@ async def partial_factory_reset(request: PartialResetRequest):
             "copied_files": copied_files,
             "restart_required": True
         }
-        
+
     except Exception as e:
         _LOGGER.exception(f"Error during partial factory reset: {e}")
         return {
@@ -943,21 +926,21 @@ async def partial_factory_reset(request: PartialResetRequest):
 def _adjust_config_for_hardware_version(config_content: str, version: str, device_type: str) -> str:
     """
     Adjust config.yaml content for specific hardware version.
-    
+
     Different hardware versions have different sensors:
     - 0.2, 0.3: MCP9808 temperature sensor, no INA219, modbus on uart1
     - 0.4+: LM75 temperature sensor, INA219 power monitor, modbus on uart4
-    
+
     Args:
         config_content: Original config.yaml content
         version: Hardware version (e.g., "0.2", "0.8")
         device_type: Device type for naming
-        
+
     Returns:
         Modified config.yaml content
     """
     hw_config = HARDWARE_SENSORS.get(version, HARDWARE_SENSORS["0.8"])
-    
+
     # Replace temperature sensor section
     if hw_config["temp_sensor"] == "mcp9808":
         # Replace lm75 with mcp9808
@@ -966,7 +949,7 @@ def _adjust_config_for_hardware_version(config_content: str, version: str, devic
             f'mcp9808:\n  - id: Board temperature\n    address: 0x{hw_config["temp_address"]:02X}\n',
             config_content
         )
-    
+
     # Adjust power sensor section (ina219 / ina226)
     power_sensor = hw_config.get("power_sensor")
     if power_sensor == "ina226":
@@ -995,7 +978,7 @@ def _adjust_config_for_hardware_version(config_content: str, version: str, devic
             '',
             config_content
         )
-    
+
     # Update modbus uart if different from default (uart4)
     modbus_uart = hw_config.get("modbus_uart", "uart4")
     if modbus_uart != "uart4":
@@ -1004,146 +987,73 @@ def _adjust_config_for_hardware_version(config_content: str, version: str, devic
             f'\\1uart: {modbus_uart}',
             config_content
         )
-    
+
     # Update boneio version in config
     config_content = re.sub(
-        r'(^boneio:[ \t]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+)version:[^\n]*\n',
-        f'\\g<1>version: {version}\n',
-        config_content,
-        flags=re.MULTILINE,
+        r'(boneio:\s*\n\s*name:[^\n]*\n\s*)version:[^\n]*\n',
+        f'\\1version: {version}\n',
+        config_content
     )
-    
+
     return config_content
-
-
-
-
-_MQTT_PASSWORD_LINE = re.compile(r"^(?P<indent>\s*)password:\s*(?P<value>.*?)\s*$", re.MULTILINE)
-_SECRET_REF = re.compile(r"^!secret\s+(?P<name>\S+)$")
-
-
-def _current_mqtt_password(config_dir: str) -> str | None:
-    """The password boneIO signs in to its broker with, before a reset.
-
-    Read from mqtt.yaml, following ``!secret`` into secrets.yaml. None when
-    there is no mqtt.yaml, it has no password, or the secret cannot be found —
-    then the reset keeps the example's value, as it always did.
-    """
-    mqtt_path = os.path.join(config_dir, "mqtt.yaml")
-    try:
-        with open(mqtt_path, encoding="utf-8") as f:
-            match = _MQTT_PASSWORD_LINE.search(f.read())
-    except OSError:
-        return None
-    if not match:
-        return None
-    ref = _SECRET_REF.match(match.group("value"))
-    if ref is None:
-        import yaml
-
-        try:
-            value = yaml.safe_load(match.group("value"))
-        except yaml.YAMLError:
-            return None
-        return str(value) if value not in (None, "") else None
-    try:
-        secrets = load_yaml_file(os.path.join(config_dir, "secrets.yaml")) or {}
-    except Exception:  # noqa: BLE001 — an unreadable secrets.yaml is "unknown"
-        return None
-    found = secrets.get(ref.group("name")) if isinstance(secrets, dict) else None
-    return str(found) if found is not None else None
-
-
-def _keep_mqtt_password(config_dir: str, password: str) -> None:
-    """Point the reset mqtt.yaml at secrets.yaml, holding the device's password.
-
-    Images draw the broker's password per device at first boot. The example
-    configs say "boneio123", so a reset that copied them as they are left boneIO
-    unable to reach its own broker. The broker account is the device's, not
-    part of the board configuration a reset restores.
-    """
-    mqtt_path = os.path.join(config_dir, "mqtt.yaml")
-    with open(mqtt_path, encoding="utf-8") as f:
-        content = f.read()
-    new_content, count = _MQTT_PASSWORD_LINE.subn(
-        lambda m: f"{m.group('indent')}password: !secret mqtt_password", content, count=1
-    )
-    if not count:
-        return
-    secrets_path = os.path.join(config_dir, "secrets.yaml")
-    try:
-        with open(secrets_path, encoding="utf-8") as f:
-            secrets_text = f.read()
-    except FileNotFoundError:
-        secrets_text = ""
-    quoted = '"' + password.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    line = f"mqtt_password: {quoted}"
-    if re.search(r"^mqtt_password:.*$", secrets_text, re.MULTILINE):
-        secrets_text = re.sub(r"^mqtt_password:.*$", lambda _m: line, secrets_text, count=1, flags=re.MULTILINE)
-    else:
-        secrets_text = (secrets_text.rstrip("\n") + "\n" if secrets_text.strip() else "") + line + "\n"
-    write_atomically(secrets_path, secrets_text, mode=0o600)
-    write_atomically(mqtt_path, new_content)
-    _LOGGER.info("Factory reset kept this device's MQTT password (in secrets.yaml)")
 
 
 @router.post("/factory_reset")
 async def factory_reset(request: FactoryResetRequest):
     """
     Reset configuration to factory defaults for selected device type.
-    
+
     This will:
     1. Create a backup of current configuration
     2. Remove old configuration files
     3. Copy example config files for the selected device type
     4. Adjust config.yaml for hardware version (sensor compatibility)
     5. Restart the application
-    
+
     Args:
         request: Device type and hardware version to reset to
-        
+
     Returns:
         Status response.
     """
     device_type = request.device_type.lower()
-    version = request.version or _current_board_version() or OLDEST_REVISION
-    
+    version = request.version
+
     if device_type not in DEVICE_TYPES:
         return {
             "status": "error",
             "message": f"Invalid device type: {device_type}. Available: {', '.join(DEVICE_TYPES)}"
         }
-    
+
     if version not in HARDWARE_VERSIONS:
         return {
             "status": "error",
             "message": f"Invalid hardware version: {version}. Available: {', '.join(HARDWARE_VERSIONS)}"
         }
-    
-    templates, needs_fitting = _factory_templates(device_type, version)
-    if templates is None:
+
+    # Find example config directory (relative to this file: boneio/webui/routes/update.py)
+    boneio_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    example_config_dir = os.path.join(boneio_path, "example_config", device_type)
+
+    if not os.path.isdir(example_config_dir):
         return {
             "status": "error",
-            "message": f"Factory config not found for device type: {device_type}"
+            "message": f"Example config not found for device type: {device_type}"
         }
-    example_config_dir = str(templates)
-    
+
     # User config directory
     config_dir = os.path.expanduser("~/boneio")
-    
+
     if not os.path.isdir(config_dir):
         os.makedirs(config_dir, exist_ok=True)
-    
+
     try:
         # Step 1: Create backup of current configuration
         backup_dir = os.path.expanduser("~/boneio_config_backups")
         os.makedirs(backup_dir, exist_ok=True)
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"config_backup_{timestamp}")
-        
-        # The device's broker password, which the example configs do not have.
-        mqtt_password = _current_mqtt_password(config_dir)
 
         # Copy all yaml files from config_dir to backup
         yaml_files = glob.glob(os.path.join(config_dir, "*.yaml"))
@@ -1152,62 +1062,51 @@ async def factory_reset(request: FactoryResetRequest):
             for yaml_file in yaml_files:
                 shutil.copy2(yaml_file, backup_path)
             _LOGGER.info(f"Configuration backup created at {backup_path}")
-        
-        # Step 2: Remove old configuration files and state. Not secrets.yaml:
-        # it is where the owner keeps credentials, not board configuration,
-        # and it is in the backup either way.
+
+        # Step 2: Remove old configuration files and state
         for yaml_file in yaml_files:
-            if os.path.basename(yaml_file) in ("secrets.yaml", "secrets.yml"):
-                continue
             os.remove(yaml_file)
             _LOGGER.info(f"Removed old config file: {os.path.basename(yaml_file)}")
-        
+
         # Remove state.json to prevent old device states from interfering
         state_file = os.path.join(config_dir, "state.json")
         if os.path.exists(state_file):
             os.remove(state_file)
             _LOGGER.info("Removed old state.json file")
-        
+
         # Step 3: Copy example config files
         example_files = glob.glob(os.path.join(example_config_dir, "*.yaml"))
-        
+
         if not example_files:
             return {
                 "status": "error",
                 "message": f"No YAML files found in example config for {device_type}"
             }
-        
+
         copied_files = []
         adjusted_files = []
         for example_file in example_files:
             filename = os.path.basename(example_file)
             dest_path = os.path.join(config_dir, filename)
-            
-            # secrets.yaml stays: it holds this device's credentials, and the
-            # template's is the factory placeholder.
-            if filename == "secrets.yaml" and os.path.exists(dest_path):
-                continue
 
-            # An older revision's config.yaml: fit the sensors to it
-            if filename == "config.yaml" and needs_fitting:
+            # For config.yaml, adjust sensors based on hardware version
+            if filename == "config.yaml":
                 with open(example_file) as f:
                     content = f.read()
                 adjusted_content = _adjust_config_for_hardware_version(content, version, device_type)
-                write_atomically(dest_path, adjusted_content)
+                with open(dest_path, 'w') as f:
+                    f.write(adjusted_content)
                 if content != adjusted_content:
                     adjusted_files.append(filename)
                     _LOGGER.info(f"Adjusted {filename} for hardware version {version}")
             else:
                 shutil.copy2(example_file, dest_path)
-            
+
             copied_files.append(filename)
             _LOGGER.info(f"Copied {filename} to {config_dir}")
-        
-        if mqtt_password and os.path.exists(os.path.join(config_dir, "mqtt.yaml")):
-            _keep_mqtt_password(config_dir, mqtt_password)
 
         _LOGGER.info(f"Factory reset completed for device type: {device_type}, version: {version}")
-        
+
         return {
             "status": "success",
             "message": f"Configuration reset to {device_type} defaults (hardware v{version})",
@@ -1217,7 +1116,7 @@ async def factory_reset(request: FactoryResetRequest):
             "hardware_version": version,
             "restart_required": True
         }
-        
+
     except Exception as e:
         _LOGGER.exception(f"Error during factory reset: {e}")
         return {
@@ -1230,33 +1129,33 @@ async def factory_reset(request: FactoryResetRequest):
 async def list_config_backups():
     """
     List available configuration backups.
-    
+
     Returns:
         List of configuration backup information.
     """
     backup_dir = os.path.expanduser("~/boneio_config_backups")
-    
+
     if not os.path.isdir(backup_dir):
         return {"backups": []}
-    
+
     backups = sorted(glob.glob(os.path.join(backup_dir, "config_backup_*")), reverse=True)
-    
+
     backup_list = []
     for backup in backups:
         name = os.path.basename(backup)
         parts = name.split('_')
         timestamp = f"{parts[2]}_{parts[3]}" if len(parts) > 3 else "unknown"
-        
+
         # Count yaml files in backup
         yaml_count = len(glob.glob(os.path.join(backup, "*.yaml")))
-        
+
         backup_list.append({
             "path": backup,
             "name": name,
             "timestamp": timestamp,
             "file_count": yaml_count,
         })
-    
+
     return {"backups": backup_list}
 
 
@@ -1269,33 +1168,33 @@ class RestoreConfigBackupRequest(BaseModel):
 async def restore_config_backup(request: RestoreConfigBackupRequest):
     """
     Restore configuration from a backup.
-    
+
     Args:
         request: Path to backup to restore
-        
+
     Returns:
         Status response.
     """
     backup_path = request.backup_path
-    
+
     if not os.path.isdir(backup_path):
         return {
             "status": "error",
             "message": f"Backup not found: {backup_path}"
         }
-    
+
     config_dir = os.path.expanduser("~/boneio")
-    
+
     try:
         # Copy yaml files from backup to config dir
         yaml_files = glob.glob(os.path.join(backup_path, "*.yaml"))
-        
+
         if not yaml_files:
             return {
                 "status": "error",
                 "message": "No YAML files found in backup"
             }
-        
+
         restored_files = []
         for yaml_file in yaml_files:
             filename = os.path.basename(yaml_file)
@@ -1303,14 +1202,14 @@ async def restore_config_backup(request: RestoreConfigBackupRequest):
             shutil.copy2(yaml_file, dest_path)
             restored_files.append(filename)
             _LOGGER.info(f"Restored {filename} from backup")
-        
+
         return {
             "status": "success",
             "message": "Configuration restored from backup",
             "restored_files": restored_files,
             "restart_required": True
         }
-        
+
     except Exception as e:
         _LOGGER.exception(f"Error restoring backup: {e}")
         return {
@@ -1321,247 +1220,63 @@ async def restore_config_backup(request: RestoreConfigBackupRequest):
 
 @router.get("/mqtt/username")
 async def get_mqtt_username():
-    """Report which broker account the application actually connects with.
+    """
+    Get the MQTT username from configuration.
 
-    The panel shows the accounts of the broker installed on this controller,
-    and warns on the row belonging to boneIO itself — change that password
-    without updating the configuration and the device stops reporting.
-
-    Getting that row right means reading the running configuration, which this
-    did not do. It opened ``~/.boneio/mqtt.yaml``, a path that does not exist
-    on a real device, looked for a ``mqtt:`` key inside a file whose contents
-    *are* the mqtt section, and fell through both failures to a hard-coded
-    "boneio". The warning was therefore fixed to that row, and wrong for
-    anyone who had changed the username.
-
-    The answer also says whether the broker is the local one at all. Point
-    boneIO at the broker in Home Assistant and none of these accounts is the
-    one it uses, so the warning belongs on no row.
+    Returns the username that the application uses to connect to MQTT broker.
+    This is used to warn users when changing this password.
 
     Returns:
-        The configured username, the broker host, and whether that host is
-        this device.
+        Username from mqtt.username config or 'boneio' as default
     """
-    username = "boneio"
-    host = ""
-    known = False
-
     try:
-        config = get_config_helper().get_config()
-        mqtt = config.get("mqtt") if isinstance(config, dict) else None
-        if isinstance(mqtt, dict):
-            username = str(mqtt.get("username") or "boneio")
-            host = str(mqtt.get("host") or "")
-            known = True
-    except Exception as err:  # noqa: BLE001
-        # Never fail the panel over this: without it the passwords still
-        # change, only the warning is missing. But say so — silence here is
-        # what let the broken version survive.
-        _LOGGER.warning("Could not read the MQTT configuration: %s", err)
+        # Try to read from config directory
+        config_dir = os.path.expanduser("~/.boneio")
+        mqtt_config_path = os.path.join(config_dir, "mqtt.yaml")
 
-    return {
-        "status": "success",
-        "username": username,
-        "host": host,
-        "uses_local_broker": known and is_local_broker_host(host),
-        # False means the fields above are a guess, and the panel should not
-        # claim anything about which account belongs to the application.
-        "known": known,
-    }
+        if os.path.exists(mqtt_config_path):
+            config = load_config_from_file(mqtt_config_path)
+            if config:
+                mqtt_config = config.get("mqtt", {})
+                username = mqtt_config.get("username", "boneio")
+            else:
+                username = "boneio"
+        else:
+            # Fallback to default
+            username = "boneio"
+
+        return {
+            "status": "success",
+            "username": username
+        }
+    except Exception as e:
+        _LOGGER.exception(f"Failed to get MQTT username: {e}")
+        # Return default if config reading fails
+        return {
+            "status": "success",
+            "username": "boneio"
+        }
 
 
 class MqttPasswordChangeRequest(BaseModel):
     """Request model for MQTT password change."""
     username: str
     new_password: str
-    #: Also store the new password in this device's own configuration and
-    #: reconnect with it. Only meaningful for the account boneIO connects
-    #: with, on the broker installed here; see :func:`_adopt_broker_password`.
-    update_config: bool = False
-
-
-#: Hosts that mean "the broker installed on this controller". An empty host is
-#: the client library's own default, which is loopback. Kept in step with
-#: :func:`get_mqtt_username`, which shows the panel the same thing.
-LOCAL_BROKER_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", ""})
-
-
-def is_local_broker_host(host: str) -> bool:
-    """Whether ``mqtt.host`` names the broker installed on this controller.
-
-    Besides loopback, people often write the device's own address or name —
-    copied from the panel's address bar, or the same config.yaml used by Home
-    Assistant on another machine. Those reach the same broker, so the
-    password change has to reach the configuration as well.
-
-    No DNS lookup: a name counts only when it is this device's own hostname
-    (or that name with ``.local``). An address counts when it is loopback or
-    one this device can bind to, which is exactly "one of its own".
-
-    Args:
-        host: The configured broker host.
-
-    Returns:
-        True when the host is this device.
-    """
-    name = host.strip().lower().strip("[]")
-    if name in LOCAL_BROKER_HOSTS:
-        return True
-    own = socket.gethostname().lower()
-    if name in {own, f"{own}.local"}:
-        return True
-    try:
-        address = ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    if address.is_loopback:
-        return True
-    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-    try:
-        with socket.socket(family, socket.SOCK_DGRAM) as probe:
-            probe.bind((name, 0))
-    except OSError:
-        return False
-    return True
-
-
-def _store_broker_password(config_file: str, password: str) -> str:
-    """Write a new broker password where this device reads its own from.
-
-    BLOCKING: file I/O, called through an executor.
-
-    Args:
-        config_file: Path to config.yaml.
-        password: The password just set in the broker.
-
-    Returns:
-        ``"secret"`` when the password ended up in secrets.yaml — always
-        when the field already defers there (``password: !secret mqtt_pass``
-        usually means config.yaml is somewhere the password must not be), and
-        otherwise after moving a plain value there. ``"config"`` only when
-        that move failed.
-
-    Raises:
-        YamlPatchError: If the mqtt section cannot be edited, such as an
-            include naming a file that is not there.
-    """
-    from boneio.core.config.write_lock import CONFIG_WRITE_LOCK
-    from boneio.core.config.yaml_patch import (
-        YamlPatchError,
-        move_to_secret,
-        resolve_field,
-        secret_reference,
-        set_scalar,
-        set_secret,
-    )
-
-    field = ("mqtt", "password")
-    # Held across the lookup too: where the password goes is decided from the
-    # file as it is now, and a save in between could change that.
-    with CONFIG_WRITE_LOCK:
-        # Every shipped controller has `mqtt: !include mqtt.yaml`, and that
-        # file is the per-device one the broker password exists in. A
-        # secrets.yaml beside it is the one BoneIOLoader would read from there.
-        target, _ = resolve_field(config_file, field)
-        reference = secret_reference(config_file, field)
-        if reference is not None:
-            set_secret(target.parent / "secrets.yaml", reference, password)
-            return "secret"
-        set_scalar(config_file, field, password)
-        # And out of the config again: a password written there travels with
-        # every backup, which is what migration v7 moved it away from.
-        try:
-            if move_to_secret(config_file, field, "mqtt_password"):
-                return "secret"
-        except YamlPatchError as err:
-            _LOGGER.warning("New broker password left in the config: %s", err)
-        return "config"
-
-
-async def _adopt_broker_password(manager: Manager, username: str, password: str) -> dict:
-    """Have boneIO start using a password that was just set in the broker.
-
-    The account boneIO connects with is also the account whose password the
-    panel changes, so changing it there and nowhere else takes the device off
-    its own broker until somebody edits the configuration and restarts. That
-    gap is what testers reported as the password change not working.
-
-    Only for the broker installed on this controller: with ``mqtt.host``
-    pointing somewhere else, the accounts in the local password file are not
-    the ones boneIO uses, and its configuration must not be touched.
-
-    Args:
-        manager: The running manager.
-        username: The account whose password was changed.
-        password: The new password.
-
-    Returns:
-        What happened, as ``{"status": ..., "reason": ...}``. Never raises: the
-        broker password is already changed by the time this runs, and reporting
-        that as a failure would be worse than saying what was skipped.
-    """
-    try:
-        config = manager.config_helper.get_config() or {}
-        mqtt = config.get("mqtt")
-        if not isinstance(mqtt, dict):
-            return {"status": "skipped", "reason": "no_mqtt_section"}
-
-        host = str(mqtt.get("host") or "")
-        if not is_local_broker_host(host):
-            return {"status": "skipped", "reason": "remote_broker"}
-
-        configured = str(mqtt.get("username") or "boneio")
-        if configured != username:
-            return {"status": "skipped", "reason": "other_account"}
-
-        config_file = manager.config_helper.config_file_path
-        if not config_file:
-            return {"status": "skipped", "reason": "no_config_file"}
-
-        loop = asyncio.get_running_loop()
-        written = await loop.run_in_executor(
-            None, _store_broker_password, config_file, password
-        )
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("Could not store the new broker password: %s", err)
-        return {"status": "error", "reason": str(err)}
-
-    try:
-        result = await manager.reload_config(reload_sections=["mqtt"])
-    except Exception as err:  # noqa: BLE001
-        # Written but not adopted: a restart will pick it up, and saying so
-        # is better than claiming either success or failure.
-        _LOGGER.warning("Stored the new broker password but could not reconnect: %s", err)
-        return {"status": "written", "reason": str(err), "written_to": written}
-
-    if result.get("status") != "success":
-        _LOGGER.warning("Broker reconnect did not complete: %s", result)
-        return {"status": "written", "reason": "reload_failed", "written_to": written}
-
-    return {"status": "adopted", "written_to": written}
 
 
 @router.post("/mqtt/change_password")
-async def change_mqtt_password(
-    request: MqttPasswordChangeRequest,
-    manager: Manager = Depends(get_manager),
-):
+async def change_mqtt_password(request: MqttPasswordChangeRequest):
     """
     Change MQTT password for specified user.
 
     Supports three users: boneio, homeassistant, mqtt
     Uses mosquitto_passwd to update password file.
 
-    With ``update_config`` set, and only for the account boneIO itself
-    connects with on the broker installed here, the new password is also
-    stored in this device's configuration and adopted without a restart.
-
     WARNING: This endpoint sends passwords in plain text over HTTP.
     Use only over HTTPS or in a trusted local network.
 
     Args:
-        request: Username, new password, and whether to adopt it here.
-        manager: The running manager.
+        request: Username and new password
 
     Returns:
         Status response with success/error message
@@ -1573,52 +1288,59 @@ async def change_mqtt_password(
             "status": "error",
             "message": f"Invalid username. Allowed users: {', '.join(allowed_users)}"
         }
-    
+
     # Validate password
     if len(request.new_password) < 8:
         return {
             "status": "error",
             "message": "Password must be at least 8 characters long"
         }
-    
+
+    # Path to mosquitto password file
+    passwd_file = "/etc/mosquitto/passwd"
+
     try:
-        # Through the helper, which reads the password from stdin: passed as an
-        # argument (`mosquitto_passwd -b`) it would sit in the process table,
-        # readable by every local account, for as long as the command ran. The
-        # helper also puts the file back to root:mosquitto 0640 afterwards,
-        # which mosquitto_passwd does not.
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, system_ops.mqtt_password, request.username, request.new_password
+        # Check if mosquitto_passwd command exists
+        check_cmd = subprocess.run(
+            ["which", "mosquitto_passwd"],
+            capture_output=True,
+            text=True
         )
-        if not result.ok:
-            message = result.stderr.strip() or "Failed to change the password"
-            _LOGGER.error(
-                "Failed to change MQTT password for %s: %s", request.username, message
+
+        if check_cmd.returncode != 0:
+            return {
+                "status": "error",
+                "message": "mosquitto_passwd command not found. Is Mosquitto installed?"
+            }
+
+        # Use mosquitto_passwd to update password
+        # -b = batch mode (password on command line)
+        result = subprocess.run(
+            ["sudo", "mosquitto_passwd", "-b", passwd_file, request.username, request.new_password],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        _LOGGER.info(f"MQTT password changed for user: {request.username}")
+
+        # Reload mosquitto to apply changes
+        try:
+            reload_result = subprocess.run(
+                ["sudo", "systemctl", "reload", "mosquitto"],
+                capture_output=True,
+                text=True,
+                check=True
             )
-            return {"status": "error", "message": message}
+            _LOGGER.info("Mosquitto service reloaded successfully")
+        except subprocess.CalledProcessError as e:
+            _LOGGER.warning(f"Failed to reload mosquitto service: {e.stderr}")
+            # Don't fail the whole operation if reload fails
 
-        _LOGGER.info("MQTT password changed for user: %s", request.username)
-
-        reload_result = await loop.run_in_executor(None, system_ops.mqtt_reload)
-        if not reload_result.ok:
-            # Not fatal: the password is written, the broker just has not been
-            # told yet, and it will pick it up on its next start.
-            _LOGGER.warning(
-                "Could not reload mosquitto: %s", reload_result.stderr.strip()
-            )
-
-        response = {
+        return {
             "status": "success",
             "message": f"Password changed successfully for user: {request.username}"
         }
-
-        if request.update_config:
-            response["config"] = await _adopt_broker_password(
-                manager, request.username, request.new_password
-            )
-
-        return response
 
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr if e.stderr else str(e)

@@ -20,7 +20,7 @@ from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketState
 
 from boneio.components.input import RemoteInputBase
-from boneio.const import COVER, NONE
+from boneio.const import COVER, NONE, VIRTUAL_SWITCH
 from boneio.core.auth.migration import migrate_legacy_auth
 from boneio.core.auth.store import UserStore, UserStoreError
 from boneio.core.config import ConfigHelper
@@ -48,6 +48,7 @@ from boneio.models.events import (
 from boneio.models.state import ModbusDeviceState
 from boneio.version import __version__
 from boneio.webui.security_headers import apply_security_headers
+from boneio.webui import security_events
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
     is_auth_required,
@@ -861,6 +862,7 @@ def init_app(
     allow_anonymous = bool(auth_config.get("allow_anonymous")) or dev_mode
     set_allow_anonymous(allow_anonymous)
 
+    # An incomplete_legacy_auth block still indicates an upgraded device.
     auth_required = is_auth_required()
 
     # Set app state

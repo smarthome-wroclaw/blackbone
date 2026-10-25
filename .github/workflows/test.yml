@@ -27,7 +27,7 @@ jobs:
         run: |
           pip install pytest pytest-asyncio pytest-cov
           pip install -e . --no-deps || true
-          pip install aiomqtt pydantic PyYAML colorlog Cerberus psutil aiohttp smbus2 pymodbus PyJWT gpiod w1thermsensor
+          pip install aiomqtt pydantic PyYAML colorlog Cerberus psutil aiohttp smbus2 pymodbus PyJWT gpiod w1thermsensor hypercorn requests
           pip install fastapi==0.141.1 "python-jose[cryptography]==3.5.0" python-multipart httpx
 
       - name: Run unit tests
