@@ -50,6 +50,7 @@ from boneio.version import __version__
 from boneio.webui.security_headers import apply_security_headers
 from boneio.webui import security_events
 from boneio.webui.middleware.csrf import CSRFMiddleware
+from boneio.webui.middleware.proxy import TrustedProxyMiddleware
 from boneio.webui.middleware.auth import (
     AuthMiddleware,
     is_auth_required,
