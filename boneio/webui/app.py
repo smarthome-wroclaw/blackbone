@@ -20,7 +20,7 @@ from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketState
 
 from boneio.components.input import RemoteInputBase
-from boneio.const import COVER, NONE, VIRTUAL_SWITCH
+from boneio.const import COVER, NONE, VIRTUAL_SWITCH, VIRTUAL_SWITCH
 from boneio.core.auth.migration import migrate_legacy_auth
 from boneio.core.auth.store import UserStore, UserStoreError
 from boneio.core.config import ConfigHelper
@@ -90,6 +90,7 @@ from boneio.webui.routes import (
 from boneio.webui.routes import config as config_module
 from boneio.webui.routes import onboarding as onboarding_module
 from boneio.webui.routes import system as system_module
+from boneio.webui.routes import security as security_module
 
 # Import WebSocket manager
 from boneio.webui.websocket_manager import WebSocketManager
