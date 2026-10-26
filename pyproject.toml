@@ -22,7 +22,7 @@ dependencies = [
     "fastapi==0.143.2",
     "pydantic==2.14.1",
     "hypercorn==0.18.0",
-    "websockets==17.2",
+    "websockets==17.3",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.32",
     "qrcode==8.2",
