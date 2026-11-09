@@ -24,7 +24,7 @@ dependencies = [
     "hypercorn==0.18.0",
     "websockets==17.2",
     "python-jose[cryptography]==3.5.0",
-    "python-multipart==0.0.32",
+    "python-multipart==0.0.33",
     "qrcode==8.2",
     "gpiod==2.5.0",
     "requests==2.34.2",
