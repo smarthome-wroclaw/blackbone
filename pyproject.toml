@@ -26,7 +26,7 @@ dependencies = [
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.32",
     "qrcode==8.2",
-    "gpiod==2.5.0",
+    "gpiod==2.6.0",
     "requests==2.34.2",
     "packaging==26.3",
     "aioesphomeapi>=45.0.0",
